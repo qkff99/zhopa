@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+	<string id="ui_mcm_dynamic_alife_title">
+		<text>R.E.Z.N.Y.A. (Ruthless Ecological Zone Network)</text>
+	</string>
+    <string id="ui_mcm_menu_dynamic_alife">
+		<text>R.E.Z.N.Y.A.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_enabled">
+		<text>Включить R.E.Z.N.Y.A.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_enabled_desc">
+		<text>Разрешает оффлайн-отрядам путешествовать между смартами для симуляции бурной жизни в Зоне.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_show_hud">
+		<text>Показать Дебаг-Худ (REZNYA HUD)</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_debug_log">
+		<text>Включить Логи</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_cycle_time">
+		<text>Цикл обновления (мин)</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_cycle_time_desc">
+		<text>Как часто (в игровых минутах) происходит расчет перемещения отрядов.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_squad_chance">
+		<text>Вероятность перемещения (%)</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_squad_chance_desc">
+		<text>Шанс того, что случайный отряд захочет сменить лагерь в этом цикле.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_max_dist">
+		<text>Макс. дистанция (м)</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_target_pop">
+		<text>Целевая популяция</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_target_pop_desc">
+		<text>Желаемое кол-во сталкеров на активной локации (или на всех, если включен Глобальный режим).</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_global_sim">
+		<text>Глобальная Резня (All Levels)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_global_sim_desc">
+		<text>Если включено, скрипт будет управлять популяцией (спавн/удаление) на ВСЕХ локациях, а не только там, где игрок. Внимание: Нагрузка на CPU.</text>
+	</string>
+	<string id="ui_mcm_dynamic_alife_exclude_communities">
+		<text>Исключенные фракции</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_reincarnation_chance">
+		<text>Шанс возрождения группировки (%)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_reincarnation_chance_desc">
+		<text>Вероятность (вес) того, что система попытается возродить отсутствующую на локации группировку при спавне.</text>
+	</string>
+    
+    <!-- Monsters -->
+    <string id="ui_mcm_dynamic_alife_separator_monsters">
+		<text>Поведение Мутантов</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_monster_hunting_chance">
+		<text>Шанс охоты мутантов (%)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_monster_hunting_chance_desc">
+		<text>Шанс того, что мутанты будут целенаправленно охотиться на сталкеров вместо патрулирования территории.</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_mutant_looting_enabled">
+		<text>Перетаскивание тел (Experim.)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_mutant_looting_enabled_desc">
+		<text>Мутанты будут утаскивать тела жертв в свое логово после победы.</text>
+	</string>
+    
+    <!-- Combat -->
+    <string id="ui_mcm_dynamic_alife_separator_combat">
+		<text>Боевые взаимодействия</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_squad_help_enabled">
+		<text>Сигналы о помощи</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_squad_help_enabled_desc">
+		<text>Позволяет отрядам запрашивать поддержку при нападении, привлекая союзников или третью сторону.</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_squad_help_chance">
+		<text>Шанс сигнала (%)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_squad_help_radius">
+		<text>Радиус сигнала (м)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_squad_help_cooldown">
+		<text>Перезарядка (сек)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_trader_protection_enabled">
+		<text>Защита Торговцев (Beta)</text>
+	</string>
+    <string id="ui_mcm_dynamic_alife_trader_protection_enabled_desc">
+		<text>НПС будут игнорировать торговцев в бою, а отряды перестанут занимать базы торговцев.</text>
+	</string>
+<string id="ui_mcm_dynamic_alife_artifact_weight">
+    <text>Интерес к Аномалиям</text>
+</string>
+<string id="ui_mcm_dynamic_alife_trade_weight">
+    <text>Интерес к Торговле</text>
+</string>
+</string_table>

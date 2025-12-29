@@ -1,0 +1,186 @@
+-- R.E.Z.N.Y.A Help
+-- Squad Help Signal System (Refactored)
+-- Triggers when a squad is attacked, requesting backup from nearby allies or enemies of the aggressor.
+
+local help_cooldowns = {} -- {squad_id = last_help_time}
+local update_cooldowns = {} -- {npc_id = last_check_time}
+
+function on_game_start()
+    RegisterScriptCallback("npc_on_hit_callback", on_npc_hit)
+    RegisterScriptCallback("npc_on_update", on_npc_update)
+end
+
+function on_npc_hit(npc, amount, local_direction, who, bone_index)
+    local status, err = pcall(function()
+        if not (npc and who and amount > 0) then return end
+        
+        -- Check Enabled via Settings
+        if reznya_settings and not reznya_settings.get_config("squad_help_enabled", true) then return end
+        
+        if not npc:alive() then return end
+        
+        local squad = get_object_squad(npc)
+        if not squad or not reznya_utils.is_valid_object(squad, "actor") then return end
+        
+        -- Cooldown
+        local cooldown = 300
+        if reznya_settings then cooldown = reznya_settings.get_config("squad_help_cooldown", 300) end
+        
+        local t = game.get_game_time()
+        if help_cooldowns[squad.id] and t:diffSec(help_cooldowns[squad.id]) < cooldown then
+            return
+        end
+        
+        -- Chance Logic
+        local chance = 50
+        if reznya_settings then chance = reznya_settings.get_config("squad_help_chance", 50) end
+        
+        local smart_id = squad.smart_id
+        if smart_id and smart_id ~= 65535 then
+            local sb = sim_board.get_sim_board()
+            local smart_info = sb and sb.smarts and sb.smarts[smart_id]
+            if smart_info then
+                -- Base or Trader Presence = 100% chance
+                if smart_info.props and smart_info.props["base"] and smart_info.props["base"] > 0 then
+                    chance = 100
+                elseif smart_info.squads then
+                    for sq_id in pairs(smart_info.squads) do
+                        local resident = alife_object(sq_id)
+                        if resident and (resident:clsid() == clsid.trader or resident:clsid() == clsid.script_trader or resident.player_id == "trader") then
+                            chance = 100
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        
+        if math.random(100) > chance then
+            help_cooldowns[squad.id] = t
+            return
+        end
+        
+        send_help_signal(squad, npc, who)
+        help_cooldowns[squad.id] = t
+    end)
+    
+    if not status then
+         if reznya_utils then reznya_utils.log_msg("HELP", "ERR", "Crash in on_npc_hit: %s", err) end
+    end
+end
+
+function on_npc_update(npc)
+    local id = npc:id()
+    local tg = time_global()
+    
+    if update_cooldowns[id] and tg < update_cooldowns[id] + 5000 then return end
+    update_cooldowns[id] = tg
+    
+    if not npc:alive() then return end
+    
+    -- Check if wounded via engine/scripts
+    if xr_wounded and xr_wounded.is_wounded(npc) then
+        local status, err = pcall(function()
+            local squad = get_object_squad(npc)
+            if not squad or not reznya_utils.is_valid_object(squad, "actor") then return end
+            
+            -- Use existing cooldown for signals
+            local cooldown = 300
+            if reznya_settings then cooldown = reznya_settings.get_config("squad_help_cooldown", 300) end
+            
+            local t = game.get_game_time()
+            if help_cooldowns[squad.id] and t:diffSec(help_cooldowns[squad.id]) < cooldown then
+                return
+            end
+            
+            -- For wounded NPCs, use a generic "bleeding" or "wounded" attacker entry
+            -- Passing db.actor as placeholder if no best enemy exists, but lead to help signal anyway
+            local attacker = npc:best_enemy() or db.actor
+            
+            reznya_utils.log_msg("HELP", "INFO", "NPC %s is wounded, calling for help.", npc:name())
+            send_help_signal(squad, npc, attacker)
+            help_cooldowns[squad.id] = t
+        end)
+        
+        if not status then
+            if reznya_utils then reznya_utils.log_msg("HELP", "ERR", "Crash in on_npc_update: %s", err) end
+        end
+    end
+end
+
+function send_help_signal(victim_squad, victim_npc, attacker)
+    local attacker_comm = "monster"
+    if attacker and attacker.character_community then 
+        attacker_comm = attacker:character_community() 
+    end
+    
+    -- Try to get squad comm
+    local attacker_squad = get_object_squad(attacker)
+    if attacker_squad then 
+        attacker_comm = attacker_squad.player_id 
+    end
+
+    local victim_comm = victim_squad.player_id
+    local victim_pos = victim_squad.position
+
+    local best_helper = nil
+    local search_radius = 300
+    if reznya_settings then search_radius = reznya_settings.get_config("squad_help_radius", 300) end
+    
+    local min_dist = search_radius + 10 -- Start with max
+    
+    local sb = sim_board.get_sim_board()
+    if not sb or not sb.squads then return end
+
+    -- Search for helpers
+    for id, helper_squad in pairs(sb.squads) do
+        local helper = alife_object(id)
+        if helper and helper.id ~= victim_squad.id and helper.online and reznya_utils.is_valid_object(helper, "actor") then
+            
+            local dist = helper.position:distance_to(victim_pos)
+            if dist < min_dist then
+                local helper_comm = helper.player_id
+                
+                -- Logic: Helper must be Ally of Victim OR (Enemy of Attacker AND Neutral/Friend to Victim)
+                local is_ally = game_relations.is_factions_friends(helper_comm, victim_comm)
+                local is_attacker_enemy = game_relations.is_factions_enemies(helper_comm, attacker_comm)
+                local is_victim_neutral = not game_relations.is_factions_enemies(helper_comm, victim_comm)
+                
+                if is_ally or (is_attacker_enemy and is_victim_neutral) then
+                    best_helper = helper
+                    min_dist = dist
+                end
+            end
+        end
+    end
+    
+    if best_helper then
+        -- Determine Target
+        local target_id = victim_squad.smart_id
+        if not target_id or target_id == 65535 then
+            target_id = victim_squad.current_target_id
+        end
+        
+        -- Override helper target
+        if target_id and target_id ~= 65535 then
+            local sim = alife()
+            local target_smart = sim:object(target_id)
+            if target_smart then
+                 best_helper.scripted_target = target_smart:name()
+                 
+                 local msg = string.format("SOS! %s (by %s) -> %s responding.", victim_squad:name(), attacker:name(), best_helper:name())
+                 
+                 if reznya_utils then
+                     reznya_utils.log_msg("HELP", "INFO", msg)
+                 else
+                     printf("~ [Squad Help]: %s", msg)
+                 end
+            end
+        end
+    end
+end
+
+function init()
+    -- Manager calls this
+    if reznya_utils then reznya_utils.log_msg("HELP", "INFO", "Module Initialized.") end
+end

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+    <!-- R.E.Z.N.Y.A General -->
+    <string id="ui_mcm_reznya_title">
+        <text>Dynamic A-Life: Reznya Update</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_title">
+        <text>Dynamic A-Life: Reznya Update</text>
+    </string>
+
+    <!-- Main -->
+    <string id="ui_mcm_dynamic_alife_enabled">
+        <text>Enable Dynamic A-Life</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_show_hud">
+        <text>Show Debug HUD</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_aggressive_bootstrap">
+        <text>Aggressive Spawn (Bootstrap)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_debug_log">
+        <text>Enable Debug Logs</text>
+    </string>
+
+    <!-- Simulation -->
+    <string id="ui_mcm_dynamic_alife_squad_chance">
+        <text>Active Squad Chance (%)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_max_dist">
+        <text>Execution Distance (m)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_artifact_weight">
+        <text>Artifact Priority (Weight)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_trade_weight">
+        <text>Trade Priority (Weight)</text>
+    </string>
+    
+    <!-- Relations -->
+    <string id="ui_mcm_dynamic_alife_relations_header">
+        <text>Relations &amp; Truces</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_relations_enabled">
+        <text>Enable Dynamic Relations</text>
+    </string>
+    
+    <!-- Populations -->
+    <string id="ui_mcm_dynamic_alife_target_pop_stalkers">
+        <text>Target Stalker Population</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_target_pop_monsters">
+        <text>Target Mutant Population</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_exclude_communities">
+        <text>Excluded Factions</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_reincarnation_chance">
+        <text>Respawn Chance (%)</text>
+    </string>
+    
+    <!-- Monsters -->
+    <string id="ui_mcm_dynamic_alife_separator_monsters">
+        <text>Mutant Behavior</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_monster_hunting_chance">
+        <text>Mutant Hunting Chance (%)</text>
+    </string>
+
+    
+    <!-- Combat -->
+    <string id="ui_mcm_dynamic_alife_separator_combat">
+        <text>Combat &amp; Help</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_squad_help_enabled">
+        <text>Enable SOS Signals</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_squad_help_chance">
+        <text>SOS Signal Chance (%)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_squad_help_radius">
+        <text>SOS Broadcast Radius (m)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_squad_help_cooldown">
+        <text>SOS Cooldown (sec)</text>
+    </string>
+    <string id="ui_mcm_dynamic_alife_trader_protection_enabled">
+        <text>Enable Base/Trader Protection</text>
+    </string>
+
+</string_table>

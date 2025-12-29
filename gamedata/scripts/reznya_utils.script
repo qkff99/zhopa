@@ -1,0 +1,182 @@
+-- R.E.Z.N.Y.A. Utils
+-- Common utility functions and wrappers.
+
+-- Logging Wrappers (Delegates to reznya_logger)
+function log_msg(module, level, fmt, ...)
+    -- level: "INFO", "WARN", "ERR" -> convert to symbols
+    local sym = "~"
+    if level == "WARN" then sym = "!"
+    elseif level == "ERR" then sym = "*" end
+    
+    if reznya_logger then
+        reznya_logger.reznya_log(module, sym, fmt, ...)
+    end
+end
+
+-- Common Helpers from dynamic_alife.script
+
+function is_night()
+    local hours = level.get_time_hours()
+    return (hours >= 21 or hours < 6)
+end
+
+function get_current_night_id()
+    local hours = level.get_time_hours()
+    local days = level.get_time_days() 
+    if hours >= 21 then return days 
+    elseif hours < 6 then return days - 1 end
+    return nil 
+end
+
+function safe_get_level_id(gvid)
+    if not gvid then return nil end
+    local gg = game_graph()
+    local vertex = gg:vertex(gvid)
+    if not vertex then return nil end
+    return vertex:level_id()
+end
+
+function level_name_to_id(name)
+    if not name then return nil end
+    local sim = alife()
+    if not sim then return nil end
+    local actor = sim:actor()
+    if actor then
+        local lid = safe_get_level_id(actor.m_game_vertex_id)
+        if lid and sim:level_name(lid) == name then return lid end
+    end
+    return nil
+end
+
+-- Persistence Helpers
+function save_var(obj, name, val)
+    if utils_obj then
+        utils_obj.save_var(obj, name, val)
+    end
+end
+
+function load_var(obj, name, def)
+    if utils_obj then
+        return utils_obj.load_var(obj, name, def)
+    end
+    return def
+end
+
+-- Human/Trader Identification
+function is_trader_or_similar(obj)
+    if not obj then return false end
+    local cls = obj:clsid()
+    if cls == clsid.script_trader or cls == clsid.trader then return true end
+    if obj.community and obj:community() == "trader" then return true end
+    -- Check for character_community if it's a stalker
+    if IsStalker(obj) then
+        local status, res = pcall(function() return obj:character_community() == "trader" end)
+        if status and res then return true end
+    end
+    return false
+end
+
+-- Squad Identification
+function is_monster_squad(squad)
+    if not squad then return false end
+    local pid = squad.player_id
+    if pid == "monster" then return true end
+    if string.find(pid, "monster") or string.find(pid, "zombied") then return true end
+    return false
+end
+
+-- =======================================================================
+-- TIME UTILITIES
+-- =======================================================================
+
+function is_night()
+    local hours = level.get_time_hours()
+    return (hours >= 21 or hours < 6)
+end
+
+function get_current_night_id()
+    local hours = level.get_time_hours()
+    local days = level.get_time_days()
+    if hours >= 21 then return days
+    elseif hours < 6 then return days - 1 end
+    return nil
+end
+
+-- =======================================================================
+-- THE BRAIN (Central Validator)
+-- =======================================================================
+local PROTECTED_SQUAD_STRINGS = {}
+local PROTECTED_LOADED = false
+
+local function load_protected_strings()
+    if PROTECTED_LOADED then return end
+    
+    local ini = ini_file("plugins\\reznya_blacklist.ltx")
+    if not ini then
+        log_msg("UTILS", "WARN", "Failed to load reznya_blacklist.ltx for protected strings!")
+        return
+    end
+    
+    -- Read from [sections] - these are protected squad sections
+    if ini:section_exist("sections") then
+        local n = ini:line_count("sections")
+        for i=0, n-1 do
+            local result, str, _ = ini:r_line("sections", i, "", "")
+            if str then table.insert(PROTECTED_SQUAD_STRINGS, str) end
+        end
+    end
+    
+    PROTECTED_LOADED = true
+    log_msg("UTILS", "INFO", "Loaded %d protected strings from blacklist", #PROTECTED_SQUAD_STRINGS)
+end
+
+--- Centralized check to see if an object (NPC, Squad, Item) is valid for Reznya scripts.
+--- @param obj number|table The object or its ID.
+--- @param mode string "actor" (NPC performing logic) or "target" (the one being acted upon).
+--- @return boolean True if valid.
+function is_valid_object(obj, mode)
+    if not obj then return false end
+    
+    -- Lazy load protected strings
+    if not PROTECTED_LOADED then load_protected_strings() end
+    
+    local id = type(obj) == "number" and obj or obj.id
+    if not id then return false end
+    
+    -- 1. STORY ID CHECK (Mandatory)
+    -- If a target has a story ID, it MUST be ignored by all modules.
+    if get_object_story_id(id) then 
+        return false 
+    end
+    
+    local se_obj = alife_object(id)
+    if not se_obj then return false end
+    
+    -- 2. SECTION BLACKLIST
+    local sec = se_obj:section_name()
+    for _, str in ipairs(PROTECTED_SQUAD_STRINGS) do
+        if string.find(sec, str) then return false end
+    end
+    
+    -- 3. COMPANIONS
+    if axr_companions and axr_companions.companion_squads then
+        if axr_companions.companion_squads[id] then return false end
+        -- Also check if it's a member of a companion squad
+        local commander_id = se_obj.commander_id and se_obj:commander_id()
+        if commander_id and axr_companions.companion_squads[commander_id] then return false end
+    end
+    
+    -- 4. COMMUNITY / TRADER CHECK
+    if is_trader_or_similar(se_obj) then return false end
+    
+    -- 5. CONFIG EXCLUSIONS (for actors)
+    if mode == "actor" and reznya_settings then
+        local settings = reznya_settings.get_settings_table()
+        local comm = se_obj.player_id
+        if comm and settings.exclude_communities and settings.exclude_communities[comm] then 
+            return false 
+        end
+    end
+
+    return true
+end

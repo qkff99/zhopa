@@ -1,0 +1,104 @@
+-- R.E.Z.N.Y.A. Settings
+-- Central configuration storage.
+
+local settings = {
+	enabled = true,
+	squad_chance = 50, -- Percent
+	max_dist = 10000, -- Meters
+    target_pop_stalkers = 40, 
+    target_pop_monsters = 20, 
+	exclude_communities = {
+		["monolith"] = false,
+		["zombied"] = true,
+		["trader"] = true,
+		["army"] = false,
+		["arena_enemy"] = true,
+		["monster"] = false
+	},
+    show_hud = false, -- Default, will be loaded from MCM
+    block_night_respawns = true, -- Block vanilla respawns at night
+    file_logging = true, -- Write logs to dynamic_alife.log
+    exclude_sections = { -- Blacklisted squad sections (exact match)
+        ["mechan_squad"] = true,
+        ["barman_squad"] = true,
+        ["trader_squad"] = true
+    },
+    
+    -- New Settings
+    global_sim = false,
+    reincarnation_chance = 50,
+    aggressive_bootstrap = false,
+    monster_hunting_chance = 50,
+    idle_time = 60,
+    artifact_weight = 50,
+    trade_weight = 50,
+
+    
+    -- Combat / Relations
+    squad_help_enabled = true,
+    squad_help_chance = 50,
+    squad_help_radius = 150,
+    squad_help_cooldown = 60,
+    trader_protection_enabled = true
+}
+
+-- Accessor
+function get_config(key, def)
+    if settings[key] ~= nil then return settings[key] end
+    return def
+end
+
+function load_settings() -- MCM Settings
+	if ui_mcm then
+		settings.enabled = ui_mcm.get("dynamic_alife/enabled")
+		settings.squad_chance = ui_mcm.get("dynamic_alife/squad_chance")
+        settings.max_dist = ui_mcm.get("dynamic_alife/max_dist")
+		settings.artifact_weight = ui_mcm.get("dynamic_alife/artifact_weight")
+		settings.trade_weight = ui_mcm.get("dynamic_alife/trade_weight")
+        settings.aggressive_bootstrap = ui_mcm.get("dynamic_alife/aggressive_bootstrap")
+		settings.target_pop_stalkers = ui_mcm.get("dynamic_alife/target_pop_stalkers")
+		settings.target_pop_monsters = ui_mcm.get("dynamic_alife/target_pop_monsters")
+		settings.debug_log = ui_mcm.get("dynamic_alife/debug_log")
+		settings.show_hud = ui_mcm.get("dynamic_alife/show_hud")
+		settings.global_sim = ui_mcm.get("dynamic_alife/global_sim")
+		settings.exclude_communities = ui_mcm.get("dynamic_alife/exclude_communities")
+		settings.reincarnation_chance = ui_mcm.get("dynamic_alife/reincarnation_chance")
+		settings.monster_hunting_chance = ui_mcm.get("dynamic_alife/monster_hunting_chance")
+
+        
+        -- Combat
+        settings.squad_help_enabled = ui_mcm.get("dynamic_alife/squad_help_enabled")
+        settings.squad_help_chance = ui_mcm.get("dynamic_alife/squad_help_chance")
+        settings.squad_help_radius = ui_mcm.get("dynamic_alife/squad_help_radius")
+        settings.squad_help_cooldown = ui_mcm.get("dynamic_alife/squad_help_cooldown")
+        settings.trader_protection_enabled = ui_mcm.get("dynamic_alife/trader_protection_enabled")
+        
+        -- Relations
+        settings.relations_enabled = ui_mcm.get("dynamic_alife/relations_enabled")
+
+		local excl_str = ui_mcm.get("dynamic_alife/exclude_communities")
+		if excl_str then
+			settings.exclude_communities = {}
+			for comm in string.gmatch(excl_str, "([^,]+)") do
+				local clean = string.gsub(comm, "^%s*(.-)%s*$", "%1")
+				if clean ~= "" then settings.exclude_communities[clean] = true end
+			end
+		end
+	end
+    
+    reznya_msg("OPTIONS", "INFO", "Settings loaded. Enabled: %s", tostring(settings.enabled))
+end
+
+function get_settings_table()
+    return settings
+end
+
+-- internal shortcut
+function reznya_msg(...)
+    if reznya_utils then reznya_utils.log_msg(...) end
+end
+
+function on_game_start()
+    RegisterScriptCallback("on_option_change", load_settings)
+    load_settings()
+end

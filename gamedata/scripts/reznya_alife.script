@@ -1,0 +1,973 @@
+-- R.E.Z.N.Y.A. A-Life Logic
+-- Core simulation logic.
+
+local SIMBOARD = nil
+
+-- CACHE
+local level_smarts_map = {} -- [lid] = {smart1, smart2}
+local valid_smarts_cache = {} -- [smart_id] = true
+local validated_faction_spawns = {}
+
+-- STATE
+local CYCLE_DATA = {
+    start_time_real = 0,
+    processed_squads = 0,
+    squad_iterator_key = nil,
+    stats = {} -- For HUD
+}
+local LAST_GAME_MIN = nil
+
+local travel_start_times = {} -- [squad_id] = game_time
+local squad_arrival_times = {} -- [squad_id] = game_time
+local failed_targets = {} -- [squad_id] = { [smart_name] = failed_time }
+local squad_states = {} -- [id] = "panic" | "despawn"
+
+local night_simulation_squads = {}
+local FACTION_POOLS = {} -- [faction] = {list of sections}
+local IGNORE_AI_COMMUNITIES = {}
+local EXCLUDE_LEVELS = {}
+local SPAWN_BLACKLIST = {} -- [faction or section] = { [level] = true }
+local SAFE_REINCARNATION = {} -- Loaded from config
+
+-- No hardcoded constants - all logic is dynamic
+
+-- UTILS
+local function pr(...)
+    reznya_utils.log_msg("ALIFE", "INFO", ...)
+end
+
+-- =======================================================================
+-- LOGIC HELPERS
+-- =======================================================================
+-- =======================================================================
+-- LOGIC HELPERS
+-- =======================================================================
+
+
+local function is_valid_squad(squad)
+    -- Use the Central Brain for safety checks
+	if not reznya_utils.is_valid_object(squad, "actor") then return false end
+    
+    -- ALIFE Specific: Don't hijack squads that already have a scripted target
+	if squad.scripted_target then return false end
+	return true
+end
+
+
+
+local function is_smart_safe_for_community(smart, comm)
+    if not smart or not comm then return false end
+    local info = SIMBOARD.smarts[smart.id]
+    if info and info.squads then
+        for sq_id in pairs(info.squads) do
+            local squad = alife_object(sq_id)
+            if squad then
+                local squad_comm = squad.player_id
+                if relation_registry and relation_registry.community_relation then
+                    local rel = relation_registry.community_relation(comm, squad_comm)
+                    if rel and rel < 0 then return false end
+                end
+            end
+        end
+    end
+    if smart.player_id and smart.player_id ~= comm then
+        if relation_registry and relation_registry.community_relation then
+            local rel = relation_registry.community_relation(comm, smart.player_id)
+            if rel and rel < 0 then return false end
+        end
+    end
+    return true
+end
+
+local function is_safe_smart(smart)
+    if not smart then return false end
+    local is_prop_safe = false
+    if smart.props then
+         if smart.props["base"] and smart.props["base"] > 0 then is_prop_safe = true end
+         if smart.props["surge"] and smart.props["surge"] > 0 then is_prop_safe = true end
+    end
+    local name = smart:name()
+    local is_name_safe = false
+    if string.find(name, "base") or string.find(name, "lager") or string.find(name, "camp") or string.find(name, "village") or string.find(name, "bar") or string.find(name, "station") or string.find(name, "bunker") or string.find(name, "post") then is_name_safe = true end
+    if name == "jup_a6" or name == "agr_smart_terrain_1_6" or name == "val_smart_terrain_7_3" or name == "cit_killers" or name == "pri_a16" then is_name_safe = true end
+    return is_prop_safe or is_name_safe
+end
+
+local function is_trader_smart(smart)
+    if not smart then return false end
+    local info = SIMBOARD.smarts[smart.id]
+    if not info or not info.squads then return false end
+    for sq_id in pairs(info.squads) do
+        local resident = alife_object(sq_id)
+        if resident and reznya_utils.is_trader_or_similar(resident) then return true end
+    end
+    return false
+end
+
+local function get_best_safe_smart(squad, level_id)
+    local best_smart, best_score = nil, -100
+    local fallback_smart, fallback_score = nil, -100
+
+    for id, info in pairs(SIMBOARD.smarts) do
+        local smart = info.smrt
+        local smart_lid = reznya_utils.safe_get_level_id(smart.m_game_vertex_id)
+        
+        if smart_lid and smart_lid == level_id and smart.m_level_vertex_id then
+            local is_safe = is_safe_smart(smart)
+            local dist = squad.position:distance_to(smart.position)
+            local score = 1000 - dist
+            if squad.player_id == smart.player_id then score = score + 50 end
+            
+            if SIMBOARD.smarts[smart.id] and SIMBOARD.smarts[smart.id].squads then
+                for k in pairs(SIMBOARD.smarts[smart.id].squads) do
+                    local sq = alife_object(k)
+                    if sq and sq.player_id == squad.player_id then score = score + 10 end
+                end
+            end
+            
+            if is_safe and score > best_score then
+                best_score = score
+                best_smart = smart
+            end
+            if score > fallback_score and score > 0 then
+                fallback_score = score
+                fallback_smart = smart
+            end
+        end
+    end
+    return best_smart or fallback_smart
+end
+
+
+local function is_stalker_squad(squad)
+    if not squad then return false end
+    local comm = squad:get_squad_community()
+    if comm == "monster" or comm == "zombied" or comm == "monolith" then return false end
+    return true
+end
+
+-- =======================================================================
+-- TARGET FINDING
+-- =======================================================================
+local function find_new_target(squad)
+	local sim = alife()
+	local gg = game_graph()
+    local squad_id = squad.id
+	local squad_pos = squad.position
+    local settings = reznya_settings.get_settings_table()
+    
+    local squad_gvid = squad.m_game_vertex_id
+    if not squad_gvid then return nil end
+    local squad_vertex = gg:vertex(squad_gvid)
+    if not squad_vertex then return nil end
+    local squad_lvl_id = squad_vertex:level_id()
+    
+    if reznya_utils.is_night() and is_stalker_squad(squad) then
+        local current_smart = squad.smart_id and SIMBOARD.smarts[squad.smart_id] and SIMBOARD.smarts[squad.smart_id].smrt
+        if is_safe_smart(current_smart) then return squad.smart_id 
+        else
+            local best_smart = get_best_safe_smart(squad, squad_lvl_id)
+            if best_smart then return best_smart:name() end
+        end
+    end
+    
+	local candidates = {}
+	local total_score = 0
+    local w_art = settings.artifact_weight or 30
+    local w_trade = settings.trade_weight or 20
+    
+    local start_point = squad_vertex:game_point()
+	
+	for id, smart_info in pairs(SIMBOARD.smarts) do
+		local smart = smart_info.smrt
+        local s_name = smart and smart:name()
+        
+		local is_failed = false
+		if failed_targets[squad_id] and s_name and failed_targets[squad_id][s_name] then
+			if game.get_game_time():diffSec(failed_targets[squad_id][s_name]) < 900 then is_failed = true
+			else failed_targets[squad_id][s_name] = nil end
+		end
+
+		if smart and smart.id ~= squad.smart_id and not is_failed and valid_smarts_cache[smart.id] then
+            local smart_gvid = smart.m_game_vertex_id
+            if smart_gvid then
+                local smart_vertex = gg:vertex(smart_gvid)
+                local dist = 100000
+                if smart_vertex then
+                     dist = start_point:distance_to(smart_vertex:game_point())
+                end
+                
+                local is_trader_zone = false
+                local is_anomaly_zone = false
+                if smart_info.squads then
+                    for sq_id in pairs(smart_info.squads) do
+                        local res = alife_object(sq_id)
+                        if res and (res.player_id == "trader" or res:clsid() == clsid.trader or res:clsid() == clsid.script_trader) then
+                             is_trader_zone = true; break
+                        end
+                    end
+                end
+                if string.find(smart:name(), "anomal") or (smart.props and smart.props["territory"] and smart.props["territory"] > 0) then is_anomaly_zone = true end
+
+                local score = 10
+                if is_trader_zone and w_trade > 0 then score = score + w_trade end
+                if is_anomaly_zone then score = score + w_art end
+                
+                local dist_factor = 5000 / (dist + 500)
+                score = score * dist_factor
+                
+                if score < 1 then score = 1 end
+                
+                table.insert(candidates, {obj = smart, score = score})
+                total_score = total_score + score
+            end
+		end
+	end
+	
+	if total_score > 0 then
+		local rnd = math.random() * total_score
+        for _, item in ipairs(candidates) do
+            rnd = rnd - item.score
+            if rnd <= 0 then 
+                reznya_utils.log_msg("ALIFE", "INFO", "Squad [%s] assigned target [%s]", squad:name(), item.obj:name())
+                return item.obj:name() 
+            end
+        end
+	end
+	return nil
+end
+
+-- =======================================================================
+-- UPDATE SLICE
+-- =======================================================================
+function prepare_slice()
+    local current_minutes = level.get_time_minutes()
+    
+    -- Only prepare new cycle if minute changed
+    if LAST_GAME_MIN ~= current_minutes then
+        LAST_GAME_MIN = current_minutes
+        
+        -- Reset / Init Data
+        CYCLE_DATA = {
+            start_time = time_global(),
+            processed_squads = 0,
+            squad_iterator_key = nil,
+            stats = {total=0, npc=0, online=0, offline=0, monster=0, panic=0, tasks=0,
+                     stalker_on=0, stalker_off=0, monster_on=0, monster_off=0}
+        }
+        
+        -- Validate Tables
+        if not SIMBOARD then SIMBOARD = sim_board.get_sim_board() end
+        
+        if not SIMBOARD or not SIMBOARD.squads then 
+            reznya_utils.log_msg("ALIFE", "ERR", "SIMBOARD.squads is nil! Aborting.")
+             return 
+        end
+        if not SIMBOARD.smarts then
+             reznya_utils.log_msg("ALIFE", "ERR", "SIMBOARD.smarts is nil! Aborting.")
+             return
+        end
+        
+        -- P0: Refresh level queue for eviction/night events
+        if not level_smarts_map or not next(level_smarts_map) then
+            refresh_level_queue()
+        end
+        
+        -- P0: Bootstrap (One-time execution)
+        local bootstrap_done = utils_obj.load_var(db.actor, "reznya_bootstrap_done", false)
+        if not bootstrap_done then
+            local ok, err = pcall(process_bootstrap)
+            if not ok then pr("CRITICAL: Bootstrap Failed: "..tostring(err)) end
+            utils_obj.save_var(db.actor, "reznya_bootstrap_done", true)
+        end
+        
+        -- P0: Night Event System
+        if reznya_utils.is_night() then
+            local ok, err = pcall(process_night_event)
+            if not ok then pr("CRITICAL: Night Event Failed: "..tostring(err)) end
+        else
+            pcall(clean_night_monsters)
+        end
+        
+        -- Population Control
+        process_population_level()
+        
+    end
+end
+
+local function clean_squad_state(squad, id)
+    squad_states[id] = nil
+    squad.force_retreat = false
+    squad.force_retreat_despawn = false
+    squad.rush_to_target = false
+    if squad.online then
+        for k in squad:squad_members() do
+            local obj = db.storage[k.id] and db.storage[k.id].object
+            if obj then
+                if obj.enable_memory_object then obj:enable_memory_object(true) end
+                if db.storage[k.id].combat_ignore then db.storage[k.id].combat_ignore.enabled = false end
+            end
+        end
+    end
+end
+
+local function process_squad_transaction(squad)
+    if not squad then return end
+    local id = squad.id
+    local settings = reznya_settings.get_settings_table()
+
+    -- Stats Accumulation
+    CYCLE_DATA.stats.total = (CYCLE_DATA.stats.total or 0) + 1
+    local cnt = squad:npc_count()
+    CYCLE_DATA.stats.npc = (CYCLE_DATA.stats.npc or 0) + cnt
+    if squad.online then CYCLE_DATA.stats.online = (CYCLE_DATA.stats.online or 0) + cnt
+    else CYCLE_DATA.stats.offline = (CYCLE_DATA.stats.offline or 0) + cnt end
+    
+    if reznya_utils.is_monster_squad(squad) then 
+        CYCLE_DATA.stats.monster = (CYCLE_DATA.stats.monster or 0) + cnt 
+        if squad.online then CYCLE_DATA.stats.monster_on = (CYCLE_DATA.stats.monster_on or 0) + cnt
+        else CYCLE_DATA.stats.monster_off = (CYCLE_DATA.stats.monster_off or 0) + cnt end
+    else
+        if squad.online then CYCLE_DATA.stats.stalker_on = (CYCLE_DATA.stats.stalker_on or 0) + cnt
+        else CYCLE_DATA.stats.stalker_off = (CYCLE_DATA.stats.stalker_off or 0) + cnt end
+    end
+    
+
+    
+    
+    if not is_valid_squad(squad) then return end
+    
+    -- MOVEMENT LOGIC
+    local dist_to_actor = squad.position:distance_to(db.actor:position())
+    local sim = alife()
+    
+    -- FORCE ONLINE (Fix for Engine stuck-offline)
+    if dist_to_actor < 100 and not squad.online then
+         if not squad_states[id] or squad_states[id] ~= "forced_online" then
+             sim:set_switch_online(id, true)
+             sim:set_switch_offline(id, false)
+             squad_states[id] = "forced_online"
+         end
+    elseif dist_to_actor > 150 and squad_states[id] == "forced_online" then
+         sim:set_switch_online(id, false)
+         sim:set_switch_offline(id, false)
+         squad_states[id] = nil
+    end
+    
+    if not squad.scripted_target and math.random(100) < (settings.squad_chance or 20) then
+        -- CAMPFIRE LOGIC
+        local stay_at_camp = false
+        if reznya_utils.is_night() and is_stalker_squad(squad) and squad.smart_id then
+             stay_at_camp = true
+        end
+
+        if not stay_at_camp then
+            local t_name = find_new_target(squad)
+            if t_name then 
+                squad.scripted_target = t_name 
+                CYCLE_DATA.stats.tasks = (CYCLE_DATA.stats.tasks or 0) + 1
+            else
+                squad_arrival_times[id] = game.get_game_time()
+            end
+        end
+    end
+    
+    -- Scripted Monitor
+    if squad.scripted_target then
+         local current_smart_name = nil
+         if squad.smart_id and SIMBOARD.smarts[squad.smart_id] and SIMBOARD.smarts[squad.smart_id].smrt then
+             current_smart_name = SIMBOARD.smarts[squad.smart_id].smrt:name()
+         end
+         
+         if current_smart_name and current_smart_name == squad.scripted_target then
+              squad.scripted_target = nil
+              travel_start_times[id] = nil
+              squad_arrival_times[id] = game.get_game_time()
+         else
+             if not travel_start_times[id] then travel_start_times[id] = game.get_game_time() end
+             if game.get_game_time():diffSec(travel_start_times[id]) > 3600 then
+                  squad.scripted_target = nil
+                  travel_start_times[id] = nil
+             end
+         end
+    end
+end
+
+
+-- =======================================================================
+-- SPAWNER & POPULATION CONTROL
+-- =======================================================================
+
+function load_exclusion_list()
+    local ini = ini_file("plugins\\reznya_blacklist.ltx")
+    if not ini then
+        reznya_utils.log_msg("ALIFE", "WARN", "Blacklist LTX not found. Using defaults.")
+        return
+    end
+
+    -- 1. Ignore AI Communities
+    local comm_sect = ini:section_exist("exclude_communities") and "exclude_communities" or "factions"
+    if ini:section_exist(comm_sect) then
+        local count = ini:line_count(comm_sect)
+        for i=0, count-1 do
+            local res, key, val = ini:r_line(comm_sect, i, "", "")
+            if key then IGNORE_AI_COMMUNITIES[key] = true end
+        end
+    end
+
+    -- 2. Ignore Levels
+    local lvl_sect = ini:section_exist("levels") and "levels" or "ignore_levels"
+    if ini:section_exist(lvl_sect) then
+        local count = ini:line_count(lvl_sect)
+        for i=0, count-1 do
+            local res, key, val = ini:r_line(lvl_sect, i, "", "")
+            if key then EXCLUDE_LEVELS[key] = true end
+        end
+    end
+
+    -- 3. Ignore Spawns
+    local spawn_sect = ini:section_exist("spawns") and "spawns" or "ignore_spawns"
+    if ini:section_exist(spawn_sect) then
+        local count = ini:line_count(spawn_sect)
+        for i=0, count-1 do
+            local res, key, val = ini:r_line(spawn_sect, i, "", "")
+            if key and val then
+                SPAWN_BLACKLIST[key] = {}
+                if val == "all" then
+                    SPAWN_BLACKLIST[key]["all"] = true
+                else
+                    -- Simple split
+                    for l in string.gmatch(val, "([^,]+)") do
+                        local clean = string.gsub(l, "^%s*(.-)%s*$", "%1")
+                        SPAWN_BLACKLIST[key][clean] = true
+                    end
+                end
+            end
+        end
+    end
+    reznya_utils.log_msg("ALIFE", "INFO", "Blacklist LTX processed.")
+end
+
+function build_faction_pools()
+    local ini = system_ini()
+    local count = 0
+    FACTION_POOLS = {}
+
+    -- Load valid squads from reznya_vanilla_sections.ltx
+    local valid_squads_ini = ini_file("plugins\\reznya_vanilla_sections.ltx")
+    if valid_squads_ini and valid_squads_ini:section_exist("squads") then
+        local n = valid_squads_ini:line_count("squads")
+        local valid_sections = {}
+        for i=0, n-1 do
+            local result, squad_sec, _ = valid_squads_ini:r_line("squads", i, "", "")
+            if squad_sec then valid_sections[squad_sec] = true end
+        end
+        
+        -- Also load custom squads
+        if valid_squads_ini:section_exist("custom_squads") then
+            local cn = valid_squads_ini:line_count("custom_squads")
+            for i=0, cn-1 do
+                local result, squad_sec, _ = valid_squads_ini:r_line("custom_squads", i, "", "")
+                if squad_sec then valid_sections[squad_sec] = true end
+            end
+        end
+        
+        -- Build pools from valid sections
+        for section, _ in pairs(valid_sections) do
+            if ini:section_exist(section) and ini:line_exist(section, "faction") then
+                local faction = ini:r_string(section, "faction")
+                if not FACTION_POOLS[faction] then FACTION_POOLS[faction] = {} end
+                table.insert(FACTION_POOLS[faction], section)
+                count = count + 1
+            end
+        end
+        
+        reznya_utils.log_msg("ALIFE", "INFO", "Faction pools built: %d squads from config.", count)
+    else
+        reznya_utils.log_msg("ALIFE", "WARN", "reznya_vanilla_sections.ltx not found, pools empty!")
+    end
+end
+
+function is_spawn_blacklisted(sec_or_comm, level_name)
+    if not SPAWN_BLACKLIST[sec_or_comm] then return false end
+    local entry = SPAWN_BLACKLIST[sec_or_comm]
+    if entry["all"] then return true end
+    if level_name and entry[level_name] then return true end
+    return false
+end
+
+function spawn_random_squad(kind)
+    local lid = alife():level_id()
+    local lvl_name = alife():level_name(lid)
+    
+    if EXCLUDE_LEVELS[lvl_name] then return nil end
+    
+    -- 1. Count existing factions on level
+    local factions = {}
+    for id, info in pairs(SIMBOARD.smarts) do
+        local smart = info.smrt
+        if smart and reznya_utils.safe_get_level_id(smart.m_game_vertex_id) == lid then
+            if info.squads then
+                for sq_id in pairs(info.squads) do
+                    local squad = alife_object(sq_id)
+                    if squad then
+                        local comm = squad.player_id
+                        factions[comm] = (factions[comm] or 0) + 1
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Calculate weights
+    local total_weight = 0
+    local weights = {}
+    
+    for comm, sections in pairs(FACTION_POOLS) do
+        local is_monster = string.find(comm, "monster") or string.find(comm, "zombied")
+        local valid = true
+        if kind == "stalker" and is_monster then valid = false end
+        if kind == "monster" and not is_monster then valid = false end
+        if IGNORE_AI_COMMUNITIES[comm] then valid = false end
+        
+        if valid then
+            local count = factions[comm] or 0
+            local w = 1 / (count + 1)
+            
+            if is_spawn_blacklisted(comm, lvl_name) then w = 0 end
+            
+            if w > 0 then
+                -- Reincarnation Check: Boost if missing
+                if count == 0 then w = w * 5 end
+                
+                weights[comm] = w
+                total_weight = total_weight + w
+            end
+        end
+    end
+
+    -- 3. Select faction and section
+    if total_weight > 0 then
+        local rnd = math.random() * total_weight
+        local pick_comm = nil
+        for comm, w in pairs(weights) do
+            rnd = rnd - w
+            if rnd <= 0 then pick_comm = comm; break end
+        end
+
+        if pick_comm then
+            local sections = FACTION_POOLS[pick_comm]
+            local section = sections[math.random(#sections)]
+            
+            -- 4. Find appropriate Smart Terrain
+            local candidates = {}
+            for id, info in pairs(SIMBOARD.smarts) do
+                local smart = info.smrt
+                if smart and reznya_utils.safe_get_level_id(smart.m_game_vertex_id) == lid then
+                    if kind == "stalker" then
+                        -- Stalkers prefer bases or neutral smarts
+                        if is_safe_smart(smart) then table.insert(candidates, smart) end
+                    else
+                        -- Monsters prefer anomalies/lairs
+                        if string.find(smart:name(), "anomal") or (smart.props and smart.props["lair"]) then
+                            table.insert(candidates, smart)
+                        end
+                    end
+                end
+            end
+
+            if #candidates > 0 then
+                local selected_smart = candidates[math.random(#candidates)]
+                local sq = SIMBOARD:create_squad(selected_smart, section)
+                if sq then
+                    reznya_utils.log_msg("ALIFE", "INFO", "Spawned %s [%s] at %s", kind, sq:name(), selected_smart:name())
+                    return sq.id
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function process_population_level()
+    local settings = reznya_settings.get_settings_table()
+    local target_stalkers = settings.target_pop_stalkers or 40
+    local target_monsters = settings.target_pop_monsters or 20
+
+    -- Night Multiplier
+    if reznya_utils.is_night() then target_monsters = target_monsters * 2 end
+
+    local stats = CYCLE_DATA.stats
+    local cur_stalkers = (stats.stalker_on or 0) + (stats.stalker_off or 0)
+    local cur_monsters = (stats.monster or 0)
+
+    -- Spawning
+    if cur_stalkers < target_stalkers then
+        spawn_random_squad("stalker")
+    end
+    if cur_monsters < target_monsters then
+        spawn_random_squad("monster")
+    end
+end
+
+function process_bootstrap()
+    local settings = reznya_settings.get_settings_table()
+    if not settings.aggressive_bootstrap then return end
+    
+    if CYCLE_DATA.stats.total < 10 then 
+        reznya_utils.log_msg("ALIFE", "INFO", "Aggressive bootstrap triggered.")
+        for i=1, 3 do
+            process_population_level()
+        end
+    end
+end
+
+-- Called by Manager
+function update_slice(limit)
+    if not limit then limit = 20 end
+    local processed = 0
+    local squads = SIMBOARD.squads
+    if not squads then return true end -- Finished/Error
+    
+    while processed < limit do
+        local id, squad_info = next(squads, CYCLE_DATA.squad_iterator_key)
+        if not id then 
+            CYCLE_DATA.squad_iterator_key = nil -- Reset? Or just finish?
+            return true -- Finished full iteration
+        end
+        
+        CYCLE_DATA.squad_iterator_key = id
+        local squad = alife_object(id)
+        if squad then
+            local ok, err = pcall(process_squad_transaction, squad)
+            if not ok then reznya_utils.log_msg("ALIFE", "ERR", "Squad logic failed: %s", err) end
+        end
+        
+        processed = processed + 1
+    end
+    
+    CYCLE_DATA.processed_squads = CYCLE_DATA.processed_squads + processed
+    return false -- Not finished
+end
+
+function get_stats()
+    return CYCLE_DATA.stats
+end
+
+-- =======================================================================
+-- INIT
+-- =======================================================================
+local function validate_game_data()
+    -- Copy of original validation logic
+    if not SIMBOARD then SIMBOARD = sim_board.get_sim_board() end
+    
+    if not valid_smarts_cache or not next(valid_smarts_cache) then
+        local ini = system_ini()
+        for faction, section in pairs(RAW_FACTION_SPAWNS) do
+            if ini:section_exist(section) then validated_faction_spawns[faction] = section end
+        end
+        
+        valid_smarts_cache = {}
+        if SIMBOARD and SIMBOARD.smarts then
+            for id, info in pairs(SIMBOARD.smarts) do
+                local smart = info.smrt
+                if smart and smart.props and smart.m_level_vertex_id then
+                    local is_valid = false
+                    if (smart.props["base"] and smart.props["base"] > 0) or
+                       (smart.props["territory"] and smart.props["territory"] > 0) or
+                       (smart.props["resource"] and smart.props["resource"] > 0) or
+                       (smart.props["lair"] and smart.props["lair"] > 0) or
+                       (smart.props["surge"] and smart.props["surge"] > 0) then
+                        is_valid = true
+                    end
+                    if is_valid then
+                        local lid = reznya_utils.safe_get_level_id(smart.m_level_vertex_id)
+                        if lid then valid_smarts_cache[id] = true end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- =======================================================================
+-- BOOTSTRAP & POPULATION CONTROL
+-- =======================================================================
+
+function process_bootstrap()
+    local settings = reznya_settings.get_settings_table()
+    local target_stalkers = settings.target_pop_stalkers or 40
+    local target_monsters = settings.target_pop_monsters or 20
+    
+    pr("BOOTSTRAP: New Game Detected. Initializing Global Population (Stalkers: "..target_stalkers..", Monsters: "..target_monsters..")...")
+    
+    refresh_level_queue()
+    
+    for lid, _ in pairs(level_smarts_map) do
+        local pop = { stalker = 0, monster = 0 }
+        
+        -- Count existing
+        if level_smarts_map[lid] then
+            for _, s in ipairs(level_smarts_map[lid]) do
+                local info = SIMBOARD.smarts[s.id]
+                if info and info.squads then
+                    for sq_id, _ in pairs(info.squads) do
+                        local squad = alife_object(sq_id)
+                        if squad and squad.npc_count then
+                            local count = squad:npc_count()
+                            if reznya_utils.is_monster_squad(squad) then
+                                pop.monster = pop.monster + count
+                            else
+                                pop.stalker = pop.stalker + count
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- Spawn Stalkers
+        if pop.stalker < target_stalkers then
+            local needed = math.ceil((target_stalkers - pop.stalker) / 2)
+            if needed > 0 then
+                local amount = math.min(needed, 10)
+                pr("BOOTSTRAP: ["..alife():level_name(lid).."] Spawning "..amount.." Stalker squads")
+                for i=1, amount do spawn_random_squad("stalker") end
+            end
+        end
+        
+        -- Spawn Monsters
+        if pop.monster < target_monsters then
+            local needed = math.ceil(target_monsters - pop.monster)
+            if needed > 0 then
+                local amount = math.min(needed, 10)
+                pr("BOOTSTRAP: ["..alife():level_name(lid).."] Spawning "..amount.." Monster squads")
+                for i=1, amount do spawn_random_squad("monster") end
+            end
+        end
+    end
+    
+    pr("BOOTSTRAP: Complete.")
+end
+
+function process_population_level()
+    local settings = reznya_settings.get_settings_table()
+    local lid = reznya_utils.safe_get_level_id(db.actor:game_vertex_id())
+    if not lid then return end
+    
+    local level_smarts = level_smarts_map[lid]
+    if not level_smarts or #level_smarts == 0 then return end
+    
+    local d = { total = 0, factions = {}, squads = {}, faction_squads = {} }
+    
+    for _, smart in ipairs(level_smarts) do
+        local info = SIMBOARD.smarts[smart.id]
+        if info and info.squads then
+            for sq_id, _ in pairs(info.squads) do
+                local squad = alife_object(sq_id)
+                if squad and squad.npc_count then
+                    local cnt = squad:npc_count()
+                    d.total = d.total + cnt
+                    local comm = squad.player_id
+                    d.factions[comm] = (d.factions[comm] or 0) + cnt
+                    table.insert(d.squads, squad)
+                    if not d.faction_squads[comm] then d.faction_squads[comm] = {} end
+                    table.insert(d.faction_squads[comm], squad)
+                end
+            end
+        end
+    end
+    
+    local target_stalkers = settings.target_pop_stalkers or 40
+    local target_monsters = settings.target_pop_monsters or 20
+    
+    -- P2: Night Multiplier (2x monsters at night)
+    if reznya_utils.is_night() then target_monsters = target_monsters * 2 end
+    
+    local d_stalkers = 0
+    local d_monsters = 0
+    
+    for comm, count in pairs(d.factions) do
+        if comm == "monster" or string.find(comm, "monster") or string.find(comm, "zombied") then
+            d_monsters = d_monsters + count
+        else
+            d_stalkers = d_stalkers + count
+        end
+    end
+    
+    -- Spawn if below 90% target
+    if d_stalkers < (target_stalkers * 0.9) then
+        local deficit = math.ceil((target_stalkers - d_stalkers) / 2)
+        local batch = math.min(deficit, 3)
+        if batch > 0 then
+            for i=1, batch do spawn_random_squad("stalker") end
+        end
+    end
+    
+    if d_monsters < (target_monsters * 0.9) then
+        local deficit = math.ceil(target_monsters - d_monsters)
+        local batch = math.min(deficit, 3)
+        if batch > 0 then
+            for i=1, batch do spawn_random_squad("monster") end
+        end
+    end
+    
+    -- P0: Eviction System
+    process_eviction(lid, d)
+end
+
+-- =======================================================================
+-- NIGHT EVENT SYSTEM (P0 Restoration)
+-- =======================================================================
+
+function process_night_event()
+    local night_id = reznya_utils.get_current_night_id()
+    if not night_id then return end
+    
+    local last_id = utils_obj.load_var(db.actor, "reznya_last_night_id", -1)
+    if night_id == last_id then return end
+    
+    pr("NIGHT EVENT: Triggering global mutant spawn")
+    utils_obj.save_var(db.actor, "reznya_last_night_id", night_id)
+    
+    if not level_smarts_map or not next(level_smarts_map) then refresh_level_queue() end
+    
+    local spawn_chance = 0.2
+    
+    for id, info in pairs(SIMBOARD.smarts) do
+        local smart = info.smrt
+        if smart and smart.props then
+            if math.random() < spawn_chance then
+                local supports_monsters = false
+                for k, v in pairs(smart.props) do
+                    if v > 0 and (k == "monster" or string.find(k, "monster_")) then 
+                        supports_monsters = true
+                        break 
+                    end
+                end
+                
+                if supports_monsters then
+                    local section = get_random_monster_section_for_smart(smart)
+                    if section then
+                        local sq = SIMBOARD:create_squad(smart, section)
+                        if sq then
+                            night_simulation_squads[sq.id] = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function clean_night_monsters()
+    local sim = alife()
+    if next(night_simulation_squads) then
+        pr("MORNING CLEANUP: Removing night mutants")
+        for id, _ in pairs(night_simulation_squads) do
+            local obj = sim:object(id)
+            if obj then sim:release(obj, true) end
+        end
+        night_simulation_squads = {}
+    end
+end
+
+function get_random_monster_section_for_smart(smart)
+    if not smart or not smart.props then return nil end
+    local possible_keys = {}
+    
+    for k, v in pairs(smart.props) do
+        if v > 0 and (k == "monster" or string.find(k, "monster_")) then
+            local is_zombie = string.find(k, "zombied")
+            if not (reznya_utils.is_night() and is_zombie) then
+                if FACTION_POOLS[k] and #FACTION_POOLS[k] > 0 then
+                    table.insert(possible_keys, k)
+                end
+            end
+        end
+    end
+    
+    if #possible_keys == 0 then return nil end
+    local selected_key = possible_keys[math.random(#possible_keys)]
+    return FACTION_POOLS[selected_key][math.random(#FACTION_POOLS[selected_key])]
+end
+
+-- =======================================================================
+-- EVICTION SYSTEM (P0 Restoration)
+-- =======================================================================
+
+function process_eviction(lid, d)
+    local settings = reznya_settings.get_settings_table()
+    local target_stalkers = settings.target_pop_stalkers or 40
+    local target_monsters = settings.target_pop_monsters or 20
+    local target_total = target_stalkers + target_monsters
+    
+    if d.total > (target_total * 1.1) then
+        local squads_by_dist = {}
+        local actor_pos = db.actor:position()
+        local actor_lid = reznya_utils.safe_get_level_id(db.actor:game_vertex_id())
+        
+        for _, squad in ipairs(d.squads) do
+            if is_valid_squad(squad) and not squad.scripted_target then
+                local dist = 10000
+                if lid == actor_lid then
+                    dist = squad.position:distance_to(actor_pos)
+                end
+                table.insert(squads_by_dist, {sq = squad, dist = dist})
+            end
+        end
+        
+        table.sort(squads_by_dist, function(a,b) return a.dist > b.dist end)
+        
+        for i=1, 3 do
+            if squads_by_dist[i] then
+                local candidate = squads_by_dist[i].sq
+                local target_smart = nil
+                
+                local r_lid = nil
+                local keys = {}
+                for k in pairs(level_smarts_map) do table.insert(keys, k) end
+                if #keys > 1 then
+                    repeat
+                        r_lid = keys[math.random(#keys)]
+                    until r_lid ~= lid
+                end
+                
+                if r_lid and level_smarts_map[r_lid] then
+                    target_smart = level_smarts_map[r_lid][math.random(#level_smarts_map[r_lid])]
+                end
+                
+                if target_smart then
+                    candidate.scripted_target = target_smart:name()
+                    travel_start_times[candidate.id] = game.get_game_time()
+                end
+            end
+        end
+    end
+end
+
+function refresh_level_queue()
+    level_smarts_map = {}
+    for id, info in pairs(SIMBOARD.smarts) do
+        local smart = info.smrt
+        if smart then
+            local lid = reznya_utils.safe_get_level_id(smart.m_game_vertex_id)
+            if lid then
+                if not level_smarts_map[lid] then level_smarts_map[lid] = {} end
+                table.insert(level_smarts_map[lid], smart)
+            end
+        end
+    end
+end
+
+function init()
+    validate_game_data()
+    load_exclusion_list()
+    build_faction_pools()
+    reznya_utils.log_msg("ALIFE", "INFO", "Module Initialized (Simplified Config).")
+end
+
+function on_game_start()
+    -- Manager calls init manually
+    -- Just registering callbacks if strictly unique to this, but Manager handles update.
+end

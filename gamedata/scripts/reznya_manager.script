@@ -1,0 +1,139 @@
+-- =======================================================================
+-- REZNYA MANAGER
+-- Central operator for Reznya mod. Handles updates and module execution.
+-- =======================================================================
+
+local HUD_INSTANCE = nil
+local LAST_ALIFE_UPDATE = 0
+local LAST_LOOT_UPDATE = 0
+local LAST_RELATIONS_UPDATE = 0
+local LAST_HUD_UPDATE = 0
+
+-- Interval configuration (ms)
+local CONFIG = {
+    ALIFE_INTERVAL  = 2000,
+    LOOT_INTERVAL   = 5000,
+    RELATIONS_INTERVAL = 5000,
+    HUD_INTERVAL    = 1000,
+}
+
+local ALIFE_SLICE_ACTIVE = false
+
+local function actor_on_update()
+    if not (db.actor and alife()) then return end
+    
+    local tg = time_global()
+
+    -- 1. A-LIFE UPDATE (Throttled & Sliced)
+    if not ALIFE_SLICE_ACTIVE then
+        if tg > LAST_ALIFE_UPDATE + CONFIG.ALIFE_INTERVAL then
+            ALIFE_SLICE_ACTIVE = true
+            if reznya_alife and reznya_alife.prepare_slice then 
+                reznya_alife.prepare_slice() 
+                -- reznya_utils.log_msg("MANAGER", "INFO", "Started new A-Life update cycle.")
+            end
+        end
+    end
+
+    if ALIFE_SLICE_ACTIVE then
+        local finished = false
+        if reznya_alife and reznya_alife.update_slice then
+             finished = reznya_alife.update_slice(50) -- Process 50 squads per frame
+        end
+        
+        if finished then
+            LAST_ALIFE_UPDATE = tg
+            ALIFE_SLICE_ACTIVE = false
+            -- reznya_utils.log_msg("MANAGER", "INFO", "Finished A-Life update cycle.")
+        end
+    end
+
+    -- 2. LOOT UPDATE (Throttled)
+    if tg > LAST_LOOT_UPDATE + CONFIG.LOOT_INTERVAL then
+        LAST_LOOT_UPDATE = tg
+        if reznya_looting and reznya_looting.update then
+            local ok, err = pcall(reznya_looting.update)
+            if not ok then reznya_utils.log_msg("MANAGER", "ERR", "Loot Update Failed: %s", err) end
+        end
+    end
+    
+    -- 3. RELATIONS (if needed to call update periodically)
+    -- Currently Relatiosn manages itself via callbacks, but if we move logic here:
+    -- if tg > LAST_RELATIONS_UPDATE + CONFIG.RELATIONS_INTERVAL then ... end
+
+    -- 4. HUD UPDATE (Throttled)
+    if tg > LAST_HUD_UPDATE + CONFIG.HUD_INTERVAL then
+        LAST_HUD_UPDATE = tg
+        if reznya_alife and reznya_alife.get_stats then
+            local stats = reznya_alife.get_stats()
+            update_hud(stats)
+        end
+    end
+end
+
+function update_hud(stats)
+    local show_hud = true
+    if reznya_settings then show_hud = reznya_settings.get_config("show_hud", false) end
+    
+    if show_hud then
+        if not HUD_INSTANCE then
+            if reznya_hud and reznya_hud.DynamicALifeHUD then
+                HUD_INSTANCE = reznya_hud.DynamicALifeHUD()
+                get_hud():AddDialogToRender(HUD_INSTANCE)
+            end
+        end
+        if HUD_INSTANCE and HUD_INSTANCE.UpdateParams then
+            HUD_INSTANCE:UpdateParams({stats = stats})
+        end
+    else
+        cleanup_hud()
+    end
+end
+
+function cleanup_hud()
+    if HUD_INSTANCE then
+        get_hud():RemoveDialogToRender(HUD_INSTANCE)
+        HUD_INSTANCE = nil
+    end
+end
+
+local function load_module(name, script)
+    if not (script) then
+        reznya_utils.log_msg("MANAGER", "WARN", "Module [%s] not found", name)
+        return false
+    end
+    
+    -- Some modules might have init()
+    if script.init then
+        local status, err = pcall(script.init)
+        if status then
+            reznya_utils.log_msg("MANAGER", "INFO", "Module [%s] initialized.", name)
+        else
+            reznya_utils.log_msg("MANAGER", "ERR", "Failed to initialize module [%s]: %s", name, tostring(err))
+        end
+    else
+        reznya_utils.log_msg("MANAGER", "INFO", "Module [%s] loaded (No Init).", name)
+    end
+    return true
+end
+
+function on_game_start()
+    -- Wait for Utils
+    if not reznya_utils then return end 
+    
+    reznya_utils.log_msg("MANAGER", "INFO", "Initializing Reznya Central Manager...")
+    
+    RegisterScriptCallback("actor_on_update", actor_on_update)
+    RegisterScriptCallback("actor_on_net_destroy", cleanup_hud)
+    
+    -- Initialize Sub-modules
+    load_module("SETTINGS", reznya_settings)
+    load_module("CORE", reznya_core)
+    load_module("ALIFE", reznya_alife)
+    load_module("LOOT", reznya_looting)
+    load_module("RELATIONS", reznya_relations)
+    load_module("PROTECTOR", reznya_protector)
+    load_module("HELP", reznya_help)
+    
+    -- HUD is loaded via ALIFE/Manager
+end
