@@ -1,0 +1,166 @@
+-- SISKI Logger
+-- Centralized logging utility.
+-- Writes to 'siski.log' in the bin/logs directory (depending on engine access).
+
+local log_file = "siski.log"
+
+-- Internal: Write to physical file
+local function write_to_file(txt, filename)
+    local target_file = filename or log_file
+    local tg = time_global()
+    local txt_out = string.format("[%s] %s\n", tg, txt)
+    
+    local f = io.open(target_file, "a")
+    if f then 
+        f:write(txt_out)
+        f:close() 
+    end
+end
+
+-- External: Dump to specific file (Overwrite)
+function dump_to_file(filename, txt)
+    local f = io.open(filename, "w")
+    if f then
+        f:write(txt)
+        f:close()
+        siski_log("LOGGER", "~", "Dumped data to %s", filename)
+    else
+        siski_log("LOGGER", "!", "Failed to dump data to %s", filename)
+    end
+end
+
+-- Main Log Function
+-- @module: Module Name (e.g. "MEMORY", "BRAIN")
+-- @msg_type: "~" (Info), "!" (Warn), "*" (Error)
+function siski_log(module, msg_type, fmt, ...)
+    msg_type = msg_type or "~"
+    
+    -- MCM Toggle Check
+    if ui_mcm then
+        local enabled = ui_mcm.get("siski/debug_enabled")
+        -- If specifically disabled in MCM, silence all but Errors
+        if enabled == false and msg_type ~= "*" then
+            return 
+        end
+    end
+    
+    local msg = ""
+    
+    if select('#', ...) > 0 then
+        local status, err = pcall(string.format, fmt, ...)
+        if status then
+            msg = err
+        else
+            msg = fmt .. " [LOG ERROR: " .. tostring(err) .. "]"
+        end
+    else
+        msg = tostring(fmt)
+    end
+
+    -- Format: Type [SISKI][Module] Message
+    local output = string.format("%s [SISKI][%s] %s", msg_type, tostring(module), msg)
+    
+    -- File
+    if module == "SPAWNER" then
+        write_to_file(output, "siski_spawner.log")
+    elseif module == "FORCE_LOOT" or module == "SCANNER" then
+        write_to_file(output, "siski_loot.log")
+    else
+        write_to_file(output)
+    end
+    
+    -- Console
+    if _G.printf then
+        _G.printf(output)
+    end
+end
+
+-- Shortcuts
+function log_info(module, fmt, ...) siski_log(module, "~", fmt, ...) end
+function log_warn(module, fmt, ...) siski_log(module, "!", fmt, ...) end
+function log_err(module, fmt, ...)  siski_log(module, "*", fmt, ...) end
+
+-- Recursive Table Print
+function table_to_string(tbl, indent)
+    if not indent then indent = 0 end
+    local parts = { string.rep(" ", indent) .. "{\n" }
+    indent = indent + 2 
+    local indent_str = string.rep(" ", indent)
+    
+    for k, v in pairs(tbl) do
+        parts[#parts+1] = indent_str
+        
+        -- FORMAT KEY
+        if (type(k) == "number") then
+            parts[#parts+1] = "[" .. k .. "] = "
+        elseif (type(k) == "string") then
+            parts[#parts+1] = k .. "= "   
+        else
+            parts[#parts+1] = "[" .. type(k) .. "] = "
+        end
+        
+        -- FORMAT VALUE
+        local t = type(v)
+        if t == "number" then
+            parts[#parts+1] = v .. ",\n"
+        elseif t == "string" then
+            parts[#parts+1] = "\"" .. v .. "\",\n"
+        elseif t == "boolean" then
+            parts[#parts+1] = tostring(v) .. ",\n"
+        elseif t == "table" then
+            parts[#parts+1] = table_to_string(v, indent + 2) .. ",\n"
+        elseif t == "userdata" then
+             -- Try to safely convert vector, but fallback to generic
+             local status, res = pcall(tostring, v)
+             if status then
+                parts[#parts+1] = "\"" .. res .. "\" (userdata),\n"
+             else
+                parts[#parts+1] = "\"<userdata>\",\n"
+             end
+        else
+            parts[#parts+1] = "\"" .. tostring(v) .. "\",\n"
+        end
+    end
+    parts[#parts+1] = string.rep(" ", indent-2) .. "}"
+    return table.concat(parts)
+end
+
+-- News Tip Helper (For player interaction)
+function send_news(sender, text, icon)
+    if not db.actor then return end
+    
+    local header = sender:character_name()
+    local texture = icon or sender:character_icon()
+    
+    if news_manager and news_manager.send_tip then
+        news_manager.send_tip(db.actor, text, nil, header, 10000, texture)
+    else
+        -- Fallback to simple talk
+        log_info("NEWS", "[%s]: %s", header, text)
+    end
+end
+
+function on_game_start()
+    -- Reset log file (Overwrite mode 'w') on session start
+    local f = io.open(log_file, "w")
+    if f then
+        f:write("=== SISKI SESSION START ===\n")
+        f:close()
+    end
+    
+    -- Reset spawner log
+    local f_spawner = io.open("siski_spawner.log", "w")
+    if f_spawner then
+        f_spawner:write("=== SISKI SPAWNER SESSION START ===\n")
+        f_spawner:close()
+    end
+    
+    -- Reset loot log
+    local f_loot = io.open("siski_loot.log", "w")
+    if f_loot then
+        f_loot:write("=== SISKI LOOT DEBUG SESSION START ===\n")
+        f_loot:close()
+    end
+    
+    log_info("LOGGER", "SISKI Logger Initialized. Log file cleared: %s", log_file)
+end

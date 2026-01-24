@@ -1,0 +1,236 @@
+-- ==============================================================================================
+-- SISKI TRADING MODULE
+-- NPC-to-NPC trading system.
+-- ==============================================================================================
+
+local logger = siski_logger
+local settings = siski_settings
+local intel = siski_intel
+local inventory = siski_inventory
+
+-- ==============================================================================================
+-- TRADER DETECTION
+-- ==============================================================================================
+
+function is_trader_smart(smart)
+    if not smart then return false end
+    local name = siski_ef_utils.safe_name(smart)
+    if not name or name == "INVALID" then return false end
+    
+    -- Base detection by name
+    if string.find(name, "bar") or 
+       string.find(name, "base") or 
+       string.find(name, "trader") or
+       string.find(name, "camp") then
+        return true
+    end
+    
+    -- Check props if available
+    if SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] then
+        local props = SIMBOARD.smarts[smart.id].props or {}
+        if props["base"] and props["base"] > 0 then
+            return true
+        end
+    end
+    
+    return false
+end
+
+function find_nearest_trader_smart(squad, faction)
+    if not squad then return nil end
+    
+    local squad_pos = squad.position
+    local gg = game_graph()
+    local squad_lvl_id = gg:vertex(squad.m_game_vertex_id):level_id()
+    
+    local nearest = nil
+    local nearest_dist = math.huge
+    
+    -- Iterate all smarts
+    if SIMBOARD and SIMBOARD.smarts then
+        for id, smart_data in pairs(SIMBOARD.smarts) do
+            local smart = alife_object(id)
+            if smart and smart.m_game_vertex_id then
+                local smart_lvl_id = gg:vertex(smart.m_game_vertex_id):level_id()
+                
+                -- LEVEL CHECK: Only consider traders on the same level
+                if smart_lvl_id == squad_lvl_id and is_trader_smart(smart) then
+                    local s_pos = smart.position
+                    if s_pos and squad_pos then
+                        local dist = squad_pos:distance_to(s_pos)
+                        if dist < nearest_dist then
+                            nearest = smart
+                            nearest_dist = dist
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return nearest
+end
+
+function find_trader_npc(smart)
+    if not smart then return nil end
+    
+    -- Find actual trader NPC at smart
+    if SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] then
+        local smart_data = SIMBOARD.smarts[smart.id]
+        
+        for squad_id in pairs(smart_data.squads) do
+            local squad = alife_object(squad_id)
+            if squad then
+                for k in squad:squad_members() do
+                    local npc = db.storage[k.id] and db.storage[k.id].object
+                    if siski_ef_utils.is_alive(npc) then
+                        local comm = nil
+                        local ok_c, res_c = pcall(function() return npc:character_community() end)
+                        if ok_c then comm = res_c end
+                        
+                        if comm == "trader" then
+                            return npc
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return nil
+end
+
+-- ==============================================================================================
+-- TRADING LOGIC
+-- ==============================================================================================
+
+function perform_trade(squad, trader_smart)
+    if not squad or not trader_smart then return 0 end
+    
+    local total_value = 0
+    local items_sold = 0
+    
+    -- Find trader NPC at smart
+    local trader_npc = find_trader_npc(trader_smart)
+    
+    for k in squad:squad_members() do
+        local npc = db.storage[k.id] and db.storage[k.id].object
+        if siski_ef_utils.is_alive(npc) then
+            local sellable = inventory.get_sellable_items(npc)
+            
+            for _, item in ipairs(sellable) do
+                local section = siski_ef_utils.safe_section(item)
+                local value = get_item_value(item)
+                
+                -- Transfer to trader (if exists) or just remove
+                if trader_npc then
+                    if siski_core and siski_core.safe_transfer then
+                        pcall(function() siski_core.safe_transfer(item, npc, trader_npc) end)
+                    else
+                        pcall(function() npc:transfer_item(item, trader_npc) end)
+                    end
+                else
+                    -- No trader - simulate selling by removing item
+                    local item_id = siski_ef_utils.safe_id(item)
+                    if item_id then
+                        if siski_core and siski_core.safe_release then
+                            siski_core.safe_release(item_id)
+                        else
+                            local se_item = alife_object(item_id)
+                            if se_item then
+                                alife():release(se_item, true)
+                            end
+                        end
+                    end
+                end
+                
+                -- Reward: Spawn something from trader's stock
+                if trader_npc then
+                    spawn_trade_reward(npc, trader_npc, value)
+                end
+                
+                total_value = total_value + value
+                items_sold = items_sold + 1
+            end
+        end
+    end
+    
+    if items_sold > 0 then
+        logger.siski_log("TRADING", "INFO", "Squad [%s] sold %d items for %d RU at [%s]", 
+            squad:name(), items_sold, total_value, siski_ef_utils.safe_name(trader_smart))
+    end
+    
+    return total_value
+end
+
+function get_item_value(item)
+    if not item then return 0 end
+    
+    local section = siski_ef_utils.safe_section(item)
+    if not section then return 0 end
+    local base_value = 0
+    
+    -- Artifacts - high value
+    if string.find(section, "af_") then
+        base_value = 5000
+    -- Weapons
+    elseif string.find(section, "wpn_") then
+        base_value = 2000
+    -- Armor
+    elseif string.find(section, "outfit_") then
+        base_value = 3000
+    elseif string.find(section, "helm_") then
+        base_value = 1000
+    -- Mutant parts
+    elseif string.find(section, "mutant_") then
+        base_value = 500
+    -- Default
+    else
+        base_value = 100
+    end
+    
+    -- Apply condition modifier if available
+    local condition = 1.0
+    local ok_cond, res_cond = pcall(function() return item:condition() end)
+    if ok_cond then condition = res_cond end
+    
+    return math.floor(base_value * (condition or 1.0))
+end
+
+function spawn_trade_reward(npc, trader_npc, value)
+    if not npc or not trader_npc then return end
+    
+    -- Spawn useful items based on value
+    local reward_section = nil
+    
+    if value >= 5000 then
+        -- High value - spawn medkit
+        reward_section = "medkit_army"
+    elseif value >= 2000 then
+        -- Medium value - spawn ammo
+        reward_section = "ammo_9x19_fmj"
+    elseif value >= 500 then
+        -- Low value - spawn bandage
+        reward_section = "bandage"
+    end
+    
+    if reward_section then
+        local pos = siski_ef_utils.safe_position(npc)
+        local lvid = siski_ef_utils.safe_level_vertex_id(npc)
+        local gvid = siski_ef_utils.safe_game_vertex_id(npc)
+        local nid = siski_ef_utils.safe_id(npc)
+        
+        if pos and lvid and gvid and nid then
+            alife():create(reward_section, pos, lvid, gvid, nid)
+            logger.siski_log("TRADING", "DEBUG", "NPC [%s] received [%s] as trade reward", siski_ef_utils.safe_name(npc), reward_section)
+        end
+    end
+end
+
+-- ==============================================================================================
+-- INIT
+-- ==============================================================================================
+
+function on_game_start()
+    logger.siski_log("TRADING", "INFO", "Module initialized")
+end

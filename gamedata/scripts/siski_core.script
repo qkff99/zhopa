@@ -1,0 +1,359 @@
+-- SISKI Core (Bootstrap)
+-- Entry point for the system.
+
+local modules_enabled = {
+    patches = true,
+    brain = true,
+    scanner = true,
+    intel = true,
+    spawner = true,
+    debug = true,
+    force_loot = true,
+    vendetta = true
+}
+
+function can_run(module_name)
+    return modules_enabled[module_name] == true
+end
+
+function set_module_enabled(module_name, enabled)
+    modules_enabled[module_name] = enabled and true or false
+end
+
+function get_module_enabled(module_name)
+    return modules_enabled[module_name] == true
+end
+
+-- [STABILITY] Safe Item Handling (Prevents CAI_Stalker::update_best_item_info_impl crash)
+-- Defer item transfers and releases to next frame to avoid engine access violations during Hit events.
+local safe_ops_scheduled = false
+local pending_releases = {}
+local pending_release_order = {}
+local pending_transfers = {}
+local pending_transfer_order = {}
+
+local function schedule_safe_ops()
+    if safe_ops_scheduled then return end
+    safe_ops_scheduled = true
+
+    CreateTimeEvent("siski_safe_ops", "tick", 0.1, function()
+        safe_ops_scheduled = false
+
+        local release_budget = 25
+        while release_budget > 0 and #pending_release_order > 0 do
+            local obj_id = table.remove(pending_release_order, 1)
+            if obj_id and pending_releases[obj_id] then
+                pending_releases[obj_id] = nil
+                local se = alife_object(obj_id)
+                if se then
+                    alife():release(se, true)
+                end
+                if siski_memory and siski_memory.clear_item_claim then
+                    pcall(function() siski_memory.clear_item_claim(obj_id) end)
+                end
+                release_budget = release_budget - 1
+            end
+        end
+
+        local transfer_budget = 25
+        while transfer_budget > 0 and #pending_transfer_order > 0 do
+            local item_id = table.remove(pending_transfer_order, 1)
+            local payload = item_id and pending_transfers[item_id] or nil
+            if payload then
+                pending_transfers[item_id] = nil
+                local itm = level.object_by_id(payload.item_id)
+                local src = level.object_by_id(payload.from_id)
+                local dst = level.object_by_id(payload.to_id)
+                if itm and src and dst then
+                    src:transfer_item(itm, dst)
+                end
+                if siski_memory and siski_memory.clear_item_claim then
+                    pcall(function() siski_memory.clear_item_claim(payload.item_id) end)
+                end
+                transfer_budget = transfer_budget - 1
+            end
+        end
+
+        if #pending_release_order > 0 or #pending_transfer_order > 0 then
+            schedule_safe_ops()
+        end
+
+        return true
+    end)
+end
+
+function safe_release(obj_id)
+    if not obj_id then return end
+    if pending_releases[obj_id] then return end
+    pending_releases[obj_id] = true
+    pending_release_order[#pending_release_order + 1] = obj_id
+    schedule_safe_ops()
+end
+
+function safe_transfer(item, from_npc, to_npc)
+    if not (item and from_npc and to_npc) then return end
+    local item_id = siski_ef_utils.safe_id(item)
+    local from_id = siski_ef_utils.safe_id(from_npc)
+    local to_id = siski_ef_utils.safe_id(to_npc)
+
+    if not (item_id and from_id and to_id) then return end
+    if pending_transfers[item_id] then return end
+    pending_transfers[item_id] = { item_id = item_id, from_id = from_id, to_id = to_id }
+    pending_transfer_order[#pending_transfer_order + 1] = item_id
+    schedule_safe_ops()
+end
+
+local function apply_runtime_fixes()
+    if smart_terrain and smart_terrain.smart_terrain and smart_terrain.smart_terrain.smart_terrain_squad_count then
+        local original_count_func = smart_terrain.smart_terrain.smart_terrain_squad_count
+
+        smart_terrain.smart_terrain.smart_terrain_squad_count = function(self, squad)
+            if not squad then return 0 end
+            if not squad.get_script_target then
+                return 0
+            end
+            return original_count_func(self, squad)
+        end
+        siski_logger.log_info("CORE", "Applied runtime patch: smart_terrain_squad_count (Safety Wrapper)")
+    end
+
+    if _g and type(_g.update_best_weapon) == "function" then
+        siski_logger.log_warn("CORE", "_g.update_best_weapon is defined; this engine hook can cause rare crashes")
+    end
+end
+
+local function gc_watch_enabled()
+    return ui_mcm and ui_mcm.get and ui_mcm.get("siski/debug_enabled") == true
+end
+
+local gc_watch_initialized = false
+
+local function init_gc_watch()
+    if gc_watch_initialized then return end
+    local f = io.open("siski_gc_watch.log", "w")
+    if f then
+        f:write("=== SISKI GC WATCH START ===\n")
+        f:close()
+    end
+    gc_watch_initialized = true
+end
+
+function on_game_start()
+    apply_runtime_fixes()
+
+    if gc_watch_enabled() then
+        init_gc_watch()
+    end
+
+    -- 1. Initialize Logger
+    -- (Auto-init via its own on_game_start, but we log here too)
+
+    -- 2. Initialize Memory
+    siski_memory.init()
+
+    -- 3. Register Callbacks
+    RegisterScriptCallback("actor_on_first_update", on_first_update)
+    RegisterScriptCallback("actor_on_update", on_update)
+    RegisterScriptCallback("squad_on_npc_death", on_squad_death)
+    RegisterScriptCallback("save_state", save_state)
+    RegisterScriptCallback("load_state", load_state)
+    RegisterScriptCallback("on_key_press", on_key_press)
+
+    -- 3.5 Initialize Patches
+    if can_run("patches") and siski_patches and siski_patches.on_game_start then
+        siski_patches.on_game_start()
+    end
+
+    -- 3.6 Initialize Intel
+    if can_run("intel") and siski_intel and siski_intel.on_game_start then
+        siski_intel.on_game_start()
+    end
+
+    -- 3.7 Initialize Debug
+    if can_run("debug") and siski_debug and siski_debug.on_game_start then
+        siski_debug.on_game_start()
+    end
+
+    -- 4. Initialize Spawner
+    if can_run("spawner") and siski_spawner then
+        siski_logger.log_info("CORE", "Found siski_spawner. Attempting init...")
+        if siski_spawner.on_game_start then
+            siski_spawner.on_game_start()
+        else
+            siski_logger.log_err("CORE", "siski_spawner has no on_game_start!")
+        end
+    else
+        siski_logger.log_err("CORE", "siski_spawner is NIL! (Script load failed?)")
+    end
+
+    -- 5. Initialize Brain
+    if can_run("brain") and siski_brain then
+        siski_logger.log_info("CORE", "Found siski_brain. Attempting init...")
+        if siski_brain.on_game_start then
+            siski_brain.on_game_start()
+        else
+            siski_logger.log_err("CORE", "siski_brain has no on_game_start!")
+        end
+    else
+        siski_logger.log_err("CORE", "siski_brain is NIL! (Script load failed?)")
+    end
+
+    -- 7. Initialize Scanner
+    if can_run("scanner") and siski_scanner and siski_scanner.on_game_start then
+        siski_scanner.on_game_start()
+    end
+end
+
+function on_first_update()
+    siski_logger.log_info("CORE", "First Update. Spawner & Intel will initialize via their own callbacks.")
+end
+
+local last_update_tg = 0
+local last_gc_watch_tg = 0
+local last_gc_sweep_tg = 0
+
+local function count_keys(t)
+    local n = 0
+    if not t then return 0 end
+    for _ in pairs(t) do
+        n = n + 1
+    end
+    return n
+end
+
+local function count_vendettas(v)
+    if not v then return 0, 0 end
+    local total = 0
+    local active = 0
+    for _, sub in pairs(v) do
+        if type(sub) == "table" then
+            for _, info in pairs(sub) do
+                total = total + 1
+                if type(info) == "table" and info.active then
+                    active = active + 1
+                end
+            end
+        end
+    end
+    return total, active
+end
+
+local function append_gc_watch(line)
+    if not gc_watch_enabled() then return end
+    init_gc_watch()
+    local f = io.open("siski_gc_watch.log", "a")
+    if not f then return end
+    f:write(line .. "\n")
+    f:close()
+end
+
+function on_update()
+    -- Master Throttle: 5Hz (Limit all secondary systems to 200ms refresh)
+    local tg = time_global()
+    if tg < last_update_tg + 200 then return end
+    last_update_tg = tg
+
+    if tg >= last_gc_sweep_tg + 30000 then
+        last_gc_sweep_tg = tg
+
+        if siski_memory and siski_memory.sweep_item_claims then
+            pcall(function() siski_memory.sweep_item_claims(60000) end)
+        end
+        if siski_memory and siski_memory.sweep_global_loot then
+            pcall(function() siski_memory.sweep_global_loot(300000) end)
+        end
+        if can_run("scanner") and siski_scanner and siski_scanner.sweep_cache then
+            pcall(function() siski_scanner.sweep_cache(120000) end)
+        end
+    end
+
+    if tg >= last_gc_watch_tg + 1000 then
+        last_gc_watch_tg = tg
+
+        if gc_watch_enabled() then
+            local state = siski_memory and siski_memory.get_state and siski_memory.get_state() or nil
+            local item_claims = state and state.item_claims or nil
+            local vendettas = state and state.vendettas or nil
+            local global_loot = state and state.global_loot or nil
+
+            local vend_total, vend_active = count_vendettas(vendettas)
+
+            local scan_cache_n = 0
+            if can_run("scanner") and siski_scanner and siski_scanner.get_cache_stats then
+                local ok, st = pcall(function() return siski_scanner.get_cache_stats() end)
+                if ok and st and st.scan_cache then scan_cache_n = st.scan_cache end
+            end
+
+            local ef_best_n = 0
+            local ef_cmd_n = 0
+            if siski_ef_utils and siski_ef_utils.get_cache_stats then
+                local ok, st = pcall(function() return siski_ef_utils.get_cache_stats() end)
+                if ok and st then
+                    ef_best_n = st.best_enemy_cache or 0
+                    ef_cmd_n = st.commander_id_cache or 0
+                end
+            end
+
+            append_gc_watch(string.format(
+                "%d item_claims=%d vendettas=%d vendettas_active=%d global_loot=%d scan_cache=%d ef_best_enemy_cache=%d ef_commander_cache=%d safe_release_q=%d safe_transfer_q=%d",
+                tg,
+                count_keys(item_claims),
+                vend_total,
+                vend_active,
+                count_keys(global_loot),
+                scan_cache_n,
+                ef_best_n,
+                ef_cmd_n,
+                #pending_release_order,
+                #pending_transfer_order
+            ))
+        end
+    end
+
+    -- Global Updates (Throttled)
+    if can_run("brain") and siski_brain then siski_brain.update_brains() end
+    if can_run("debug") and siski_debug then siski_debug.update() end
+    if can_run("scanner") and siski_scanner then siski_scanner.update_artifact_scan() end
+end
+
+function save_state(m_data)
+    if siski_memory then siski_memory.save(m_data) end
+end
+
+function load_state(m_data)
+    if siski_memory then siski_memory.load(m_data) end
+end
+
+function on_squad_death(squad, npc, killer_npc, killer_squad)
+    -- Trigger Vendetta
+    -- Trigger Vendetta
+    if can_run("vendetta") and squad and killer_squad and siski_vendetta then
+        -- [FIX] Do not start vendetta for friendly fire (e.g. accidental grenade)
+        local my_comm = squad.player_id
+        local killer_comm = killer_squad.player_id
+
+        if my_comm ~= killer_comm then
+            siski_vendetta.register_feud(squad.id, killer_squad.id)
+        else
+            siski_logger.log_warn("CORE", "Friendly Fire detected between [%s] (%s) and [%s] (%s). Vendetta suppressed.",
+                squad:name(), my_comm, killer_squad:name(), killer_comm)
+        end
+    end
+end
+
+function on_key_press(key)
+    -- DEBUG: MANUAL DUMP
+    local debug_mode = ui_mcm.get("siski/debug_enabled")
+    local bind_key = ui_mcm.get("siski/debug_dump_key") or DIK_keys.DIK_DELETE
+
+    -- siski_logger.log_info("CORE", "Key Pressed: %s | Bind: %s | Debug: %s", key, bind_key, tostring(debug_mode))
+
+    if key == bind_key then
+        if debug_mode then
+            siski_memory.dump_memory_snapshot()
+            siski_logger.send_news(db.actor, "Memory Dumped to File", "ui_inGame2_D_Sisshik")
+        else
+            siski_logger.log_warn("CORE", "Dump Key Pressed, but Debug Mode is OFF in MCM!")
+        end
+    end
+end

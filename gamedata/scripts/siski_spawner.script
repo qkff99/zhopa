@@ -1,0 +1,1047 @@
+-- ==============================================================================================
+-- SISKI SPAWNER MODULE
+-- Manages population levels and spawns reinforcements
+-- ==============================================================================================
+
+local settings = siski_settings
+local logger = siski_logger
+local memory = siski_memory
+local intel = siski_intel
+
+local last_check_time = 0
+
+-- CAMPFIRE DECKS? No, we just shuffle the list each time.
+-- Global Cache for Campfire Candidates to reduce allocations
+local campfire_candidates_cache = {}
+
+-- [OPTIMIZATION] Threat Cache
+-- Stores NPC positions and factions for the duration of a spawn cycle to avoid engine calls.
+local threat_cache = nil
+
+local function build_threat_cache()
+    local sim = alife()
+    local simboard = SIMBOARD or (sim_board and sim_board.get_sim_board())
+    local squads = (simboard and simboard.squads) or {}
+
+    threat_cache = {}
+
+    for squad_id, _ in pairs(squads) do
+        local sq = alife_object(squad_id)
+        if sq and sq.player_id and sq.m_game_vertex_id then
+            local gv = game_graph():vertex(sq.m_game_vertex_id)
+            if gv then
+                local sq_lvl = sim:level_name(gv:level_id())
+                local is_monster = (sq.player_id == "monster" or sq.player_id == "zombied" or sq.player_id == "animal")
+
+                table.insert(threat_cache, {
+                    id = squad_id,
+                    pos = sq.position,
+                    level = sq_lvl,
+                    faction = sq.player_id,
+                    is_monster = is_monster,
+                    name = siski_ef_utils.safe_name(sq)
+                })
+            end
+        end
+    end
+end
+
+-- NOTE: spawn_queue and process_spawn_queue removed - we now use synchronous spawning during loading screens
+
+-- [OPTIMIZATION] Central Safety Check
+-- Reuses threat_cache and smarts to validate a position.
+local function check_safety(target_pos, level_name, faction)
+    local state = memory.get_state()
+    local smarts = state.smarts or {}
+    local SAFE_DIST_BASE = 100
+    local SAFE_DIST_ENEMY = 100
+
+    -- CHECK A: Distance to BASES
+    for _, smart_data in pairs(smarts) do
+        if smart_data.level == level_name and smart_data.props and smart_data.props["base"] and smart_data.props["base"] > 0 then
+            if smart_data.position then
+                local dist = target_pos:distance_to(smart_data.position)
+                if dist < SAFE_DIST_BASE then
+                    return false, "base near " .. smart_data.name
+                end
+            end
+        end
+    end
+
+    -- CHECK B: Distance to ENEMIES (Using Threat Cache)
+    if threat_cache then
+        for _, thr in ipairs(threat_cache) do
+            if thr.level == level_name then
+                local dist = thr.pos:distance_to(target_pos)
+                if dist < SAFE_DIST_ENEMY then
+                    local relation = game_relations.get_factions_community(faction, thr.faction)
+                    if relation and relation <= -1000 then
+                        return false, "enemy " .. thr.name
+                    end
+                    if (faction == "monster" or faction == "animal" or faction == "zombied") ~= thr.is_monster then
+                        return false, "enemy type " .. thr.name
+                    end
+                end
+            end
+        end
+    end
+    return true
+end
+
+local function get_safe_campfire(level_name, faction)
+    local sim = alife()
+    local simboard = SIMBOARD or (sim_board and sim_board.get_sim_board())
+
+    -- 1. Get All Campfires on Level
+    local all_campfires = memory.get_campfires(level_name)
+    if not all_campfires or #all_campfires == 0 then
+        -- Try scanning if empty
+        intel.scan_campfires()
+        all_campfires = memory.get_campfires(level_name)
+    end
+
+    if not all_campfires or #all_campfires == 0 then
+        logger.siski_log("SPAWNER", "WARN", "No campfires found on level [%s]", level_name)
+        return nil
+    end
+
+    -- 2. Shuffle (Fisher-Yates) for randomness
+    -- Copy to temp table to avoid modifying memory state
+    local candidates = {}
+    for _, cf in ipairs(all_campfires) do table.insert(candidates, cf) end
+
+    for i = #candidates, 2, -1 do
+        local j = math.random(i)
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+
+    for _, campfire in ipairs(candidates) do
+        local is_safe, reason = check_safety(campfire.position, level_name, faction)
+        if is_safe then
+            return campfire
+        end
+    end
+
+    return nil
+end
+
+local function get_safe_level_changer(level_name, faction)
+    local sim = alife()
+
+    -- 1. Get Level Changers
+    local changers = intel.get_level_changers(level_name)
+    if not changers or #changers == 0 then return nil end
+
+    -- 2. Shuffle
+    local candidates = {}
+    for _, lc in ipairs(changers) do table.insert(candidates, lc) end
+    for i = #candidates, 2, -1 do
+        local j = math.random(i)
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+
+    -- 3. Relaxed Safety Check (Actor Only)
+    -- Level changers are fallback points, often entry/exit zones.
+    -- Strict base/enemy checks here prevent spawning in critical maps (like Labs or small levels).
+    -- We ONLY check distance to player to avoid spawn camping the player.
+
+    local actor = db.actor
+    local actor_level = level.name()
+    local MIN_DIST_ACTOR = 150
+    local t_spawn = settings.get_spawn_settings()
+    if t_spawn and t_spawn.min_dist_to_actor then
+        MIN_DIST_ACTOR = t_spawn.min_dist_to_actor
+    end
+
+    for _, lc in ipairs(candidates) do
+        local is_safe = true
+
+        -- [LAZY] Check Actor Distance FIRST (only if on same level)
+        if level_name == actor_level then
+            local apos = siski_ef_utils.safe_position(db.actor)
+            if apos then
+                local dist = apos:distance_to(lc.position)
+                if dist < MIN_DIST_ACTOR then
+                    is_safe = false
+                end
+            end
+        end
+
+        -- Then check threat cache if still safe
+        if is_safe then
+            is_safe = check_safety(lc.position, level_name, faction)
+        end
+
+        if is_safe then return lc end
+    end
+
+    return nil
+end
+
+local function get_safe_smart(level_name, faction)
+    local sim = alife()
+    local smarts = memory.get_state().smarts or {}
+    local candidates = {}
+
+    -- 1. Gather Candidates (Non-Base Smarts on Level)
+    for name, data in pairs(smarts) do
+        -- Check Level
+        local is_on_level = (data.level == level_name)
+        if not is_on_level and data.gvid then
+            -- Fallback check
+            local gv = game_graph():vertex(data.gvid)
+            if gv and sim:level_name(gv:level_id()) == level_name then
+                is_on_level = true
+            end
+        end
+
+        if is_on_level then
+            local props = data.props or {}
+            local is_base = (props["base"] and props["base"] > 0)
+
+            -- Filter: NO BASES for fallback (unless absolutely necessary, but for now strict)
+            if not is_base then
+                table.insert(candidates, data)
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+
+    -- 2. Shuffle
+    for i = #candidates, 2, -1 do
+        local j = math.random(i)
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+
+    -- 3. Actor Safety Check
+    local actor_level = level.name()
+    local MIN_DIST_ACTOR = 150
+    local t_spawn = settings.get_spawn_settings()
+    if t_spawn and t_spawn.min_dist_to_actor then
+        MIN_DIST_ACTOR = t_spawn.min_dist_to_actor
+    end
+
+    for _, smart_data in ipairs(candidates) do
+        local is_safe = true
+
+        if (smart_data.position or smart_data.id) and level_name == actor_level then
+            -- Determine position safely
+            local pos = smart_data.position
+            if not pos and smart_data.id then
+                local obj = alife_object(smart_data.id)
+                pos = obj and obj.position
+            end
+
+            if pos then
+                local apos = siski_ef_utils.safe_position(db.actor)
+                if apos then
+                    local dist = apos:distance_to(pos)
+                    if dist < MIN_DIST_ACTOR then is_safe = false end
+                end
+            end
+        end
+
+        -- [OPTIMIZATION] Check Threats via Cache
+        if is_safe and smart_data.position then
+            is_safe = check_safety(smart_data.position, level_name, faction)
+        end
+
+        if is_safe then
+            return smart_data
+        end
+    end
+
+    return nil
+end
+
+-- ==============================================================================================
+-- LOADING-ONLY SPAWNER ARCHITECTURE
+-- Spawns happen ONLY during loading screens (level changes, save loads) to avoid stutters
+-- ==============================================================================================
+
+local last_game_time = 0
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("spawner")) then return end
+    logger.siski_log("SPAWNER", "INFO", "Module Initializing (First-Update-Only Mode)...")
+
+    -- Hook: Game Loaded (After save load or level transition)
+    RegisterScriptCallback("actor_on_first_update", on_first_update_after_load)
+end
+
+-- Guard flags to prevent re-entry and duplicate spawns
+local is_spawning = false
+local last_spawn_level = nil
+
+-- Called on first frame after loading a save or entering a level
+function on_first_update_after_load()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("spawner")) then return end
+    local current_level = level.name()
+
+    -- Skip if already spawned on THIS level (prevents double-spawn)
+    if last_spawn_level == current_level then
+        return
+    end
+
+    -- Skip if currently spawning (prevent re-entry)
+    if is_spawning then
+        logger.siski_log("SPAWNER", "WARN", "Spawn skipped: already in progress")
+        return
+    end
+
+    local t_spawn = settings.get_spawn_settings()
+    if not t_spawn.enabled then return end
+
+    logger.siski_log("SPAWNER", "INFO", "First update on [%s]. Scheduling spawn cycle (Delay: 3.0s)...", current_level)
+
+    is_spawning = true
+
+    -- [OPTIMIZATION] Delayed Start
+    -- Prevents heavy loops from running during the very first frames of rendering (fixes Freeze/TDR)
+    CreateTimeEvent("siski_spawner_init", "delay_spawn", 3.0, function()
+        logger.siski_log("SPAWNER", "INFO", "Starting delayed spawn cycle...")
+
+        spawn_all_deficit_sync()
+        check_and_spawn_af_hunters()
+
+        -- Mark as done for this level
+        last_spawn_level = current_level
+        is_spawning = false
+
+        logger.siski_log("SPAWNER", "INFO", "Spawn cycle complete on [%s].", current_level)
+        return true -- Processed
+    end)
+end
+
+-- Synchronous spawn: Spawns ALL deficit squads immediately (no queue, no stutters - we're in loading)
+function spawn_all_deficit_sync()
+    local current_pop = get_population_counts() -- {level = {faction = count}}
+    local pop_settings_table = settings.get_all_populations()
+    local state = memory.get_state()
+
+    -- [CRITICAL] Ensure intel has scanned ALL spawn points BEFORE spawning
+    -- This runs during loading screens so performance is not an issue
+    if not state.smarts or not next(state.smarts) then
+        logger.siski_log("SPAWNER", "INFO", "Intel cache empty. Running UNIFIED scan...")
+        intel.scan_smarts()             -- SimBoard Scan (Fast)
+        intel.scan_all_static_objects() -- Unified Static Scan (1 Pass 65k)
+    end
+
+    -- Build threat cache once for safety checks
+    build_threat_cache()
+
+    -- Get pool of ALL levels
+    local all_levels = {}
+    for name, data in pairs(state.smarts or {}) do
+        if data.gvid then
+            local gv = game_graph():vertex(data.gvid)
+            if gv then
+                local lvl = alife():level_name(gv:level_id())
+                if lvl then all_levels[lvl] = true end
+            end
+        end
+    end
+
+    local total_spawned = 0
+    local MAX_SPAWNS_PER_CYCLE = 500 -- Increased to 500 (Major Refill Mode)
+
+
+    -- PER-LEVEL spawning
+    for lvl, _ in pairs(all_levels) do
+        local lvl_pop = current_pop[lvl] or {}
+
+        for faction, _ in pairs(pop_settings_table) do
+            -- Safety: Hard cap on total spawns
+            if total_spawned >= MAX_SPAWNS_PER_CYCLE then
+                logger.siski_log("SPAWNER", "WARN", "Hit spawn cap (%d). Stopping cycle.", MAX_SPAWNS_PER_CYCLE)
+                goto finish_spawning
+            end
+
+            -- Skip if faction not allowed on this level
+            if not settings.is_level_allowed(faction, lvl) then
+                goto continue_faction
+            end
+
+            local count = lvl_pop[faction] or 0
+            local limit = settings.get_population(faction)
+            local deficit = limit - count
+
+            if deficit > 0 then
+                logger.siski_log("SPAWNER", "INFO", "Sync Spawn: [%s] on [%s] needs %d squads.", faction, lvl, deficit)
+
+                for i = 1, deficit do
+                    -- Safety: Check cap inside inner loop too
+                    if total_spawned >= MAX_SPAWNS_PER_CYCLE then
+                        break
+                    end
+
+                    local success = try_spawn_squad(faction, lvl, true)
+                    if success then
+                        total_spawned = total_spawned + 1
+                    end
+                end
+            end
+
+            ::continue_faction::
+        end
+    end
+
+    ::finish_spawning::
+
+    -- Clear threat cache
+    threat_cache = nil
+
+    logger.siski_log("SPAWNER", "INFO", "Sync Spawn complete. Spawned %d squads total.", total_spawned)
+
+    -- Update refill day
+    state.last_major_refill_day = level.get_time_days()
+end
+
+-- NOTE: try_major_refill() removed - functionality merged into spawn_all_deficit_sync()
+
+-- cleanup_corpses function removed for performance
+
+
+-- ==============================================================================================
+-- SPECIAL CLASSES SPAWNING
+-- ==============================================================================================
+
+-- Helper: simple non-repeating deck for anomalies
+local function get_deck_candidate(deck_key, candidates)
+    local state = memory.get_state()
+    if not state.decks then state.decks = {} end
+
+    local deck = state.decks[deck_key]
+
+    -- Initialize or Reset if empty
+    if not deck or #deck == 0 then
+        deck = {}
+        for i, v in ipairs(candidates) do table.insert(deck, v) end
+
+        -- Shuffle
+        for i = #deck, 2, -1 do
+            local j = math.random(i)
+            deck[i], deck[j] = deck[j], deck[i]
+        end
+        state.decks[deck_key] = deck
+        -- logger.siski_log("SPAWNER", "INFO", "Deck [%s] reshuffled (size: %d)", deck_key, #deck)
+    end
+
+    -- Pop one
+    local val = table.remove(deck, 1)
+
+    -- If candidates changed and validation fails, we might return nil or invalid,
+    -- but for anomalies simple pop is okay.
+    return val
+end
+
+function check_and_spawn_af_hunters()
+    local status, result = pcall(function()
+        -- CONFIG:
+        local cfg = settings.get_af_hunter_settings()
+        local t_spawn = settings.get_spawn_settings()
+        local TARGET_HUNTERS_PER_LEVEL = cfg.count
+        local USE_CAMPFIRE = cfg.campfire_fallback
+
+        -- 1. CENSUS: Count existing hunters per level
+        local level_counts = {}
+        local state = memory.get_state()
+
+        for id, data in pairs(state.squads) do
+            if data.squad_class == "af_hunter" then
+                local obj = alife_object(id)
+                if obj then
+                    local gg = game_graph()
+                    if obj.m_game_vertex_id then
+                        local g_vertex = gg:vertex(obj.m_game_vertex_id)
+                        if g_vertex then
+                            local s_lvl = alife():level_name(g_vertex:level_id())
+                            if s_lvl then
+                                level_counts[s_lvl] = (level_counts[s_lvl] or 0) + 1
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 2. CANDIDATES: Get Anomaly Zones from INTEL (scanned zone_* objects)
+        -- Scan once if not done yet
+        local all_anomalies = intel.get_all_anomaly_zones_cached()
+        if not all_anomalies or not next(all_anomalies) then
+            intel.scan_anomaly_zones()
+            all_anomalies = intel.get_all_anomaly_zones_cached()
+        end
+
+        -- Build candidates_by_level from scanned anomaly zones
+        local candidates_by_level = {}
+        for lvl, zones in pairs(all_anomalies or {}) do
+            candidates_by_level[lvl] = zones -- Each zone has {id, position, lvid, gvid, name, section}
+        end
+
+        -- 3. SPAWN LOGIC: Iterate all levels found in candidates
+        -- (If a level has no anomaly smarts, we can't spawn hunters there anyway)
+        for lvl_name, candidates in pairs(candidates_by_level) do
+            local current_count = level_counts[lvl_name] or 0
+
+            if current_count < TARGET_HUNTERS_PER_LEVEL then
+                local needed = TARGET_HUNTERS_PER_LEVEL - current_count
+                logger.siski_log("SPAWNER", "INFO", "AF Hunters Deficit on [%s]: %d/%d. Spawning %d...", lvl_name,
+                    current_count, TARGET_HUNTERS_PER_LEVEL, needed)
+
+                local deck_key = "AF_HUNTER_" .. lvl_name
+
+                -- DEBUG: Print candidates list
+                if #candidates > 0 then
+                    local names_list = {}
+                    for _, zone in ipairs(candidates) do names_list[#names_list + 1] = (zone.name or "?") end
+                    logger.siski_log("SPAWNER", "DEBUG", "AF Hunter Anomaly Candidates for %s: %s", lvl_name,
+                        table.concat(names_list, ", "))
+                end
+
+                for i = 1, needed do
+                    -- Deck Logic: Get next anomaly zone from deck
+                    local anomaly = get_deck_candidate(deck_key, candidates)
+
+                    if anomaly then
+                        -- DEBUG: Trace selection (anomaly is a table, not alife object)
+                        local anomaly_name = anomaly.name or "unknown_anomaly"
+                        logger.siski_log("SPAWNER", "DEBUG", "Deck Selected Anomaly: [%s] (Key: %s)", anomaly_name,
+                            deck_key)
+
+                        -- Pick a random faction allowed on THIS level
+                        local allowed_factions = {}
+                        local all_stalker_factions = { "stalker", "csky", "ecolog", "renegade" }
+                        for _, fac in ipairs(all_stalker_factions) do
+                            if settings.is_level_allowed(fac, lvl_name) then
+                                table.insert(allowed_factions, fac)
+                            end
+                        end
+
+                        -- Fallback to ecolog if no factions allowed (User Request)
+                        if #allowed_factions == 0 then allowed_factions = { "ecolog" } end
+
+                        local chosen_faction = allowed_factions[math.random(#allowed_factions)]
+                        local sections = settings.get_squad_sections(chosen_faction) or { "stalker_sim_squad_advanced" }
+                        local section = sections[math.random(#sections)]
+
+                        -- PRIORITY 1: Try to find the anomaly's own smart terrain
+                        -- Pattern: "val_smart_terrain_6_4_anomal_zone" -> smart = "val_smart_terrain_6_4"
+                        local anomaly_smart_name = intel.get_anomaly_smart_name(anomaly_name)
+                        local anomaly_smart = anomaly_smart_name and intel.get_smart_by_name(anomaly_smart_name)
+
+                        local spawn_pos = anomaly.position
+                        local spawn_lvid = anomaly.lvid
+                        local spawn_gvid = anomaly.gvid
+                        local spawn_target_name = anomaly_name
+                        local spawn_smart = nil
+
+                        if anomaly_smart and anomaly_smart.position then
+                            -- Use anomaly smart terrain!
+                            spawn_pos = anomaly_smart.position
+                            spawn_lvid = anomaly_smart.m_level_vertex_id
+                            spawn_gvid = anomaly_smart.m_game_vertex_id
+                            spawn_target_name = anomaly_smart_name
+                            spawn_smart = anomaly_smart
+                            logger.siski_log("SPAWNER", "INFO", "AF Hunter spawning at ANOMALY SMART [%s] for zone [%s]",
+                                anomaly_smart_name, anomaly_name)
+                        else
+                            -- PRIORITY 2 (fallback): Find campfire near anomaly
+                            if USE_CAMPFIRE and #intel.get_all_campfires(lvl_name) == 0 then
+                                intel.scan_campfires()
+                            end
+
+                            local campfire, dist = nil, 9999
+                            if USE_CAMPFIRE then
+                                campfire, dist = intel.get_nearest_campfire(lvl_name, spawn_pos)
+                            end
+
+                            if campfire and dist < 150 then
+                                spawn_pos = campfire.position
+                                spawn_lvid = campfire.lvid
+                                spawn_gvid = campfire.gvid
+                                spawn_target_name = "Campfire near " .. anomaly_name
+                                logger.siski_log("SPAWNER", "INFO",
+                                    "AF Hunter fallback to CAMPFIRE near [%s] (Dist: %.1fm)", anomaly_name, dist)
+                            else
+                                logger.siski_log("SPAWNER", "WARN",
+                                    "SKIPPING AF Hunter spawn at [%s] - No smart or campfire", anomaly_name)
+                            end
+                        end
+
+                        -- Spawn if we have valid position
+                        local can_spawn = (spawn_smart ~= nil) or (spawn_pos and spawn_lvid and spawn_gvid)
+
+                        -- [NEW] Protection: Don't spawn on top of player if on same level
+                        if can_spawn and lvl_name == level.name() then
+                            local apos = siski_ef_utils.safe_position(db.actor)
+                            if apos then
+                                local dist = apos:distance_to(spawn_pos)
+                                local min_dist = (t_spawn and t_spawn.min_dist_to_actor) or 150
+
+                                if dist < min_dist then
+                                    logger.siski_log("SPAWNER", "WARN",
+                                        "REJECTED AF Hunter spawn at [%s] - Too close to player (%.1fm < %.1fm)",
+                                        spawn_target_name, dist, min_dist)
+                                    can_spawn = false
+                                end
+                            end
+                        end
+
+                        if not can_spawn then
+                            -- Skip this spawn attempt
+                        else
+                            local squad = alife():create(section, spawn_pos, spawn_lvid, spawn_gvid)
+
+                            if squad then
+                                -- Note: For anomaly zones, we don't have a smart_obj to pass to create_npc
+                                -- Squad members will be added by apply_squad_size
+
+                                if SIMBOARD and SIMBOARD.setup_squad_and_group then
+                                    SIMBOARD:setup_squad_and_group(squad)
+                                end
+
+                                -- AF Hunters: Populate squad using engine method
+                                -- create_npc reads the squad section and spawns appropriate NPCs
+                                if squad.create_npc then
+                                    squad:create_npc(nil, spawn_pos, spawn_lvid, spawn_gvid)
+                                end
+
+                                -- Apply squad size (add/remove members to match settings)
+                                -- AF Hunters: Custom size logic (2-3)
+                                apply_af_hunter_size(squad)
+
+                                if not state.squads[squad.id] then state.squads[squad.id] = {} end
+                                state.squads[squad.id].squad_class = "af_hunter"
+                                state.squads[squad.id].spawned_by_siski = true
+                                state.squads[squad.id].spawn_level = lvl_name
+
+                                -- AF Hunter: Save target anomaly NAME only
+                                -- Position is looked up from global anomaly_zones cache when needed
+                                state.squads[squad.id].target_anomaly_name = anomaly.name
+
+                                -- Use SPAWN SMART as home (the anomaly smart we spawned on)
+                                -- If no spawn_smart (campfire spawn), find nearest
+                                local home_smart = spawn_smart or intel.get_nearest_smart(lvl_name, anomaly.position)
+                                if home_smart then
+                                    state.squads[squad.id].home_smart = home_smart.id
+                                    -- Assign squad to that smart for engine compatibility
+                                    if SIMBOARD and SIMBOARD.assign_squad_to_smart then
+                                        SIMBOARD:assign_squad_to_smart(squad, home_smart.id)
+                                    end
+                                    logger.siski_log("SPAWNER", "INFO",
+                                        "AF Hunter [%s] target anomaly [%s] (home smart: %s)",
+                                        siski_ef_utils.safe_name(squad), anomaly.name,
+                                        siski_ef_utils.safe_name(home_smart))
+                                end
+
+                                logger.siski_log("SPAWNER", "WARN", "Global Spawn: AF Hunter [%s] on [%s] at [%s]",
+                                    siski_ef_utils.safe_name(squad), lvl_name, spawn_target_name)
+                                -- Break after one successful spawn per level to rate limit
+                                break
+                            else
+                                logger.siski_log("SPAWNER", "ERR", "Failed to spawn squad on level [%s]", lvl_name)
+                            end
+                        end -- End campfire-only block
+                    else
+                        logger.siski_log("SPAWNER", "WARN", "Deck exhausted for [%s]!", lvl_name)
+                        break
+                    end
+                end
+            end
+        end
+    end)
+
+    if not status then
+        logger.siski_log("SPAWNER", "ERR", "CRASH CAUGHT in check_and_spawn_af_hunters: %s", result)
+    end
+end
+
+-- NOTE: check_spawn() removed - functionality merged into spawn_all_deficit_sync()
+
+-- Returns: { level_name = { faction = count } }
+-- Example: { "zaton" = { "stalker" = 5, "bandit" = 3 }, "jupiter" = { ... } }
+function get_population_counts()
+    local counts = {} -- [level][faction] = count
+    local sim = alife()
+
+    -- SISKI: Only count OUR squads (ignore vanilla)
+    local state = memory.get_state()
+
+    if state and state.squads then
+        for id, data in pairs(state.squads) do
+            if not (data and data.spawned_by_siski) then
+                goto continue_count
+            end
+            local squad_obj = alife_object(tonumber(id))
+
+            if squad_obj and squad_obj.player_id and squad_obj.m_game_vertex_id then
+                local comm = squad_obj.player_id
+                local gv = game_graph():vertex(squad_obj.m_game_vertex_id)
+                if gv then
+                    local lvl = sim:level_name(gv:level_id())
+
+                    if not counts[lvl] then counts[lvl] = {} end
+                    counts[lvl][comm] = (counts[lvl][comm] or 0) + 1
+                end
+            end
+            ::continue_count::
+        end
+    end
+
+    return counts
+end
+
+function try_spawn_squad(faction, target_lvl, initial_wave)
+    -- target_lvl is optional, fallback to current level
+    target_lvl = target_lvl or level.name()
+
+    -- 1. Check Allowed Levels (Whitelisting from LTX)
+    if not settings.is_level_allowed(faction, target_lvl) then
+        return false
+    end
+
+    -- 2. Find Safe Campfire (PRIORITY 1)
+    local campfire = get_safe_campfire(target_lvl, faction)
+
+    if campfire then
+        logger.siski_log("SPAWNER", "INFO", "Spawning [%s] at SAFE CAMPFIRE [%s] on [%s]", faction, campfire.name,
+            target_lvl)
+        if spawn_squad_at_location(faction, campfire, "campfire") then
+            return true
+        end
+    end
+
+    -- 3. Find Safe Level Changer (PRIORITY 2 - FALLBACK)
+    local level_changer = get_safe_level_changer(target_lvl, faction)
+
+    if level_changer then
+        logger.siski_log("SPAWNER", "INFO", "Spawning [%s] at SAFE LEVEL CHANGER [%s] on [%s] (Fallback)", faction,
+            level_changer.name, target_lvl)
+        if spawn_squad_at_location(faction, level_changer, "level_changer") then
+            return true
+        end
+    end
+
+    -- 4. Find Safe Smart (PRIORITY 3 - TERTIARY FALLBACK)
+    local smart_obj = get_safe_smart(target_lvl, faction)
+    if smart_obj then
+        local s_name = siski_ef_utils.safe_name(smart_obj)
+        logger.siski_log("SPAWNER", "INFO", "Spawning [%s] at SAFE SMART [%s] on [%s] (Tertiary Fallback)", faction,
+            s_name, target_lvl)
+        if spawn_squad_at_location(faction, smart_obj, "smart") then
+            return true
+        end
+    end
+
+    logger.siski_log("SPAWNER", "WARN",
+        "Could not find safe CAMPFIRE, LEVEL CHANGER, or SMART for faction [%s] on level [%s]", faction, target_lvl)
+    return false
+end
+
+function is_safe_spawn(smart, faction, initial_wave)
+    local sim = alife()
+
+    -- RELAXATION for initial wave
+    local ignore_dist = initial_wave
+
+    -- 0. CHECK BLACKLIST (Settings)
+    if settings.is_smart_blacklisted(siski_ef_utils.safe_name(smart), faction) then
+        -- logger.siski_log("SPAWNER", "DEBUG", "Spawn Rejected: [%s] is blacklisted for [%s]", smart:name(), faction)
+        return false
+    end
+
+    local t_spawn = settings.get_spawn_settings()
+
+    -- 1. Check Distance to Actor (unless initial wave)
+    if not ignore_dist then
+        local actor_lvl = level.name()
+        local smart_lvl_name = nil
+        local gv = smart.gvid and game_graph():vertex(smart.gvid)
+        if gv then smart_lvl_name = alife():level_name(gv:level_id()) end
+
+        -- ONLY check distance if on SAME level as actor
+        if smart_lvl_name and actor_lvl == smart_lvl_name then
+            local apos = siski_ef_utils.safe_position(db.actor)
+            if apos then
+                local smart_pos = siski_ef_utils.safe_position(smart)
+                if smart_pos then
+                    local dist = apos:distance_to(smart_pos)
+
+                    if dist < t_spawn.min_dist_to_actor then return false end
+                    if dist > t_spawn.max_dist_to_actor then return false end
+                end
+            end
+        end
+    end
+
+    -- 2. Redundant Property Check (Mutants vs Bases)
+    local is_mutant = (faction == "monster" or faction == "animal")
+    local smart_props = smart.props or {}
+    local is_base = (smart_props["base"] and smart_props["base"] > 0)
+
+    if is_mutant and is_base then
+        return false -- ABSOLUTELY NO MUTANTS IN BASES
+    end
+
+    -- 3. Check for ENEMY squads at this smart (Using Threat Cache if available)
+    if threat_cache then
+        local smart_lvl_name = nil
+        local gv = smart.gvid and game_graph():vertex(smart.gvid)
+        if gv then smart_lvl_name = alife():level_name(gv:level_id()) end
+
+        for _, thr in ipairs(threat_cache) do
+            if thr.level == smart_lvl_name then
+                local dist = thr.pos:distance_to(siski_ef_utils.safe_position(smart) or smart.position)
+                if dist < 50 then -- Close proximity to smart
+                    local relation = game_relations.get_factions_community(faction, thr.faction)
+                    if relation and relation <= -1000 then
+                        return false
+                    end
+                    if (faction == "monster" or faction == "animal" or faction == "zombied") ~= thr.is_monster then
+                        return false
+                    end
+                end
+            end
+        end
+    end
+
+    return true
+end
+
+-- MODIFIED: Spawn at Location Data (Campfire or Level Changer)
+function spawn_squad_at_location(faction, loc_data, spawn_type)
+    local section = determine_squad_section(faction)
+    if not section then
+        logger.siski_log("SPAWNER", "ERR", "Could not determine valid section for faction [%s]", faction)
+        return
+    end
+
+    -- 1. Get POS
+    local pos = loc_data.position
+    local lvid = loc_data.lvid
+    local gvid = loc_data.gvid
+
+    -- [FIX] Vertex Snapping for Current Level
+    -- Prevents "Invalid position for CLevelGraph::vertex_id" errors if object is off-mesh.
+    if loc_data.level == level.name() then
+        if lvid and lvid < 4294967295 then
+            -- Use the exact center of the AI node
+            pos = level.vertex_position(lvid)
+        end
+    end
+
+    -- 2. Create Object
+    local squad = alife():create(section, pos, lvid, gvid)
+
+    if not squad then
+        logger.siski_log("SPAWNER", "ERR", "alife():create returned nil for section [%s]", section)
+        return false
+    end
+
+    -- 3. Fill Squad
+    if squad.create_npc then
+        -- Passing nil for smart is usually fine.
+        squad:create_npc(nil, pos, lvid, gvid)
+    else
+        local npc_sec = "stalker_sim_squad_novice"
+        squad:add_squad_member(npc_sec, pos, lvid, gvid)
+    end
+
+    -- 4. Setup in SIMBOARD
+    if SIMBOARD and SIMBOARD.setup_squad_and_group then
+        SIMBOARD:setup_squad_and_group(squad)
+
+        -- Try to match to nearest smart for engine logic?
+        if loc_data.smart_id then
+            if SIMBOARD.assign_squad_to_smart then
+                SIMBOARD:assign_squad_to_smart(squad, loc_data.smart_id)
+            end
+        else
+            -- Find nearest smart just to anchor them?
+            local nearest, dist = intel.get_nearest_smart(loc_data.level, pos)
+            if nearest then
+                if SIMBOARD.assign_squad_to_smart then
+                    SIMBOARD:assign_squad_to_smart(squad, nearest.id)
+                end
+            end
+        end
+    end
+
+    -- 5. Finalize
+    apply_squad_size(squad, faction)
+
+    if memory then
+        memory.register_squad(squad.id, {
+            spawned_by_siski = true,
+            spawn_type = spawn_type,
+            spawn_loc = loc_data.name
+        })
+    end
+
+    logger.siski_log("SPAWNER", "INFO", "SUCCESS: Spawned [%s] squad [%s] at [%s] (Size: %d)", spawn_type, squad:name(),
+        loc_data.name, squad:npc_count())
+    return true
+end
+
+function apply_squad_size(squad, faction)
+    local min = settings.get_squad_size_min(faction) or 2
+    local max = settings.get_squad_size_max(faction) or 4
+
+    if min < 1 then min = 1 end
+    if max < min then max = min end
+
+    local target_size = math.random(min, max)
+    local current_size = squad:npc_count()
+
+    -- ADD MEMBERS
+    if current_size < target_size then
+        local needed = target_size - current_size
+
+        -- Get section from first member (more robustly)
+        local first_section = nil
+        for k in squad:squad_members() do
+            local member_id = k
+            if type(k) == "table" or type(k) == "userdata" then
+                member_id = k.id
+            end
+
+            if member_id then
+                local se_obj = alife_object(member_id)
+                if se_obj then
+                    first_section = se_obj:section_name()
+                    break
+                end
+            end
+        end
+
+        if first_section then
+            logger.siski_log("SPAWNER", "DEBUG", "Adding %d members (Section: %s) to squad [%s]", needed, first_section,
+                squad:name())
+            for i = 1, needed do
+                squad:add_squad_member(first_section, squad.position, squad.m_level_vertex_id, squad.m_game_vertex_id)
+            end
+        end
+    end
+
+    -- REMOVE MEMBERS
+    if current_size > target_size then
+        local to_remove = current_size - target_size
+        local members = {}
+
+        -- Collect IDs first to avoid modifying while iterating
+        for k in squad:squad_members() do
+            local member_id = k
+            if type(k) == "table" or type(k) == "userdata" then
+                member_id = k.id
+            end
+
+            if member_id then
+                table.insert(members, member_id)
+            end
+        end
+
+        local removed = 0
+        -- Remove from the end (except the commander)
+        for i = #members, 1, -1 do
+            if removed >= to_remove then break end
+
+            local id = members[i]
+            if id ~= squad.commander_id then -- Safety: don't kill commander
+                local se_obj = alife_object(id)
+                if se_obj then
+                    alife():release(se_obj, true)
+                    removed = removed + 1
+                end
+            end
+        end
+        logger.siski_log("SPAWNER", "DEBUG", "Removed %d excess members from squad [%s]", removed, squad:name())
+    end
+end
+
+-- Dedicated sizer for AF Hunters (Compact squads of 2-3)
+function apply_af_hunter_size(squad)
+    local min = 3
+    local max = 5
+    local target_size = math.random(min, max)
+    local current_size = squad:npc_count()
+
+    -- ADD MEMBERS
+    if current_size < target_size then
+        local needed = target_size - current_size
+        local first_section = nil
+        for k in squad:squad_members() do
+            local member_id = k
+            if type(k) == "table" or type(k) == "userdata" then
+                member_id = k.id
+            end
+
+            local se_obj = member_id and alife_object(member_id)
+            if se_obj then
+                local sec = siski_ef_utils.safe_section(se_obj)
+                -- Fallback for server object section_name
+                if not sec then
+                    local ok, res = pcall(function() return se_obj:section_name() end)
+                    sec = ok and res
+                end
+                first_section = sec
+                break
+            end
+        end
+
+        if first_section then
+            logger.siski_log("SPAWNER", "DEBUG", "AF Hunter: Adding %d members (Section: %s)", needed, first_section)
+            for i = 1, needed do
+                squad:add_squad_member(first_section, squad.position, squad.m_level_vertex_id, squad.m_game_vertex_id)
+            end
+        else
+            -- Fallback if empty (shouldn't happen with create_npc)
+            local fallback = "stalker_sim_squad_novice"
+            squad:add_squad_member(fallback, squad.position, squad.m_level_vertex_id, squad.m_game_vertex_id)
+        end
+    end
+
+    -- REMOVE MEMBERS
+    if current_size > target_size then
+        local to_remove = current_size - target_size
+        local members = {}
+        for k in squad:squad_members() do
+            local member_id = k
+            if type(k) == "table" or type(k) == "userdata" then
+                member_id = k.id
+            end
+            if member_id then table.insert(members, member_id) end
+        end
+
+        local removed = 0
+        for i = #members, 1, -1 do
+            if removed >= to_remove then break end
+            local id = members[i]
+            if id ~= siski_ef_utils.safe_commander_id(squad) then
+                local se_obj = alife_object(id)
+                if se_obj then
+                    alife():release(se_obj, true)
+                    removed = removed + 1
+                end
+            end
+        end
+        logger.siski_log("SPAWNER", "DEBUG", "AF Hunter: Removed %d excess members", removed)
+    end
+end
+
+-- FALLBACK SQUAD (Used only if config fails to load)
+local FALLBACK_SECTION = "stalker_sim_squad_novice"
+
+function determine_squad_section(faction)
+    local choices = settings.get_squad_sections(faction)
+
+    if choices and #choices > 0 then
+        local idx = math.random(#choices)
+        return choices[idx]
+    end
+
+    -- Fallback for completely unknown faction or config load failure
+    logger.siski_log("SPAWNER", "WARN", "No squad sections found for faction [%s]. Using fallback.", faction)
+    return FALLBACK_SECTION
+end

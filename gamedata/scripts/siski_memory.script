@@ -1,0 +1,290 @@
+-- SISKI Memory (Global State)
+-- Stores the dynamic state of the Simulation.
+
+local STATE = {
+    -- Global Variables
+    initialized = false,
+    
+    -- Data Tables
+    squads = {},          -- [id] = { assigned_brain=id, current_task=... }
+    smarts = {},          -- [name] = { level=..., props=... }
+    vendettas = {},       -- [aggressor_id] = { victim_id=... }
+    item_claims = {},     -- [item_id] = squad_id (for loot theft detection)
+    global_loot = {},     -- [id] = { pos, lvid, gvid, level, value, type }
+    campfires = {},       -- [level_name] = { list of campfires }
+    level_changers = {},  -- [level_name] = { list of level changers }
+    anomaly_zones = {},   -- [level_name] = { list of anomaly zones }
+    
+    -- Configs (Loaded from LTX later)
+    settings = {
+        debug_mode = true,
+        population_target_stalker = 40,
+        population_target_monster = 20
+    },
+
+    -- Session Flags
+    initial_wave_done = false,
+    
+    -- Spawner Tracking
+    last_major_refill_day = -1,
+    next_normal_cycle_time = nil
+}
+
+function init()
+    siski_logger.log_info("MEMORY", "Initializing Global Memory...")
+    STATE.initialized = true
+end
+
+function get_state()
+    return STATE
+end
+
+function update_smart_data(name, data)
+    STATE.smarts[name] = data
+end
+
+function update_anomaly_zone(level_name, data)
+    if not level_name or not data then return end
+    if not STATE.anomaly_zones[level_name] then
+        STATE.anomaly_zones[level_name] = {}
+    end
+    local list = STATE.anomaly_zones[level_name]
+    list[#list+1] = data
+end
+
+function set_anomaly_zones(level_name, list)
+    if not level_name then return end
+    STATE.anomaly_zones[level_name] = list
+end
+
+function get_anomaly_zones(level_name)
+    return STATE.anomaly_zones[level_name] or {}
+end
+
+function get_all_anomaly_zones()
+    return STATE.anomaly_zones
+end
+
+function register_squad(id, data)
+    if not STATE.squads[id] then
+        STATE.squads[id] = {}
+    end
+    -- Merge data
+    for k,v in pairs(data) do
+        STATE.squads[id][k] = v
+    end
+end
+
+function unregister_squad(id)
+    if STATE.squads[id] then
+        local name = "Unknown"
+        -- Try to get name if possible, or just ID
+        siski_logger.log_info("MEMORY", "Unregistering Dead Squad [%s] (Freed Campfire/Locks)", id)
+        STATE.squads[id] = nil
+        -- Also clear any item claims? Maybe safer to leave claims separate or clear strictly.
+        -- For now, squad data removal is enough to free campfires.
+    end
+end
+
+-- ==============================================================================================
+-- ITEM CLAIMING (Vendetta Loot Theft)
+-- ==============================================================================================
+
+function claim_item(item_id, squad_id)
+    if not item_id or not squad_id then return end
+    STATE.item_claims[item_id] = { squad_id = squad_id, tg = time_global() }
+end
+
+function get_item_claim(item_id)
+    if not item_id then return nil end
+    local v = STATE.item_claims[item_id]
+    if type(v) == "table" then
+        return v.squad_id
+    end
+    return v
+end
+
+function clear_item_claim(item_id)
+    if not item_id then return end
+    STATE.item_claims[item_id] = nil
+end
+
+function sweep_item_claims(ttl_ms)
+    local ttl = tonumber(ttl_ms) or 60000
+    local now = time_global()
+    for id, v in pairs(STATE.item_claims) do
+        local tg = 0
+        if type(v) == "table" then
+            tg = tonumber(v.tg) or 0
+        end
+
+        local expired = (now - tg) > ttl
+        if expired then
+            STATE.item_claims[id] = nil
+        else
+            local ok, se = pcall(function() return alife_object(id) end)
+            if ok and not se then
+                local ok2, lo = pcall(function()
+                    return level and level.object_by_id and level.object_by_id(id)
+                end)
+                if not (ok2 and lo) then
+                    STATE.item_claims[id] = nil
+                end
+            end
+        end
+    end
+end
+
+function clear_all_claims()
+    STATE.item_claims = {}
+end
+
+-- ==============================================================================================
+-- GLOBAL LOOT
+-- ==============================================================================================
+
+function update_global_loot(id, data)
+    if not data then
+        STATE.global_loot[id] = nil
+        return
+    end
+    STATE.global_loot[id] = data
+end
+
+function get_global_loot()
+    return STATE.global_loot
+end
+
+function sweep_global_loot(ttl_ms)
+    local ttl = tonumber(ttl_ms) or 300000
+    local now = time_global()
+    for id, v in pairs(STATE.global_loot) do
+        local ts = 0
+        if type(v) == "table" then
+            ts = tonumber(v.timestamp) or 0
+        end
+
+        if (now - ts) > ttl then
+            STATE.global_loot[id] = nil
+        else
+            local ok, se = pcall(function() return alife_object(id) end)
+            if ok and not se then
+                local ok2, lo = pcall(function()
+                    return level and level.object_by_id and level.object_by_id(id)
+                end)
+                if not (ok2 and lo) then
+                    STATE.global_loot[id] = nil
+                end
+            end
+        end
+    end
+end
+
+-- ==============================================================================================
+-- CAMPFIRES
+-- ==============================================================================================
+
+function set_campfires(level_name, data)
+    STATE.campfires[level_name] = data
+end
+
+function get_campfires(level_name)
+    return STATE.campfires[level_name] or {}
+end
+
+function get_all_campfires()
+    return STATE.campfires
+end
+
+-- ==============================================================================================
+-- LEVEL CHANGERS (Fallback Spawn Points)
+-- ==============================================================================================
+
+function set_level_changers(level_name, data)
+    if not STATE.level_changers then STATE.level_changers = {} end
+    STATE.level_changers[level_name] = data
+end
+
+function get_level_changers(level_name)
+    return (STATE.level_changers and STATE.level_changers[level_name]) or {}
+end
+
+function get_all_level_changers()
+    return STATE.level_changers or {}
+end
+
+-- ==============================================================================================
+-- ANOMALY ZONES
+-- ==============================================================================================
+
+function set_anomaly_zones(level_name, data)
+    STATE.anomaly_zones[level_name] = data
+end
+
+function get_anomaly_zones(level_name)
+    return STATE.anomaly_zones[level_name] or {}
+end
+
+function get_all_anomaly_zones()
+    return STATE.anomaly_zones
+end
+
+-- ==============================================================================================
+-- SAVE/LOAD
+-- ==============================================================================================
+
+function save(m_data)
+    -- Clear stale item claims before saving
+    STATE.item_claims = {}
+    STATE.global_loot = {}
+    -- Serialize STATE to marshal table
+    m_data.siski_state = STATE
+end
+
+function load(m_data)
+    local loaded = m_data.siski_state
+    if loaded then
+        STATE = loaded
+        STATE.initialized = true
+        STATE.item_claims = STATE.item_claims or {}
+        
+        -- Defaults for new fields in existing saves
+        STATE.last_major_refill_day = STATE.last_major_refill_day or -1
+        STATE.next_normal_cycle_time = STATE.next_normal_cycle_time or nil
+        
+        -- IMPORTANT: Clear caches that contain non-serializable position userdata
+        -- These will be re-scanned on first update
+        STATE.anomaly_zones = {}
+        STATE.campfires = {}
+        STATE.level_changers = {}
+        STATE.smarts = {} -- Smarts also have position data
+        
+        siski_logger.log_info("MEMORY", "Loaded State (Squads: %d). Caches cleared for rescan.", table.size and table.size(STATE.squads) or 0)
+    else
+        siski_logger.log_info("MEMORY", "No valid save data found. Starting fresh.")
+    end
+end
+
+function dump_memory_snapshot()
+    if not siski_logger then return end
+    
+    -- Check Debug Setting
+    if ui_mcm and ui_mcm.get then
+        if not ui_mcm.get("siski/debug_enabled") then return end
+    end
+    
+    siski_logger.log_info("MEMORY", "=== GENERATING DASHBOARD ===")
+    
+    if siski_reporter then
+        local current_level = level.name()
+        local html_content = siski_reporter.generate_dashboard(STATE, current_level)
+        siski_logger.dump_to_file("siski_dashboard.html", html_content)
+    else
+        -- Fallback if reporter missing
+        local str = siski_logger.table_to_string(STATE)
+        siski_logger.dump_to_file("siski_memory_dump.log", str)
+    end
+    
+    siski_logger.log_info("MEMORY", "=== DASHBOARD SAVED ===")
+end
+

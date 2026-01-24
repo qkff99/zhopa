@@ -1,0 +1,89 @@
+-- ==============================================================================================
+-- SISKI ACTIVITIES MODULE
+-- Handles "Economy" and "State Checks" for Squad Brains.
+-- ==============================================================================================
+
+local settings = siski_settings
+local logger = siski_logger
+local intel = siski_intel
+
+-- ==============================================================================================
+-- HELPERS
+-- ==============================================================================================
+
+function get_loot_max()
+    return settings.get_activities_settings().max_loot_weight or 50.0
+end
+
+function is_trader_smart(smart)
+    if not smart then return false end
+    local name = smart:name()
+    -- Simple heuristic for now
+    if string.find(name, "base") or string.find(name, "trader") or string.find(name, "bar") then
+        return true
+    end
+    return false
+end
+
+-- ==============================================================================================
+-- LOGIC
+-- ==============================================================================================
+
+function evaluate(brain)
+    if not settings.get_activities_settings().enabled then return end
+    
+    -- Ensure brain has eco state
+    if not brain.loot_weight then brain.loot_weight = 0 end
+    if not brain.money then brain.money = 0 end
+    
+    -- 1. Check Weight -> Need to Sell?
+    if brain.loot_weight >= get_loot_max() then
+        -- Find Trader
+        -- TODO: Better trader lookup via intel
+        local current_smart = brain.squad.smart_id and alife_object(brain.squad.smart_id)
+        
+        -- If already at trader, we are probably running a TRADE task or just arrived.
+        -- But if we are IDLE and full, we should generate a TRADE task.
+        
+        -- Find nearest trader
+        local trader_smart = intel.get_random_smart(brain.faction) -- Temporary: Just go random smart and hope it's a base
+        -- Ideally: iterate smarts, find 'is_trader_smart', pick closest
+        
+        if trader_smart then
+             brain:add_task("TRADE", trader_smart:name(), 2) -- Higher priority than move
+             siski_logger.log_info("ACTIVITY", "Squad [%s] full loot (%.1f). Moving to trade at [%s]", brain.squad:name(), brain.loot_weight, trader_smart:name())
+             return true
+        end
+    end
+    
+    return false
+end
+
+function perform_gather(brain)
+    -- Called when squad is "IDLE" or "MOVING" (maybe en route)
+    -- Simulates finding stuff
+    
+    if not brain.loot_weight then brain.loot_weight = 0 end
+    
+    local gain = (math.random() * 0.5) * (settings.get_activities_settings().gather_speed or 1.0)
+    
+    -- User Request: Slow down looting by 3x (too fast)
+    gain = gain / 3.0
+    
+    brain.loot_weight = brain.loot_weight + gain
+    
+    -- logger.log("ACTIVITY", "INFO", "Squad [%s] gathered %.1f kg (Total: %.1f)", brain.squad:name(), gain, brain.loot_weight)
+end
+
+function perform_trade(brain)
+    -- Called when task type is TRADE and we are at target
+    if not brain.loot_weight then brain.loot_weight = 0 end
+    if brain.loot_weight <= 0 then return end
+    
+    local value = brain.loot_weight * 100 -- 1kg = 100RU approx
+    brain.money = (brain.money or 0) + value
+    local sold_weight = brain.loot_weight
+    brain.loot_weight = 0
+    
+    siski_logger.log_info("ACTIVITY", "Squad [%s] sold %.1f kg loot for %d RU (Total: %d)", brain.squad:name(), sold_weight, value, brain.money)
+end

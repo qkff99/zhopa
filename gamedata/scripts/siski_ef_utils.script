@@ -1,0 +1,183 @@
+-- Siski Epic Fight - Утилиты Расширенного ИИ
+-- Логика расчета силы отряда и общие вспомогательные функции
+-- Портировано из мода npc_fleeing_0.33
+
+local best_enemy_cache = {}
+local BEST_ENEMY_CACHE_MS = 200
+
+local commander_id_cache = {}
+local COMMANDER_CACHE_MS = 500
+local CACHE_MAX = 1024
+
+-- ==============================================================================================
+-- ULTRA SAFE HELPERS (Prevent CScriptEntity : cannot access class member Alive!)
+-- ==============================================================================================
+
+function is_alive(obj)
+    if not obj then return false end
+
+    -- 1. Check ID and Existence (Engine Safety)
+    local id = nil
+    local ok_id, res_id = pcall(function() return obj:id() end)
+    if ok_id then id = res_id else return false end
+
+    if id ~= 0 and alife then
+        local ok_se, se_obj = pcall(function() return alife():object(id) end)
+        if ok_se and not se_obj then
+            local ok_lvl, lvl_obj = pcall(function()
+                return level and level.object_by_id and level.object_by_id(id)
+            end)
+            if not (ok_lvl and lvl_obj) then
+                return false
+            end
+        end
+    end
+
+    -- 2. Class Whitelist (Prevent "cannot access class member Alive!")
+    -- Only Stalkers, Monsters, and Actor have the .alive() exported method in all contexts.
+    -- Calling it on Smarts, Items, or Boxes causes engine console red-text spam.
+    local is_valid_type = false
+    pcall(function()
+        if IsStalker and IsStalker(obj) then is_valid_type = true end
+        if IsMonster and IsMonster(obj) then is_valid_type = true end
+        if obj.clsid and obj:clsid() == clsid.script_actor then is_valid_type = true end
+    end)
+
+    if not is_valid_type then return false end
+
+    -- 3. Safe Call
+    local ok, res = pcall(function() return obj:alive() end)
+    return ok and res and true or false
+end
+
+-- [NEW] Universal Safe Accessors - prevent "cannot access class member" crashes
+function safe_id(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:id() end)
+    return ok and res or nil
+end
+
+function safe_position(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:position() end)
+    return ok and res or nil
+end
+
+function safe_name(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:name() end)
+    return ok and res or nil
+end
+
+function safe_section(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:section() end)
+    if ok and res then
+        return res
+    end
+    ok, res = pcall(function() return obj:section_name() end)
+    return ok and res or nil
+end
+
+function safe_level_vertex_id(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:level_vertex_id() end)
+    return ok and res or nil
+end
+
+function safe_game_vertex_id(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:game_vertex_id() end)
+    return ok and res or nil
+end
+
+function safe_best_enemy(npc)
+    if not is_alive(npc) then return nil end
+    local npc_id = safe_id(npc)
+    local now = time_global()
+
+    if npc_id and best_enemy_cache[npc_id] and now < best_enemy_cache[npc_id].tg + BEST_ENEMY_CACHE_MS then
+        local cached_id = best_enemy_cache[npc_id].enemy_id
+        if not cached_id or cached_id == 0 then return nil end
+        local obj = nil
+        local ok, res = pcall(function() return level.object_by_id(cached_id) end)
+        if ok then obj = res end
+        if obj and is_alive(obj) then
+            return obj
+        end
+        return nil
+    end
+
+    local ok, res = pcall(function() return npc:best_enemy() end)
+    local enemy = ok and res or nil
+    local enemy_id = (enemy and is_alive(enemy)) and safe_id(enemy) or nil
+
+    if npc_id then
+        best_enemy_cache[npc_id] = { tg = now, enemy_id = enemy_id or 0 }
+    end
+
+    local n = 0
+    for _ in pairs(best_enemy_cache) do
+        n = n + 1
+        if n > CACHE_MAX then
+            best_enemy_cache = {}
+            break
+        end
+    end
+
+    return enemy
+end
+
+function safe_community(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:character_community() end)
+    return ok and res or nil
+end
+
+function safe_commander_id(squad)
+    if not squad then return nil end
+    local sid = squad.id
+    local now = time_global()
+    if sid and commander_id_cache[sid] and now < commander_id_cache[sid].tg + COMMANDER_CACHE_MS then
+        return commander_id_cache[sid].cid
+    end
+
+    local ok, res = pcall(function()
+        if type(squad.commander_id) == "number" then
+            return squad.commander_id
+        end
+        return squad:commander_id()
+    end)
+
+    local cid = ok and res or nil
+    if sid then
+        commander_id_cache[sid] = { tg = now, cid = cid }
+    end
+
+    local n = 0
+    for _ in pairs(commander_id_cache) do
+        n = n + 1
+        if n > CACHE_MAX then
+            commander_id_cache = {}
+            break
+        end
+    end
+
+    return cid
+end
+
+function get_cache_stats()
+    local function count(t)
+        local n = 0
+        if not t then return 0 end
+        for _ in pairs(t) do
+            n = n + 1
+        end
+        return n
+    end
+
+    return {
+        best_enemy_cache = count(best_enemy_cache),
+        commander_id_cache = count(commander_id_cache)
+    }
+end

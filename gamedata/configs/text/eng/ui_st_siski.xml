@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<string_table>
+    <string id="ui_mcm_menu_siski">
+        <text>SISKI</text>
+    </string>
+    <string id="ui_mcm_siski_title">
+        <text>SISKI: Stalkers Intelligence &amp; Simulation Kernel Interface</text>
+    </string>
+    
+    <!-- GENERAL -->
+    <string id="ui_mcm_siski_debug_enabled">
+        <text>Enable Debug Mode</text>
+    </string>
+    <string id="ui_mcm_siski_debug_hud_enabled">
+        <text>Show Debug HUD</text>
+    </string>
+    <string id="ui_mcm_siski_debug_offline_logging">
+        <text>Log Offline Actions</text>
+    </string>
+    <string id="ui_mcm_siski_debug_dump_key">
+        <text>Debug Dump Key</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_enabled">
+        <text>Enable Population Control</text>
+    </string>
+    <string id="ui_mcm_siski_protector_story_to_trader">
+        <text>Story Protection (NPC -> Trader)</text>
+    </string>
+    <string id="ui_mcm_siski_protector_sections_to_trader">
+        <text>Section Protection (NPC -> Trader)</text>
+    </string>
+    <string id="ui_mcm_siski_alife_vanilla_squads">
+        <text>ALife for Vanilla Squads</text>
+    </string>
+
+    <string id="ui_mcm_siski_debug_enabled_desc">
+        <text>Enables extended SISKI logging. May reduce performance and spam the log.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_hud_enabled_desc">
+        <text>Shows a debug HUD table with active brains and tasks.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_offline_logging_desc">
+        <text>Logs offline AI decisions. Can be very noisy.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_dump_key_desc">
+        <text>Key to dump SISKI state (brains/memory) into the log.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_enabled_desc">
+        <text>Enables SISKI population control and reinforcement spawning. Disabling keeps only existing squads.</text>
+    </string>
+    <string id="ui_mcm_siski_protector_story_to_trader_desc">
+        <text>Pins story NPCs to trader community to prevent wandering.</text>
+    </string>
+    <string id="ui_mcm_siski_protector_sections_to_trader_desc">
+        <text>Pins NPCs from protector_pinned_sections (traders/techs/medics/guides) to trader community.</text>
+    </string>
+    <string id="ui_mcm_siski_alife_vanilla_squads_desc">
+        <text>Attaches SISKI brains to squads spawned by the game/other mods (if their section is allowed). May increase load.</text>
+    </string>
+
+    <string id="ui_mcm_siski_pop_stalker_desc">
+        <text>Target active Loners squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_bandit_desc">
+        <text>Target active Bandits squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_csky_desc">
+        <text>Target active Clear Sky squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_army_desc">
+        <text>Target active Military squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_freedom_desc">
+        <text>Target active Freedom squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_dolg_desc">
+        <text>Target active Duty squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_ecolog_desc">
+        <text>Target active Ecologists squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_killer_desc">
+        <text>Target active Mercenaries squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_renegade_desc">
+        <text>Target active Renegades squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monolith_desc">
+        <text>Target active Monolith squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monster_desc">
+        <text>Target active Mutants squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_zombied_desc">
+        <text>Target active Zombified squads. Only SISKI-spawned squads are counted.</text>
+    </string>
+
+    <string id="ui_mcm_siski_max_loot_weight_desc">
+        <text>Maximum loot weight a squad will try to pick up before switching tasks.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_cooldown_desc">
+        <text>Cooldown between reinforcement cycles. Higher values spawn less often.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_min_dist_desc">
+        <text>Minimum distance to the actor when spawning on the current level.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_max_dist_desc">
+        <text>Maximum distance to the actor when spawning on the current level.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_safe_radius_desc">
+        <text>Radius used to check for danger/enemies around a spawn point.</text>
+    </string>
+
+    <string id="ui_mcm_siski_activities_enabled_desc">
+        <text>Enables extra AI activities: looting and trading.</text>
+    </string>
+    <string id="ui_mcm_siski_loot_gather_speed_desc">
+        <text>Multiplier for looting speed.</text>
+    </string>
+    <string id="ui_mcm_siski_trade_time_desc">
+        <text>How many seconds a squad spends trading with a trader.</text>
+    </string>
+
+    <string id="ui_mcm_siski_af_hunter_count_desc">
+        <text>How many artifact hunter squads to keep per level (0 disables).</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_campfire_desc">
+        <text>Allows hunter spawn at campfires if no suitable smart is found near the anomaly.</text>
+    </string>
+
+    <string id="ui_mcm_siski_squad_size_min_desc">
+        <text>Minimum size for new SISKI-spawned squads (does not affect vanilla squads).</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_max_desc">
+        <text>Maximum size for new SISKI-spawned squads (does not affect vanilla squads).</text>
+    </string>
+    
+    <!-- POPULATION -->
+    <string id="ui_mcm_siski_pop_header">
+        <text>Population Targets (Active Squads)</text>
+    </string>
+    <string id="ui_mcm_siski_pop_stalker">
+        <text>Loners</text>
+    </string>
+    <string id="ui_mcm_siski_pop_bandit">
+        <text>Bandits</text>
+    </string>
+    <string id="ui_mcm_siski_pop_csky">
+        <text>Clear Sky</text>
+    </string>
+     <string id="ui_mcm_siski_pop_army">
+        <text>Military</text>
+    </string>
+    <string id="ui_mcm_siski_pop_freedom">
+        <text>Freedom</text>
+    </string>
+    <string id="ui_mcm_siski_pop_dolg">
+        <text>Duty</text>
+    </string>
+    <string id="ui_mcm_siski_pop_ecolog">
+        <text>Ecologists</text>
+    </string>
+    <string id="ui_mcm_siski_pop_killer">
+        <text>Mercenaries</text>
+    </string>
+    <string id="ui_mcm_siski_pop_renegade">
+        <text>Renegades</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monolith">
+        <text>Monolith</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monster">
+        <text>Mutants</text>
+    </string>
+     <string id="ui_mcm_siski_pop_zombied">
+        <text>Zombified</text>
+    </string>
+    
+    <!-- GAMEPLAY -->
+    <string id="ui_mcm_siski_gameplay_header">
+        <text>Gameplay Settings</text>
+    </string>
+    <string id="ui_mcm_siski_max_loot_weight">
+        <text>Max Loot Weight (kg)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_cooldown">
+        <text>Reinforcement Cooldown (min)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_min_dist">
+        <text>Min Spawn Distance (m)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_max_dist">
+        <text>Max Spawn Distance (m)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_safe_radius">
+        <text>Safe Radius Check (m)</text>
+    </string>
+    <string id="ui_mcm_siski_activities_header">
+        <text>AI Activities</text>
+    </string>
+    <string id="ui_mcm_siski_activities_enabled">
+        <text>Enable Advanced Activities</text>
+    </string>
+    <string id="ui_mcm_siski_loot_gather_speed">
+        <text>Loot Gather Speed Multiplier</text>
+    </string>
+    <string id="ui_mcm_siski_trade_time">
+        <text>Trade Duration (sec)</text>
+    </string>
+
+    <string id="ui_mcm_siski_af_header">
+        <text>Artifact Hunters</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_count">
+        <text>Max AF Hunter Squads (Per Level)</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_campfire">
+        <text>Spawn at Campfires (Fallback)</text>
+    </string>
+    
+    <!-- SQUAD SIZES -->
+    <string id="ui_mcm_siski_squad_size_header">
+        <text>Squad Size Limits (New Spawns)</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_min">
+        <text>Min Squad Size</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_max">
+        <text>Max Squad Size</text>
+    </string>
+</string_table>

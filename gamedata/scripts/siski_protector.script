@@ -1,0 +1,50 @@
+-- ==============================================================================================
+-- SISKI PROTECTOR MODULE
+-- Prevents Story NPCs from wandering off by forcing them to 'trader' community.
+-- Based on R.E.Z.N.Y.A. Logic.
+-- ==============================================================================================
+
+local logger = siski_logger
+local settings = siski_settings
+
+function force_story_npcs_to_trader(npc)
+    if not npc then return end
+    
+    local id = siski_ef_utils.safe_id(npc)
+    if not id then return end
+    local story_id = get_object_story_id(id)
+
+    local sec = siski_ef_utils.safe_section(npc)
+    
+    local protect_story = story_id and settings and settings.get_config and settings.get_config("protector_story_to_trader", false)
+    local protect_sections = sec and settings and settings.is_protector_pinned_section and settings.is_protector_pinned_section(sec) and
+        settings.get_config and settings.get_config("protector_sections_to_trader", true)
+
+    if not (protect_story or protect_sections) then return end
+    
+    -- Don't touch Companions (they have their own logic)
+    if axr_companions and axr_companions.companion_squads[id] then return end
+    
+    local comm = siski_ef_utils.safe_community(npc)
+    
+    -- If already trader, ignore
+    if comm == "trader" then return end
+    
+    -- Exclude Monolith/Zombied? Usually story monolith stay put anyway.
+    -- But if user says "categorically", we force it.
+    
+    -- FORCE TRADER FACTION
+    pcall(function() npc:set_character_community("trader", 0, 0) end)
+    
+    local reason = protect_story and (story_id or "story") or (sec or "section")
+    logger.siski_log("PROTECTOR", "WARN", "Pinned NPC [%s] (%s) to 'trader' faction.", siski_ef_utils.safe_name(npc), reason)
+end
+
+-- ==============================================================================================
+-- INIT
+-- ==============================================================================================
+
+function on_game_start()
+    RegisterScriptCallback("npc_on_net_spawn", force_story_npcs_to_trader)
+    logger.siski_log("PROTECTOR", "INFO", "Module Active.")
+end

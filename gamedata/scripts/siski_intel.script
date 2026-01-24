@@ -1,0 +1,888 @@
+-- SISKI Intel (Info Gatherer)
+-- Scans the world and populates Memory.
+
+-- ==============================================================================================
+-- INITIALIZATION
+-- ==============================================================================================
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("intel")) then return end
+    RegisterScriptCallback("actor_on_first_update", on_first_update)
+end
+
+function on_first_update()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("intel")) then return end
+    -- Run unified scan if not already done
+    -- This ensures intel is ready even if spawner is disabled
+    if not static_objects_scanned then
+        siski_logger.log_info("INTEL", "First Update: Initializing World Scan...")
+        scan_smarts()
+        scan_all_static_objects()
+    end
+end
+
+local function validate_smart(smart)
+    if not smart then return nil end
+
+    local name = siski_ef_utils.safe_name(smart)
+    local props = smart.props
+
+    -- Basic Validation
+    if not smart.m_level_vertex_id then return nil end
+
+    -- Get Level Name
+    local gg = game_graph()
+    local gv = smart.m_game_vertex_id and gg:vertex(smart.m_game_vertex_id)
+    if not gv then return nil end
+    local level_name = alife():level_name(gv:level_id())
+
+    -- Role Validation (Is this a valid destination?)
+    local has_role = true
+
+    if not has_role then return nil end
+
+    -- Extract Data
+    local data = {
+        id = smart.id,
+        name = name,
+        gvid = smart.m_game_vertex_id,
+        lvid = smart.m_level_vertex_id,
+        level = level_name, -- FIXED: Added Level
+        props = props,
+        position = smart.position,
+        max_population = smart.max_population
+    }
+
+    return data
+end
+
+function scan_smarts()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("intel")) then return end
+    local sim = alife()
+    if not sim then return end
+
+    -- Access SimBoard (Engine Helper)
+
+    local board = sim_board.get_sim_board()
+    if not board or not board.smarts then
+        siski_logger.log_warn("INTEL", "SimBoard uninitialized or empty")
+        return
+    end
+
+    -- STATUS FLAGS
+    local campfires_scanned = false
+    local anomalies_scanned = false
+
+    local count = 0
+    local anom_count = 0
+    local total_smarts_in_board = 0
+
+    -- Count total smarts first
+    for _, _ in pairs(board.smarts) do total_smarts_in_board = total_smarts_in_board + 1 end
+
+    -- Clear Anomaly Cache before scan to prevent duplicates if scan runs often
+    -- Note: This clears smart-based anomalies.
+    -- If using heavy scan_anomaly_zones(), ensure they don't fight.
+    -- For now, we assume this is the primary source.
+    siski_memory.get_state().anomaly_zones = {}
+
+    for id, info in pairs(board.smarts) do
+        local smart = info.smrt
+        local valid_data = validate_smart(smart)
+
+        if valid_data then
+            -- INJECT BLACKLIST DATA (Optimization)
+            -- We store the raw string or parsed table of banned factions for this smart
+            valid_data.blacklist = siski_settings.get_smart_blacklist(valid_data.name)
+
+            siski_memory.update_smart_data(valid_data.name, valid_data)
+
+            -- POI Caching: Anomaly Zones
+            -- STRICT FILTER as requested: Only 'anomal_zone'
+            local s_name = string.lower(valid_data.name)
+            if string.find(s_name, "anomal_zone") then
+                siski_memory.update_anomaly_zone(valid_data.level, valid_data)
+                anom_count = anom_count + 1
+            end
+
+            count = count + 1
+        else
+            -- Debug: Log why it failed validation (sample only)
+            if count < 5 then
+                siski_logger.log_warn("INTEL", "DEBUG: Smart [%s] failed validation. has_role: ?, m_level_vertex_id: %s",
+                    (siski_ef_utils.safe_name(smart)), (smart and tostring(smart.m_level_vertex_id) or "nil"))
+            end
+        end
+    end
+
+    siski_logger.log_info("INTEL", "Scan Complete. Smarts: %s | Anomalies Found: %s", count, anom_count)
+end
+
+--------------------------------------------------------------------------------------------------------------
+-- UNIFIED STATIC OBJECT SCANNER (OPTIMIZATION)
+--------------------------------------------------------------------------------------------------------------
+-- Merges 3 separate 65k loops into ONE to prevent load-time freezes/crashes.
+-- Scans: Campfires, Anomaly Zones (physical), Level Changers.
+
+local static_objects_scanned = false
+
+function scan_all_static_objects(force)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("intel")) then return end
+    if static_objects_scanned and not force then return end
+
+    local sim = alife()
+    if not sim then return end
+
+    siski_logger.log_info("INTEL", "Starting Unified Static Object Scan (1..65534)...")
+
+    local t_campfires = {}
+    local t_anomalies = {}
+    local t_changers = {}
+
+    -- PATTERNS & CONFIG
+    local campfire_sections = { ["zone_flame_small"] = true, ["zone_flame"] = true, ["campfire"] = true }
+    local anomaly_patterns = { "anomal", "anom_", "anomaly_zone", "anomal_zone" }
+    local exclude_patterns = {
+        "zone_mine_", "zone_burning_fuzz", "zone_radioactive_", "zone_witches_galantine",
+        "zone_mosquito_bald", "zone_gravi_zone", "zone_buzz_", "mine_thermal",
+        "mine_electric", "mine_acidic", "mine_gravitational", "mine_chemical",
+        "field_radioactive", "field_acidic", "field_thermal"
+    }
+
+    local count_camp, count_anom, count_change = 0, 0, 0
+    local smart_match_count = 0
+
+    -- SINGLE PASS 65K LOOP
+    for i = 1, 65534 do
+        local obj = sim:object(i)
+        if obj then
+            local sec = siski_ef_utils.safe_section(obj)
+            local name = siski_ef_utils.safe_name(obj) or ""
+            local ln_name = string.lower(name)
+
+            local gvid = obj.m_game_vertex_id
+            local lvid = obj.m_level_vertex_id
+
+            if gvid and lvid then
+                local gv = game_graph():vertex(gvid)
+                if gv then
+                    local level_name = sim:level_name(gv:level_id())
+
+                    -- 1. LEVEL CHANGERS
+                    local cls = nil
+                    if obj.clsid then
+                        local ok, res = pcall(function() return obj:clsid() end)
+                        if ok then cls = res end
+                    end
+
+                    if cls == clsid.level_changer then
+                        if not t_changers[level_name] then t_changers[level_name] = {} end
+                        table.insert(t_changers[level_name], {
+                            id = obj.id,
+                            position = gv:level_point(), -- LCs use vertex point usually
+                            lvid = gv:level_vertex_id(), -- Vertex ID
+                            gvid = gvid,
+                            name = name,
+                            level = level_name
+                        })
+                        count_change = count_change + 1
+
+                        -- 2. CAMPFIRES
+                    elseif sec and (campfire_sections[sec] or string.find(sec, "zone_flame")) then
+                        if not t_campfires[level_name] then t_campfires[level_name] = {} end
+
+                        -- Smart Link Logic
+                        local smart_id = nil
+                        if obj.m_smart_terrain_id and obj.m_smart_terrain_id ~= 65535 then
+                            smart_id = obj.m_smart_terrain_id
+                        elseif SIMBOARD and SIMBOARD.smarts_by_names then
+                            for s_name, s_data in pairs(SIMBOARD.smarts_by_names) do
+                                if string.find(name, s_name) then
+                                    smart_id = s_data.id
+                                    smart_match_count = smart_match_count + 1
+                                    break
+                                end
+                            end
+                        end
+
+                        table.insert(t_campfires[level_name], {
+                            id = obj.id,
+                            position = gv:level_point(),
+                            lvid = lvid,
+                            gvid = gvid,
+                            name = name,
+                            smart_id = smart_id,
+                            level = level_name
+                        })
+                        count_camp = count_camp + 1
+
+                        -- 3. ANOMALY ZONES (Physical)
+                    else
+                        local is_anomaly = false
+                        for _, pat in ipairs(anomaly_patterns) do
+                            if string.find(ln_name, pat) then
+                                is_anomaly = true; break
+                            end
+                        end
+
+                        if is_anomaly then
+                            for _, ex in ipairs(exclude_patterns) do
+                                if string.find(ln_name, ex) then
+                                    is_anomaly = false; break
+                                end
+                            end
+                            -- Exclude campfires double-match
+                            if sec and (string.find(sec, "flame") or string.find(sec, "campfire")) then
+                                is_anomaly = false
+                            end
+                        end
+
+                        if is_anomaly then
+                            if not t_anomalies[level_name] then t_anomalies[level_name] = {} end
+                            table.insert(t_anomalies[level_name], {
+                                id = obj.id,
+                                position = gv:level_point(),
+                                lvid = lvid,
+                                gvid = gvid,
+                                name = name,
+                                level = level_name,
+                                section = sec
+                            })
+                            count_anom = count_anom + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- COMMIT RESULTS
+    for lvl, data in pairs(t_campfires) do siski_memory.set_campfires(lvl, data) end
+    for lvl, data in pairs(t_anomalies) do
+        for _, z in ipairs(data) do siski_memory.update_anomaly_zone(lvl, z) end
+    end
+    for lvl, data in pairs(t_changers) do siski_memory.set_level_changers(lvl, data) end
+
+    siski_logger.log_info("INTEL", "Unified Scan Complete. Found: %d C-fires, %d Anomalies, %d Changers.", count_camp,
+        count_anom, count_change)
+    static_objects_scanned = true
+
+    -- Set individual flags just in case legacy checks exist
+    campfires_scanned = true
+    anomalies_scanned = true
+end
+
+--------------------------------------------------------------------------------------------------------------
+-- UTILITY: Smart & Anomaly Handling
+--------------------------------------------------------------------------------------------------------------
+
+-- NOTE: get_anomaly_smart_name is defined below (around line 240) with full PREFIX/SUFFIX support
+
+-- NOTE: get_smart_by_name is defined below (around line 250)
+
+-- Check if anomaly is occupied by another AF Hunter
+function is_anomaly_occupied(anomaly_name, my_squad_id)
+    if not anomaly_name then return false end
+
+    local state = siski_memory.get_state()
+    if not state or not state.squads then return false end
+
+    for id, data in pairs(state.squads) do
+        -- Check if it's another squad (not me)
+        if tonumber(id) ~= tonumber(my_squad_id) then
+            -- Check if it's an AF Hunter
+            if data.squad_class == "af_hunter" then
+                -- Check if targeting same anomaly
+                if data.target_anomaly_name == anomaly_name then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+------------------------------------------------------------------------------------------------ Cache Globals
+local pairs = pairs
+local ipairs = ipairs
+local string_find = string.find
+local table_sort = table.sort
+local math_min = math.min
+local tonumber = tonumber
+
+------------------------------------------------------------------------------------------------
+-- HELPER: Collect Candidates (FILTERED)
+------------------------------------------------------------------------------------------------
+
+-- Helper to check blacklist on cached data
+local function check_cached_blacklist(smart_data, faction)
+    if not smart_data.blacklist then return false end -- No blacklist = Safe
+
+    -- Check "all"
+    if smart_data.blacklist["all"] then return true end
+
+    -- Check faction
+    if smart_data.blacklist[faction] then return true end
+
+    return false
+end
+
+-- NEW: Get Valid Bases (Filtered source of truth for Bases)
+function get_valid_bases(faction, target_level)
+    local state = siski_memory.get_state and siski_memory.get_state()
+    local smarts = (state and state.smarts) or {}
+    local valid = {}
+
+    for name, data in pairs(smarts) do
+        -- 1. Level Check
+        if target_level and data.level ~= target_level then
+            goto continue
+        end
+
+        -- 2. Base Property Check
+        if not (data.props and data.props["base"] and data.props["base"] > 0) then
+            goto continue
+        end
+
+        -- 3. Blacklist Check
+        if check_cached_blacklist(data, faction) then
+            goto continue
+        end
+
+        valid[#valid + 1] = data
+
+        ::continue::
+    end
+
+    return valid
+end
+
+function get_smart_candidates(faction, target_level)
+    local candidates = {}
+    local state = siski_memory.get_state and siski_memory.get_state()
+    local smarts = (state and state.smarts) or {}
+
+    for name, data in pairs(smarts) do
+        -- VALIDATION: Check Level Whitelist
+        local gv = data.gvid and game_graph():vertex(data.gvid)
+        if not gv then goto continue_candidate end
+        local lvl_name = alife():level_name(gv:level_id())
+
+        -- Filter by Target Level if provided
+        local level_match = true
+        if target_level and lvl_name ~= target_level then
+            level_match = false
+        end
+
+        if level_match and siski_settings.is_level_allowed(faction, lvl_name) then
+            -- CHECK BLACKLIST HERE
+            if check_cached_blacklist(data, faction) then
+                goto continue_candidate
+            end
+
+            local is_suitable = false
+            local props = data.props or {}
+
+            local is_monster = (faction == "monster" or faction == "zombied" or faction == "animal")
+
+            if is_monster then
+                -- Mutants only spawn in lairs AND NEVER in bases
+                local is_base = (props["base"] and props["base"] > 0)
+                if (props["lair"] and props["lair"] > 0) and not is_base then
+                    is_suitable = true
+                elseif faction == "zombied" and is_base then
+                    -- Zombied CAN spawn in bases (abandoned ones)
+                    is_suitable = true
+                end
+            else
+                -- Humans only spawn in bases
+                -- Humans (Relaxed Logic for Wandering)
+                local is_base = (props["base"] and props["base"] > 0)
+                local is_lair = (props["lair"] and props["lair"] > 0)
+
+                -- 1. Bases are always candidates if they accept us
+                if is_base then
+                    local target_prop = faction
+                    if faction == "dolg" then target_prop = "duty" end
+                    if faction == "killer" then target_prop = "merc" end
+                    if faction == "military" then target_prop = "army" end
+
+                    if (props[faction] and props[faction] > 0) or
+                        (props[target_prop] and props[target_prop] > 0) or
+                        (props["all"] and props["all"] > 0) then
+                        is_suitable = true
+                    end
+                    -- 2. Non-Base, Non-Lair Smarts are OK for wandering (Territories, Points)
+                elseif not is_lair then
+                    is_suitable = true
+                end
+            end
+
+            if is_suitable then
+                candidates[#candidates + 1] = data.id
+            end
+        end -- Close Level Check
+
+        ::continue_candidate::
+    end
+
+    return candidates
+end
+
+function get_random_smart(faction, target_level)
+    local candidates = get_smart_candidates(faction, target_level)
+
+    if #candidates > 0 then
+        local rnd = math.random(#candidates)
+        local id = candidates[rnd]
+        return alife():object(id)
+    end
+
+    return nil
+end
+
+function get_shuffled_smarts(faction, target_level)
+    local candidates = get_smart_candidates(faction, target_level)
+    local shuffled = {}
+    local sim = alife()
+
+    if #candidates == 0 then return {} end
+
+    -- Fisher-Yates Shuffle
+    for i = #candidates, 2, -1 do
+        local j = math_random(i) -- Used cached math_random
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    end
+
+    -- Convert IDs to Objects
+    for i, id in ipairs(candidates) do
+        local obj = sim:object(id)
+        if obj then
+            shuffled[#shuffled + 1] = obj
+        end
+    end
+
+    return shuffled
+end
+
+------------------------------------------------------------------------------------------------
+-- ANOMALY SMART HELPERS
+------------------------------------------------------------------------------------------------
+-- Extract the smart terrain name from an anomaly zone name.
+-- Pattern: "{smart_name}_anomal_zone" or "{smart_name}_anomaly_zone"
+-- Example: "val_smart_terrain_6_4_anomal_zone" -> "val_smart_terrain_6_4"
+function get_anomaly_smart_name(anomaly_name)
+    if not anomaly_name then return nil end
+
+    local smart_name = anomaly_name
+
+    -- Try SUFFIX format: "smart_name_anomal_zone" -> "smart_name"
+    smart_name = string.gsub(smart_name, "_anomal_zone$", "")
+    smart_name = string.gsub(smart_name, "_anomaly_zone$", "")
+
+    -- Try PREFIX format: "anomal_zone_smart_name" -> "smart_name"
+    if smart_name == anomaly_name then
+        smart_name = string.gsub(anomaly_name, "^anomal_zone_", "")
+        smart_name = string.gsub(smart_name, "^anomaly_zone_", "")
+    end
+
+    -- If nothing changed, it wasn't an anomaly zone name
+    if smart_name == anomaly_name then return nil end
+
+    return smart_name
+end
+
+-- Find a smart terrain by exact name
+function get_smart_by_name(smart_name)
+    if not smart_name then return nil end
+    local state = siski_memory.get_state()
+    local smarts = state and state.smarts or {}
+    for name, data in pairs(smarts) do
+        if name == smart_name then
+            local obj = alife():object(data.id)
+            return obj
+        end
+    end
+    return nil
+end
+
+------------------------------------------------------------------------------------------------
+-- NEAREST SMART FINDER
+------------------------------------------------------------------------------------------------
+-- Find the nearest smart terrain to a given position on a specific level.
+function get_nearest_smart(level_name, pos)
+    -- Safety: Check pos is valid vector
+    if not pos or type(pos) ~= "userdata" or not pos.distance_to then
+        siski_logger.siski_log("INTEL", "WARN", "get_nearest_smart called with invalid pos! (Type: %s)", type(pos))
+        return nil, 9999999
+    end
+
+    local state = siski_memory.get_state and siski_memory.get_state()
+    local smarts = (state and state.smarts) or {}
+    local sim = alife()
+    local gg = game_graph()
+
+    local best_smart = nil
+    local best_dist = 9999999
+
+    for name, data in pairs(smarts) do
+        -- Check level match
+        local gv = gg:vertex(data.gvid)
+        if gv then
+            local lvl = sim:level_name(gv:level_id())
+            if lvl == level_name then
+                local smart_obj = sim:object(data.id)
+                if smart_obj then
+                    local s_pos = smart_obj.position
+                    if s_pos and pos then
+                        local dist = pos:distance_to(s_pos)
+                        if dist < best_dist then
+                            best_dist = dist
+                            best_smart = smart_obj
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return best_smart, best_dist
+end
+
+------------------------------------------------------------------------------------------------
+-- CAMPFIRE INTEL
+------------------------------------------------------------------------------------------------
+-- Scans for Campfire objects (zone_flame) to use as safe spawn points.
+------------------------------------------------------------------------------------------------
+-- CAMPFIRE INTEL
+------------------------------------------------------------------------------------------------
+-- Scans for Campfire objects (zone_flame) to use as safe spawn points.
+-- Data is stored in siski_memory.STATE.campfires
+
+function scan_campfires(force)
+    -- [OPTIMIZATION] Redirect to Unified Scanner
+    if not static_objects_scanned or force then
+        scan_all_static_objects(force)
+    end
+end
+
+function get_nearest_campfire(level_name, position)
+    -- Safety: Check position is valid
+    if not position or not position.distance_to then
+        siski_logger.siski_log("INTEL", "WARN", "get_nearest_campfire called with invalid position!")
+        return nil, 9999
+    end
+
+    local camps = siski_memory.get_campfires(level_name)
+
+    -- Auto-Scan if cache empty
+    if not camps or #camps == 0 then
+        scan_campfires()
+        camps = siski_memory.get_campfires(level_name)
+    end
+
+    if not camps or #camps == 0 then
+        return nil
+    end
+
+    local best_camp = nil
+    local best_dist = 1000000 -- Infinity
+
+    for _, camp in ipairs(camps) do
+        if camp.position and camp.position.distance_to then
+            local dist = camp.position:distance_to(position)
+            if dist < best_dist then
+                best_dist = dist
+                best_camp = camp
+            end
+        end
+    end
+
+    return best_camp, best_dist
+end
+
+function get_all_campfires(level_name)
+    -- Auto-scan if not yet done
+    if not campfires_scanned then
+        scan_campfires()
+    end
+    return siski_memory.get_campfires(level_name)
+end
+
+------------------------------------------------------------------------------------------------
+-- ANOMALY ZONE INTEL
+------------------------------------------------------------------------------------------------
+-- Scans for actual anomaly zones (zone_acid, zone_radioactive, etc.)
+-- NOT smart terrains - these are the physical anomaly objects.
+-- Used for AF Hunters to find real anomalies even without associated smarts.
+
+function scan_anomaly_zones(force)
+    -- [OPTIMIZATION] Redirect to Unified Scanner
+    if not static_objects_scanned or force then
+        scan_all_static_objects(force)
+    end
+end
+
+function get_anomaly_zones(level_name)
+    if not anomalies_scanned then
+        scan_anomaly_zones()
+    end
+    return siski_memory.get_anomaly_zones(level_name)
+end
+
+function get_all_anomaly_zones_cached()
+    return siski_memory.get_all_anomaly_zones()
+end
+
+-- Find anomaly data by name from global cache (Auto-Scan if missing)
+function get_anomaly_by_name(anomaly_name)
+    local all_zones = siski_memory.get_all_anomaly_zones()
+
+    -- Check if cache is likely empty or uninitialized
+    if not all_zones or not next(all_zones) then
+        scan_anomaly_zones()
+        all_zones = siski_memory.get_all_anomaly_zones()
+    end
+
+    for level_name, zones in pairs(all_zones) do
+        for _, zone in ipairs(zones) do
+            if zone.name == anomaly_name then
+                return zone -- Returns { name, position, lvid, gvid }
+            end
+        end
+    end
+
+    -- If not found, maybe valid anomaly but not in cache? (New spawn?)
+    -- Optional: Force scan once if we really expect it?
+    -- For now, just return nil.
+    return nil
+end
+
+--------------------------------------------------------------------------------------------------------------
+-- LEVEL ADJACENCY & DISTANCE
+--------------------------------------------------------------------------------------------------------------
+
+-- Get all levels present in the game (from scanned smarts)
+function get_all_levels()
+    local state = siski_memory.get_state()
+    local smarts = state and state.smarts or {}
+    local levels = {}
+    for _, data in pairs(smarts) do
+        if data.level then
+            levels[data.level] = true
+        end
+    end
+
+    local list = {}
+    for lvl, _ in pairs(levels) do
+        list[#list + 1] = lvl
+    end
+    return list
+end
+
+-- Get a center point for a level (average of all smarts)
+function get_level_center(level_name)
+    local state = siski_memory.get_state()
+    local smarts = state and state.smarts or {}
+    local count = 0
+    local sum_x, sum_y, sum_z = 0, 0, 0
+
+    for _, data in pairs(smarts) do
+        if data.level == level_name then
+            sum_x = sum_x + data.position.x
+            sum_y = sum_y + data.position.y
+            sum_z = sum_z + data.position.z
+            count = count + 1
+        end
+    end
+
+    if count == 0 then return nil end
+    return vector():set(sum_x / count, sum_y / count, sum_z / count)
+end
+
+-- Returns level names sorted by distance from start_level
+function get_levels_by_distance(start_level)
+    local all_levels = get_all_levels()
+    if #all_levels <= 1 then return all_levels end
+
+    local center = get_level_center(start_level)
+    if not center then return all_levels end
+
+    local distances = {}
+    for _, lvl in ipairs(all_levels) do
+        if lvl == start_level then
+            distances[lvl] = 0
+        else
+            local c2 = get_level_center(lvl)
+            distances[lvl] = c2 and center:distance_to(c2) or 999999
+        end
+    end
+
+    table.sort(all_levels, function(a, b)
+        return distances[a] < distances[b]
+    end)
+
+    return all_levels
+end
+
+--------------------------------------------------------------------------------------------------------------
+-- SPECIALIZED SEARCH HELPERS
+--------------------------------------------------------------------------------------------------------------
+
+-- Find a smart terrain associated with an anomaly zone on a specific level
+function find_smart_with_anomaly(level_name)
+    local anomalies = get_anomaly_zones(level_name)
+    if not anomalies or #anomalies == 0 then return nil end
+
+    -- Pick a random anomaly and find its closest smart
+    local rnd_anom = anomalies[math.random(#anomalies)]
+    local smart, dist = get_nearest_smart(level_name, rnd_anom.position)
+
+    if smart and dist < 150 then -- Must be reasonably close
+        return smart
+    end
+
+    return nil
+end
+
+-- Find an enemy squad on a level (filtered by faction relations)
+function find_enemy_squad_on_level(my_faction, level_name)
+    local state = siski_memory.get_state()
+    local squads = state and state.squads or {}
+
+    local enemies = {}
+    for id, data in pairs(squads) do
+        local sq = alife_object(id)
+        if sq and sq.player_id then
+            -- Use game_graph to check level (more reliable for squads)
+            local gv = game_graph():vertex(sq.m_game_vertex_id)
+            if not gv then return nil end
+            local squad_level = alife():level_name(gv:level_id())
+
+            if squad_level == level_name then
+                if game_relations.get_factions_community(my_faction, sq.player_id) <= -1000 then
+                    enemies[#enemies + 1] = id
+                end
+            end
+        end
+    end
+
+    if #enemies > 0 then
+        return enemies[math.random(#enemies)]
+    end
+    return nil
+end
+
+-- Find a mutant squad on a level
+function find_mutant_squad_on_level(level_name)
+    local sim = alife()
+    local gg = game_graph()
+
+    local mutants = {}
+    -- Optimization: Iterate all objects? No, iterate SIMBOARD squads if available
+    if SIMBOARD and SIMBOARD.squads then
+        for id, _ in pairs(SIMBOARD.squads) do
+            local sq = sim:object(id)
+            if sq then
+                local faction = sq.player_id
+                if faction == "monster" or faction == "monster_predatory_day" or faction == "monster_predatory_night"
+                    or faction == "monster_zombied_day" or faction == "monster_zombied_night" then
+                    local gv = gg:vertex(sq.m_game_vertex_id)
+                    if gv then
+                        local squad_level = sim:level_name(gv:level_id())
+                        if squad_level == level_name then
+                            mutants[#mutants + 1] = id
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #mutants > 0 then
+        return mutants[math.random(#mutants)]
+    end
+    return nil
+end
+
+-- Find a smart terrain that is a mutant den (lair) and has NO human squads
+function find_mutant_den(level_name)
+    local state = siski_memory.get_state()
+    local smarts = state and state.smarts or {}
+    local dens = {}
+
+    for name, data in pairs(smarts) do
+        if data.level == level_name and data.props and data.props["lair"] and data.props["lair"] > 0 then
+            -- Double check for human presence if possible (not trivial from cache alone)
+            dens[#dens + 1] = data.id
+        end
+    end
+
+    if #dens > 0 then
+        local id = dens[math.random(#dens)]
+        return alife():object(id)
+    end
+    return nil
+end
+
+-- Check if a faction has ANY squads on a level
+function is_faction_on_level(faction, level_name)
+    local state = siski_memory.get_state()
+    local squads = state and state.squads or {}
+    local sim = alife()
+    local gg = game_graph()
+
+    for id, data in pairs(squads) do
+        local sq = sim:object(id)
+        if sq and sq.player_id == faction then
+            local gvid = sq.m_game_vertex_id
+            local gv = gvid and gg:vertex(gvid)
+            if gv then
+                local squad_level = sim:level_name(gv:level_id())
+                if squad_level == level_name then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Find a neutral base on a level (base where faction is not hostile)
+function find_neutral_base(faction, level_name)
+    local bases = get_valid_bases(faction, level_name)
+    if #bases > 0 then
+        local rnd = bases[math.random(#bases)]
+        return alife():object(rnd.id)
+    end
+    return nil
+end
+
+------------------------------------------------------------------------------------------------
+-- LEVEL CHANGER INTEL
+------------------------------------------------------------------------------------------------
+-- Scans for level changers (transitions) to be used as fallback spawn points.
+
+function scan_level_changers()
+    -- [OPTIMIZATION] Redirect to Unified Scanner
+    if not static_objects_scanned then
+        scan_all_static_objects()
+    end
+end
+
+function get_level_changers(level_name)
+    local changers = siski_memory.get_level_changers(level_name)
+    -- Fallback scan if empty? Maybe dangerous to autoscan heavily.
+    -- Better to rely on manual triggers or major refills.
+    -- But for first run we need it.
+    if not changers or #changers == 0 then
+        -- Only scan if WE DON'T KNOW about this level yet (nil check better than empty check?)
+        -- But memory returns {} if nil.
+        -- Let's scan once if global count is low?
+        -- Safer: Just scan. It happens rarely (when spawn fails).
+        scan_level_changers()
+        changers = siski_memory.get_level_changers(level_name)
+    end
+    return changers
+end

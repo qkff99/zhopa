@@ -1,0 +1,482 @@
+local logger = siski_logger
+local memory = siski_memory
+local vendetta = siski_vendetta
+
+-- Claims: [corpse_id] = npc_id
+local claimed_corpses = {}
+
+local LOOT_SOUNDS = {
+    begin = "corpse_loot_begin",
+    good = "corpse_loot_good",
+    bad = "corpse_loot_bad"
+}
+
+-- Phrases for player when they try to steal loot
+local LOOT_WARNINGS = {
+    "Hey! Get your hands off that. It's mine!",
+    "Find your own bodies, stalker. This one is spoken for.",
+    "Don't touch it. I saw it first!",
+    "Unless you want a bullet, step back.",
+    "Looting's for the quick, and you're too slow. Back off."
+}
+
+-- ==============================================================================================
+-- HELPERS
+-- ==============================================================================================
+
+local function get_npc_squad(npc)
+    local id = siski_ef_utils.safe_id(npc)
+    if not id then return nil end
+    local se_obj = alife_object(id)
+    if se_obj and se_obj.group_id and se_obj.group_id ~= 65535 then
+        return alife_object(se_obj.group_id)
+    end
+    -- Try global if available
+    if _G.get_object_squad then return _G.get_object_squad(npc) end
+    return nil
+end
+
+local function is_valuable(item)
+    if not item then return false end
+    local cost = item:cost() or 0
+    local cond = item:condition() or 1.0
+
+    -- Don't loot items in terrible condition (<10%) unless expensive
+    if cond < 0.1 and cost < 1000 then return false end
+
+    -- Don't loot items worth almost nothing
+    if cost < 50 then return false end
+
+    return true
+end
+
+local function get_npc_inventory_weight(npc)
+    if not npc then return 0 end
+
+    local total_weight = 0
+    npc:iterate_inventory(function(owner, item)
+        if item then
+            total_weight = total_weight + item:weight()
+        end
+    end)
+
+    return total_weight
+end
+
+local function get_max_carry_weight(npc)
+    -- Default NPC carry capacity
+    return 50
+end
+
+local function is_within_range(npc, target, max_dist)
+    if not npc or not target then return false end
+    max_dist = max_dist or 5
+
+    local npc_pos = siski_ef_utils.safe_position(npc)
+    local target_pos = siski_ef_utils.safe_position(target)
+    if not npc_pos or not target_pos then return false end
+
+    local dist = npc_pos:distance_to(target_pos)
+    return dist <= max_dist
+end
+
+local function is_valid_item(obj)
+    if not obj then return false end
+
+    -- Check if it's actually an item (not NPC)
+    local cls = obj:clsid()
+
+    -- Skip if it's a stalker/monster/NPC
+    if IsStalker and IsStalker(obj) then return false end
+    if IsMonster and IsMonster(obj) then return false end
+
+    -- Check for common NPC clsids
+    if cls == clsid.script_stalker or
+        cls == clsid.script_trader or
+        cls == clsid.stalker then
+        return false
+    end
+
+    return true
+end
+
+local function is_valid_corpse(obj)
+    if not obj then return false end
+
+    -- Must be stalker
+    if not IsStalker or not IsStalker(obj) then return false end
+
+    -- Must be dead
+    if siski_ef_utils.is_alive(obj) then return false end
+
+    return true
+end
+
+-- ==============================================================================================
+-- ITEM PICKUP
+-- ==============================================================================================
+
+function can_pickup(npc, item)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return false end
+    if not npc or not item then return false end
+
+    -- SAFETY: Check if item is valid (not an NPC!)
+    if not is_valid_item(item) then
+        return false
+    end
+
+    -- Check distance
+    if not is_within_range(npc, item, 5) then
+        return false
+    end
+
+    -- Check weight capacity
+    local current_weight = get_npc_inventory_weight(npc)
+    local max_weight = get_max_carry_weight(npc)
+    local ok, item_weight = pcall(function() return item:weight() or 0 end)
+    if not ok then item_weight = 0 end
+
+    if current_weight + item_weight > max_weight then
+        return false
+    end
+
+    return true
+end
+
+function pickup_item(npc, item)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return false end
+    if not npc or not item then return false end
+
+    if not can_pickup(npc, item) then
+        return false
+    end
+
+    local item_id = siski_ef_utils.safe_id(item)
+    local section = siski_ef_utils.safe_section(item)
+    if not item_id or not section then return false end
+
+    -- Check Vendetta: Was this item claimed by another squad?
+    local npc_squad = get_npc_squad(npc)
+    if npc_squad and vendetta then
+        local claimed_by = memory.get_item_claim(item_id)
+        if claimed_by and claimed_by ~= npc_squad.id then
+            -- VENDETTA! Someone stole our loot!
+            -- [DISABLED] User requested to remove loot-based vendettas
+            -- vendetta.register_feud(claimed_by, npc_squad.id, "loot_theft")
+            logger.siski_log("FORCE_LOOT", "DEBUG", "Loot theft detected! Squad [%d] stole from [%d] (Vendetta Disabled)",
+                npc_squad.id, claimed_by)
+        end
+    end
+
+    -- Method 1: Try vanilla transfer
+    local success = false
+
+    -- Try to pick up via engine
+    if item:parent() == nil then
+        -- Item is on ground - try direct transfer
+        npc:transfer_item(item, npc)
+        success = true
+    end
+
+    -- Method 2: Force spawn in inventory (if vanilla blocked)
+    if not success then
+        -- Spawn copy in NPC inventory
+        local pos = siski_ef_utils.safe_position(npc)
+        local lvid = siski_ef_utils.safe_level_vertex_id(npc)
+        local gvid = siski_ef_utils.safe_game_vertex_id(npc)
+        local nid = siski_ef_utils.safe_id(npc)
+
+        if pos and lvid and gvid and nid then
+            local se_item = alife():create(section, pos, lvid, gvid, nid)
+
+            if se_item then
+                -- Remove original item from world
+                if siski_core and siski_core.safe_release then
+                    siski_core.safe_release(item_id)
+                else
+                    local se_original = alife_object(item_id)
+                    if se_original then
+                        alife():release(se_original, true)
+                    end
+                end
+                success = true
+            end
+        end
+    end
+
+    if success then
+        logger.siski_log("FORCE_LOOT", "DEBUG", "NPC [%s] picked up [%s]", siski_ef_utils.safe_name(npc), section)
+
+        -- Clear claim
+        memory.clear_item_claim(item_id)
+    end
+
+    return success
+end
+
+-- ==============================================================================================
+-- CORPSE LOOTING
+-- ==============================================================================================
+
+function loot_corpse(npc, corpse)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return 0 end
+    if not npc or not corpse then return 0 end
+
+    local npc_name = siski_ef_utils.safe_name(npc)
+    local corpse_name = siski_ef_utils.safe_name(corpse)
+
+    logger.siski_log("FORCE_LOOT", "DEBUG", "[%s] Attempting to loot corpse [%s]", npc_name, corpse_name)
+
+    -- SAFETY: Verify target is actually a dead NPC
+    if not is_valid_corpse(corpse) then
+        logger.siski_log("FORCE_LOOT", "WARN", "[%s] Invalid corpse target: [%s] (Not Stalker or Alive)", npc_name,
+            corpse_name)
+        return 0
+    end
+
+    local cpos = siski_ef_utils.safe_position(corpse)
+    local npos = siski_ef_utils.safe_position(npc)
+
+    if not cpos or not npos then return 0 end
+
+    local dist = npos:distance_to(cpos)
+    logger.siski_log("FORCE_LOOT", "DEBUG", "[%s] Distance to corpse: %.2f (Max: 5.0)", npc_name, dist)
+
+    if not is_within_range(npc, corpse, 5) then
+        logger.siski_log("FORCE_LOOT", "DEBUG", "[%s] Too far from corpse to loot.", siski_ef_utils.safe_name(npc))
+        return 0
+    end
+
+    local items_looted = 0
+    local items_to_transfer = {}
+    local total_value = 0
+
+    -- Claim body
+    local corpse_id = siski_ef_utils.safe_id(corpse)
+    local npc_id = siski_ef_utils.safe_id(npc)
+    if not (corpse_id and npc_id) then return 0 end
+    claimed_corpses[corpse_id] = npc_id
+
+    -- [NEW] Force loot generation (Anomaly/Gamma specific)
+    if death_manager and death_manager.create_release_item then
+        pcall(function() death_manager.create_release_item(corpse) end)
+        logger.siski_log("FORCE_LOOT", "DEBUG", "[%s] Triggered death_manager.create_release_item",
+            siski_ef_utils.safe_name(npc))
+    end
+
+    -- Play begin sound
+    if xr_sound then
+        xr_sound.set_sound_play(npc_id, LOOT_SOUNDS.begin)
+    end
+
+    -- Collect items from corpse
+    npc:iterate_inventory(function(owner, item) -- DEBUG: Check NPC own inventory first
+        -- logger.siski_log("FORCE_LOOT", "DEBUG", "NPC Inventory Check: %s", item:section())
+    end)
+
+    corpse:iterate_inventory(function(owner, item)
+        if item then
+            local is_val = is_valuable(item)
+            local can_pick = can_pickup(npc, item)
+
+            if is_val and can_pick then
+                items_to_transfer[#items_to_transfer + 1] = item
+                total_value = total_value + (item:cost() or 0)
+            else
+                logger.siski_log("FORCE_LOOT", "DEBUG", "Skipping item [%s]: Valuable=%s, CanPickup=%s",
+                    siski_ef_utils.safe_section(item), tostring(is_val), tostring(can_pick))
+            end
+        end
+    end)
+
+    logger.siski_log("FORCE_LOOT", "DEBUG", "[%s] Found %d items to transfer.", siski_ef_utils.safe_name(npc),
+        #items_to_transfer)
+
+    -- Transfer items
+    for _, item in ipairs(items_to_transfer) do
+        local section = siski_ef_utils.safe_section(item)
+
+        -- Method 1: Direct transfer
+        if siski_core and siski_core.safe_transfer then
+            siski_core.safe_transfer(item, corpse, npc)
+        else
+            corpse:transfer_item(item, npc)
+        end
+
+        -- Verify transfer
+        local in_npc = false
+        local item_id = siski_ef_utils.safe_id(item)
+        if item_id then
+            npc:iterate_inventory(function(o, i)
+                if siski_ef_utils.safe_id(i) == item_id then in_npc = true end
+            end)
+        end
+
+        if in_npc then
+            items_looted = items_looted + 1
+            logger.siski_log("FORCE_LOOT", "DEBUG", "NPC [%s] successfully looted [%s] from corpse",
+                siski_ef_utils.safe_name(npc), section)
+        else
+            logger.siski_log("FORCE_LOOT", "WARN", "NPC [%s] FAILED to transfer [%s] (blocked?). Attempting BYPASS...",
+                siski_ef_utils.safe_name(npc), section)
+
+            -- METHOD 2: FORCE BYPASS (Clone & Destroy)
+            -- Use alife():create to spawn directly on NPC
+            local pos = siski_ef_utils.safe_position(npc)
+            local lvid = siski_ef_utils.safe_level_vertex_id(npc)
+            local gvid = siski_ef_utils.safe_game_vertex_id(npc)
+            local nid = siski_ef_utils.safe_id(npc)
+
+            if pos and lvid and gvid and nid then
+                local se_new = alife():create(section, pos, lvid, gvid, nid)
+
+                if se_new then
+                    logger.siski_log("FORCE_LOOT", "INFO", "BYPASS SUCCESS: Force-spawned [%s] for [%s]", section,
+                        siski_ef_utils.safe_name(npc))
+                    items_looted = items_looted + 1
+
+                    -- Remove original from corpse
+                    local se_old = alife_object(item_id)
+                    if se_old then
+                        alife():release(se_old, true)
+                    end
+                else
+                    logger.siski_log("FORCE_LOOT", "ERROR", "BYPASS FAILED: Could not create [%s]", section)
+                end
+            end
+        end
+    end
+
+    -- Feedback sounds
+    if xr_sound and items_looted > 0 then
+        local nid = siski_ef_utils.safe_id(npc)
+        if nid then
+            local snd = total_value > 500 and LOOT_SOUNDS.good or LOOT_SOUNDS.bad
+            xr_sound.set_sound_play(nid, snd)
+        end
+    end
+
+    -- Unclaim
+    local cid = siski_ef_utils.safe_id(corpse)
+    if cid then claimed_corpses[cid] = nil end
+
+    if items_looted > 0 then
+        logger.siski_log("FORCE_LOOT", "INFO", "NPC [%s] looted %d items from corpse [%s]",
+            siski_ef_utils.safe_name(npc), items_looted, siski_ef_utils.safe_name(corpse))
+    else
+        logger.siski_log("FORCE_LOOT", "DEBUG", "NPC [%s] looted 0 items (Empty or Blocked).",
+            siski_ef_utils.safe_name(npc))
+    end
+
+    return items_looted
+end
+
+-- ==============================================================================================
+-- PLAYER INTERACTION
+-- ==============================================================================================
+
+function check_for_claim(obj)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return nil end
+    if not obj then return nil end
+    local id = siski_ef_utils.safe_id(obj)
+    if not id then return nil end
+    local npc_id = claimed_corpses[id]
+    if not npc_id then return nil end
+
+    local npc = level.object_by_id(npc_id)
+    if siski_ef_utils.is_alive(npc) then
+        -- Warn player
+        local msg = LOOT_WARNINGS[math.random(#LOOT_WARNINGS)]
+        logger.send_news(npc, msg)
+
+        -- Trigger Vendetta if player persists?
+        -- For now just news msg.
+        return npc
+    end
+
+    -- Cleanup stale claim
+    claimed_corpses[id] = nil
+    return nil
+end
+
+-- ==============================================================================================
+-- MUTANT LOOTING
+-- ==============================================================================================
+
+function loot_mutant(npc, mutant)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return 0 end
+    if not npc or not mutant then return 0 end
+
+    local id = siski_ef_utils.safe_id(mutant)
+    local name = siski_ef_utils.safe_name(mutant)
+    local nid = siski_ef_utils.safe_id(npc)
+
+    if not id or not name or not nid then return 0 end
+
+    -- Check if already looted
+    if se_load_var(id, name, "looted") == "true" then
+        return 0
+    end
+
+    if not is_within_range(npc, mutant, 3) then
+        return 0
+    end
+
+    -- Claim
+    claimed_corpses[id] = nid
+
+    logger.siski_log("FORCE_LOOT", "DEBUG", "NPC [%s] field dressing [%s]", siski_ef_utils.safe_name(npc), name)
+
+    -- Simulation of field dressing
+    if ui_mutant_loot then
+        local section = siski_ef_utils.safe_section(mutant)
+        local ok, cls = pcall(function() return mutant:clsid() end)
+        if section and ok then
+            local parts = {}
+            ui_mutant_loot.loot_mutant(section, cls, parts, npc, nil, mutant)
+        end
+    end
+
+    -- Mark as looted
+    se_save_var(id, name, "looted", "true")
+
+    -- Unclaim
+    claimed_corpses[id] = nil
+
+    return 1 -- Treated as 1 successful "looting action"
+end
+
+-- ==============================================================================================
+-- BATCH LOOTING (Route Execution)
+-- ==============================================================================================
+
+function execute_loot_route(npc, route)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("force_loot")) then return 0 end
+    if not npc or not route then return end
+
+    local total_items = 0
+
+    for _, target in ipairs(route) do
+        if target.type == "ITEM" then
+            if pickup_item(npc, target.obj) then
+                total_items = total_items + 1
+            end
+        elseif target.type == "CORPSE" then
+            if IsStalker(target.obj) then
+                total_items = total_items + loot_corpse(npc, target.obj)
+            elseif IsMonster(target.obj) then
+                total_items = total_items + loot_mutant(npc, target.obj)
+            end
+        end
+    end
+
+    return total_items
+end
+
+-- ==============================================================================================
+-- INIT
+-- ==============================================================================================
+
+function on_game_start()
+    logger.siski_log("FORCE_LOOT", "INFO", "Module initialized - Claims active")
+end

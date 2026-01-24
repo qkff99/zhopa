@@ -1,0 +1,71 @@
+-- ==============================================================================================
+-- SISKI MCM MODULE
+-- Mod Configuration Menu integration.
+-- ==============================================================================================
+
+function on_mcm_load()
+    op = { id= "siski",sh=true ,gr={
+            { id= "title",type= "slide",link= "ui_options_slider_player",text="ui_mcm_siski_title",size= {512,50},spacing= 20 },
+            
+            -- GENERAL
+            {id = "debug_enabled", type = "check", val = 1, def = false},
+            {id = "debug_hud_enabled", type = "check", val = 1, def = false},
+            {id = "debug_offline_logging", type = "check", val = 1, def = false},
+            {id = "debug_dump_key", type = "key_bind", val = 2, def = DIK_keys.DIK_DELETE},
+            {id = "spawn_enabled", type = "check", val = 1, def = true},
+            {id = "protector_story_to_trader", type = "check", val = 1, def = false},
+            {id = "protector_sections_to_trader", type = "check", val = 1, def = true},
+            {id = "alife_vanilla_squads", type = "check", val = 1, def = true},
+            
+            {id = "divider", type = "line" },
+            
+            -- POPULATION
+            {id = "pop_header", type = "desc", text = "ui_mcm_siski_pop_header"},
+            {id = "pop_stalker", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_bandit", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_csky", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_army", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_freedom", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_dolg", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_ecolog", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_killer", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_renegade", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_monolith", type = "track", val = 2, min=0, max=100, step=1, def = 5},
+            {id = "pop_monster", type = "track", val = 2, min=0, max=100, step=1, def = 0},
+            {id = "pop_zombied", type = "track", val = 2, min=0, max=100, step=1, def = 0},
+            
+            {id = "divider", type = "line" },
+
+            -- GAMEPLAY
+            {id = "gameplay_header", type = "desc", text = "ui_mcm_siski_gameplay_header"},
+            {id = "max_loot_weight", type = "track", val = 2, min=10, max=100, step=5, def = 50},
+            {id = "spawn_cooldown", type = "track", val = 2, min=5, max=60, step=1, def = 10},
+            
+            -- SPAWN DISTANCES (Missing Keys Fix)
+            {id = "spawn_min_dist", type = "track", val = 2, min=50, max=500, step=10, def = 150},
+            {id = "spawn_max_dist", type = "track", val = 2, min=500, max=2000, step=50, def = 1000},
+            {id = "spawn_safe_radius", type = "track", val = 2, min=20, max=200, step=5, def = 50},
+
+            {id = "divider", type = "line" },
+            
+            -- ACTIVITIES
+            {id = "act_header", type = "desc", text = "ui_mcm_siski_activities_header"},
+            {id = "activities_enabled", type = "check", val = 1, def = true},
+            {id = "loot_gather_speed", type = "track", val = 2, min=0.5, max=5.0, step=0.1, def = 1.0},
+            {id = "trade_time", type = "track", val = 2, min=30, max=300, step=10, def = 60},
+
+            -- AF HUNTERS
+            {id = "af_header", type = "desc", text = "ui_mcm_siski_af_header"},
+            {id = "af_hunter_count", type = "track", val = 2, min=0, max=5, step=1, def = 0},
+            {id = "af_hunter_campfire", type = "check", val = 1, def = true},
+
+            {id = "divider", type = "line" },
+
+            -- SQUAD SIZES
+            {id = "squad_size_header", type = "desc", text = "ui_mcm_siski_squad_size_header"},
+            {id = "squad_size_min", type = "track", val = 2, min=1, max=10, step=1, def = 3},
+            {id = "squad_size_max", type = "track", val = 2, min=1, max=10, step=1, def = 5},
+        }
+    }
+    return op
+end

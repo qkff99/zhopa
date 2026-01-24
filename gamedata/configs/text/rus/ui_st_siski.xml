@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+    <string id="ui_mcm_menu_siski">
+        <text>SISKI</text>
+    </string>
+    <string id="ui_mcm_siski_title">
+        <text>SISKI: Система Интеллекта и Симуляции Сталкеров</text>
+    </string>
+    
+    <!-- GENERAL -->
+    <string id="ui_mcm_siski_debug_enabled">
+        <text>Включить отладку</text>
+    </string>
+    <string id="ui_mcm_siski_debug_hud_enabled">
+        <text>Показать HUD отладки</text>
+    </string>
+    <string id="ui_mcm_siski_debug_offline_logging">
+        <text>Логировать оффлайн действия</text>
+    </string>
+    <string id="ui_mcm_siski_debug_dump_key">
+        <text>Клавиша дампа состояния</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_enabled">
+        <text>Включить контроль популяции</text>
+    </string>
+    
+    <!-- POPULATION -->
+    <string id="ui_mcm_siski_pop_header">
+        <text>Цели Популяции (Активные Отряды)</text>
+    </string>
+    <string id="ui_mcm_siski_pop_stalker">
+        <text>Одиночки</text>
+    </string>
+    <string id="ui_mcm_siski_pop_bandit">
+        <text>Бандиты</text>
+    </string>
+    <string id="ui_mcm_siski_pop_csky">
+        <text>Чистое Небо</text>
+    </string>
+     <string id="ui_mcm_siski_pop_army">
+        <text>Военные</text>
+    </string>
+    <string id="ui_mcm_siski_pop_freedom">
+        <text>Свобода</text>
+    </string>
+    <string id="ui_mcm_siski_pop_dolg">
+        <text>Долг</text>
+    </string>
+    <string id="ui_mcm_siski_pop_ecolog">
+        <text>Экологи</text>
+    </string>
+    <string id="ui_mcm_siski_pop_killer">
+        <text>Наемники</text>
+    </string>
+    <string id="ui_mcm_siski_pop_renegade">
+        <text>Ренегаты</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monolith">
+        <text>Монолит</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monster">
+        <text>Мутанты</text>
+    </string>
+     <string id="ui_mcm_siski_pop_zombied">
+        <text>Зомбированные</text>
+    </string>
+    
+    <!-- GAMEPLAY -->
+    <string id="ui_mcm_siski_gameplay_header">
+        <text>Настройки Геймплея</text>
+    </string>
+    <string id="ui_mcm_siski_max_loot_weight">
+        <text>Макс. вес лута (кг)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_cooldown">
+        <text>Кулдаун подкреплений (мин)</text>
+    </string>
+    
+    <!-- SQUAD SIZES -->
+    <string id="ui_mcm_siski_squad_size_header">
+        <text>Размеры Отрядов (При спавне)</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_min">
+        <text>Мин. размер отряда</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_max">
+        <text>Макс. размер отряда</text>
+    </string>
+    
+    <string id="ui_mcm_siski_activities_header">
+        <text>Активности NPC</text>
+    </string>
+    <string id="ui_mcm_siski_activities_enabled">
+        <text>Включить активности NPC</text>
+    </string>
+    <string id="ui_mcm_siski_loot_gather_speed">
+        <text>Скорость сбора лута</text>
+    </string>
+    <string id="ui_mcm_siski_trade_time">
+        <text>Время торговли (с)</text>
+    </string>
+
+    <string id="ui_mcm_siski_af_header">
+        <text>Охотники за артефактами</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_count">
+        <text>Кол-во охотников (на локацию)</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_campfire">
+        <text>Тусоваться у костра</text>
+    </string>
+
+    <string id="ui_mcm_siski_spawn_min_dist">
+        <text>Мин. дистанция спавна (м)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_max_dist">
+        <text>Макс. дистанция спавна (м)</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_safe_radius">
+        <text>Безопасный радиус (м)</text>
+    </string>
+
+    <string id="ui_mcm_siski_protector_story_to_trader">
+        <text>Сюжетная защита (NPC -&gt; торговец)</text>
+    </string>
+    <string id="ui_mcm_siski_protector_sections_to_trader">
+        <text>Защита по секциям (NPC -&gt; торговец)</text>
+    </string>
+    <string id="ui_mcm_siski_alife_vanilla_squads">
+        <text>ALife для ванильных отрядов</text>
+    </string>
+
+    <string id="ui_mcm_siski_debug_enabled_desc">
+        <text>Включает расширенное логирование SISKI. Может снижать производительность и засорять лог.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_hud_enabled_desc">
+        <text>Показывает HUD-таблицу активных мозгов/задач. Полезно для диагностики.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_offline_logging_desc">
+        <text>Логирует оффлайн-решения отрядов. Может сильно спамить в лог.</text>
+    </string>
+    <string id="ui_mcm_siski_debug_dump_key_desc">
+        <text>Клавиша для дампа состояния SISKI (brains/memory) в лог.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_enabled_desc">
+        <text>Включает контроль популяции и спавн подкреплений SISKI. Выключение оставляет только существующие отряды.</text>
+    </string>
+    <string id="ui_mcm_siski_protector_story_to_trader_desc">
+        <text>Пинит сюжетных NPC в сообщество trader, чтобы они не уходили со своих мест.</text>
+    </string>
+    <string id="ui_mcm_siski_protector_sections_to_trader_desc">
+        <text>Пинит NPC из списка protector_pinned_sections (торговцы/техники/медики/проводники) в trader.</text>
+    </string>
+    <string id="ui_mcm_siski_alife_vanilla_squads_desc">
+        <text>Подключает мозги SISKI к отрядам, которые заспавнили игра/другие моды (если их секция разрешена). Может усилить нагрузку.</text>
+    </string>
+
+    <string id="ui_mcm_siski_pop_stalker_desc">
+        <text>Целевое число активных отрядов Одиночек. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_bandit_desc">
+        <text>Целевое число активных отрядов Бандитов. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_csky_desc">
+        <text>Целевое число активных отрядов Чистого Неба. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_army_desc">
+        <text>Целевое число активных отрядов Военных. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_freedom_desc">
+        <text>Целевое число активных отрядов Свободы. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_dolg_desc">
+        <text>Целевое число активных отрядов Долга. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_ecolog_desc">
+        <text>Целевое число активных отрядов Экологов. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_killer_desc">
+        <text>Целевое число активных отрядов Наемников. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_renegade_desc">
+        <text>Целевое число активных отрядов Ренегатов. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monolith_desc">
+        <text>Целевое число активных отрядов Монолита. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_monster_desc">
+        <text>Целевое число активных отрядов Мутантов. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+    <string id="ui_mcm_siski_pop_zombied_desc">
+        <text>Целевое число активных отрядов Зомбированных. Считаются только отряды, заспавненные SISKI.</text>
+    </string>
+
+    <string id="ui_mcm_siski_max_loot_weight_desc">
+        <text>Максимальный вес лута, который отряд будет подбирать перед переключением на другие цели.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_cooldown_desc">
+        <text>Кулдаун цикла подкреплений. Чем выше — тем реже SISKI будет пытаться восполнять популяцию.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_min_dist_desc">
+        <text>Минимальная дистанция до игрока при спавне отрядов на текущей локации.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_max_dist_desc">
+        <text>Максимальная дистанция до игрока при спавне отрядов на текущей локации.</text>
+    </string>
+    <string id="ui_mcm_siski_spawn_safe_radius_desc">
+        <text>Радиус проверки опасности/врагов вокруг точки спавна.</text>
+    </string>
+
+    <string id="ui_mcm_siski_activities_enabled_desc">
+        <text>Включает дополнительные активности ИИ: сбор лута и торговлю.</text>
+    </string>
+    <string id="ui_mcm_siski_loot_gather_speed_desc">
+        <text>Множитель скорости сбора лута.</text>
+    </string>
+    <string id="ui_mcm_siski_trade_time_desc">
+        <text>Сколько секунд отряд тратит на торговлю у торговца.</text>
+    </string>
+
+    <string id="ui_mcm_siski_af_hunter_count_desc">
+        <text>Сколько отрядов охотников за артефактами держать на каждой локации (0 — отключить).</text>
+    </string>
+    <string id="ui_mcm_siski_af_hunter_campfire_desc">
+        <text>Разрешить спавнить охотников у костров, если нет подходящего смарта рядом с аномалией.</text>
+    </string>
+
+    <string id="ui_mcm_siski_squad_size_min_desc">
+        <text>Минимальный размер новых отрядов SISKI (не влияет на ванильные отряды).</text>
+    </string>
+    <string id="ui_mcm_siski_squad_size_max_desc">
+        <text>Максимальный размер новых отрядов SISKI (не влияет на ванильные отряды).</text>
+    </string>
+</string_table>

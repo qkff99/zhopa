@@ -1,0 +1,659 @@
+-- ==============================================================================================
+-- SISKI STRATEGIC MODULE
+-- Handles high-level strategic decisions:
+-- 1. Base Defense/Population (Ensuring bases are full)
+-- 2. Anomaly Exploration (Idle squads hunt for artifacts)
+-- 3. Expansion (Future: Capture enemy bases)
+-- 4. Migration (Future: Retreat from dangerous levels)
+-- ==============================================================================================
+
+local logger = siski_logger
+local memory = siski_memory
+local settings = siski_settings
+
+-- ==============================================================================================
+-- [SECTION 1] HELPERS
+-- Utility functions used by multiple strategic modules.
+-- ==============================================================================================
+
+local function get_smart_population(smart_id)
+    local board = SIMBOARD or (sim_board and sim_board.get_sim_board())
+    if not board or not board.smarts or not board.smarts[smart_id] then return 0 end
+
+    local smart_info = board.smarts[smart_id]
+    if not smart_info.squads then return 0 end
+
+    local count = 0
+    -- SISKI: Only count OUR squads (those with Brains/Memory entry)
+    -- We want to ignore vanilla squads so we can overpopulate with our own guys
+    local state = memory.get_state()
+
+    for squad_id, v in pairs(smart_info.squads) do
+        -- Check if this squad is known to our memory (i.e. spawned by us or claimed)
+        if state.squads and state.squads[squad_id] then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Count squads heading to a specific target NAME (for anomaly zones which aren't smart terrains)
+local function get_target_population(target_name)
+    if not target_name then return 0 end
+
+    local count = 0
+    local state = memory.get_state()
+
+    for squad_id, data in pairs(state.squads or {}) do
+        local squad_obj = alife_object(tonumber(squad_id))
+        if squad_obj and squad_obj.scripted_target == target_name then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- ==============================================================================================
+-- [SECTION 2] STRATEGIC MODULES
+-- Each function represents a distinct strategic behavior.
+-- Called by: siski_brain.script -> SquadBrain:think()
+-- Return: true if a task was assigned, false otherwise.
+-- ==============================================================================================
+
+-- Helper: Check if base belongs to faction
+local function check_base_ownership(props, faction)
+    if not props then return false end
+    if props[faction] and props[faction] > 0 then return true end
+    if props["all"] and props["all"] > 0 then return true end
+
+    -- Aliases
+    local aliases = {
+        military = "army",
+        killer = "merc",
+        dolg = "duty"
+    }
+    if aliases[faction] and props[aliases[faction]] and props[aliases[faction]] > 0 then
+        return true
+    end
+    return false
+end
+
+-- Helper: Calculate distance with level preference
+local function calculate_distance(squad, data)
+    local dist = 9999999
+    if squad.m_game_vertex_id and data.gvid then
+        dist = game_graph():vertex(squad.m_game_vertex_id):game_point():distance_to(
+            game_graph():vertex(data.gvid):game_point())
+    end
+
+    local squad_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+    local data_level = data.level
+    if squad_level == data_level then dist = dist / 10 end
+
+    return dist
+end
+
+-- Helper: Count active squads of a faction on a level performing specific task reasons
+local function get_active_task_count(faction, level_name, reasons)
+    local count = 0
+    local state = memory.get_state()
+
+    for sid, s_data in pairs(state.squads or {}) do
+        -- Check Faction
+        local s_obj = alife_object(tonumber(sid))
+        if s_obj and s_obj.player_id == faction then
+            -- Check Level
+            local s_lvl = alife():level_name(game_graph():vertex(s_obj.m_game_vertex_id):level_id())
+            if s_lvl == level_name then
+                local found = false
+
+                -- 1. Check Current Task
+                local current_task = s_data.current_task
+                if current_task and current_task.params and current_task.params.reason then
+                    local r = current_task.params.reason
+                    for _, target_reason in ipairs(reasons) do
+                        if r == target_reason then
+                            count = count + 1
+                            found = true
+                            break
+                        end
+                    end
+                end
+
+                -- 2. Check Queue (if not found in current task)
+                -- Avoid double counting if using "continue"
+                if not found and s_data.queue then
+                    for _, task in ipairs(s_data.queue) do
+                        if task.params and task.params.reason then
+                            local r = task.params.reason
+                            for _, target_reason in ipairs(reasons) do
+                                if r == target_reason then
+                                    count = count + 1
+                                    found = true
+                                    break
+                                end
+                            end
+                        end
+                        if found then break end
+                    end
+                end
+            end
+        end
+    end
+    return count
+end
+
+-- [MODULE 1] BASE DEFENSE
+-- GOAL: Keep friendly bases populated.
+-- PRIORITY: HIGH (2)
+-- NEW: Night/Day logic, cooldowns, dynamic population
+function check_base_fulfillment(brain)
+    local squad = brain.squad
+    local faction = brain.faction
+
+    -- Exclude monsters/zombies from "Base Logic" for now (they act differently)
+    if faction == "monster" or faction == "zombied" or faction == "animal" then
+        return false
+    end
+
+    -- Exclude Special Classes
+    if brain.squad_class == "af_hunter" then return false end
+
+    -- Time of day check
+    local hour = level.get_time_hours()
+    local is_night = (hour >= 21 or hour < 6) -- 21:00 - 06:00
+
+    local state = memory.get_state()
+    local smarts = state.smarts or {}
+
+    -- Get squad's current level
+    local squad_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+
+    -- Cooldown: Check if squad recently left a base (GAME TIME)
+    local last_base = brain.last_base_name
+    local last_base_game_time = brain.last_base_leave_game_time -- CTime object
+    local cooldown_hours = 1                                    -- 1 game hour cooldown
+
+    local best_base = nil
+    local best_dist = 9999999
+
+    -- Use FILTERED list from Intel (handles Blacklists and Level checks)
+    local valid_bases = siski_intel.get_valid_bases(faction, squad_level)
+
+    -- [LIMIT CHECK] Expanded limits for Base Defense
+    local current_base_defenders = get_active_task_count(faction, squad_level,
+        { "BASE_DEFENSE", "BASE_DUTY", "NIGHT_REST" })
+
+    -- OFFLINE: Max 4 squads (Fill the bases!)
+    -- ONLINE: Max 1 squad (Player shouldn't see mass campers if others can do lore)
+    local max_strategic_squads = brain.squad.online and 1 or 4
+
+    if current_base_defenders >= max_strategic_squads then
+        return false
+    end
+
+    for _, data in ipairs(valid_bases) do
+        local name = data.name
+        local props = data.props
+
+        -- Note: data.level check and props["base"] check are already done in get_valid_bases
+
+        local is_our_base = check_base_ownership(props, faction)
+
+        if is_our_base then
+            -- Cooldown check (skip if night - at night we want them to stay)
+            if not is_night and name == last_base and last_base_game_time then
+                local now = game.get_game_time()
+                local elapsed_sec = now:diffSec(last_base_game_time)
+                local elapsed_hours = elapsed_sec / 3600
+                if elapsed_hours < cooldown_hours then
+                    goto continue -- Skip this base, on cooldown
+                end
+            end
+
+            -- Population check
+            local current_pop = get_smart_population(data.id)
+
+            -- COUNT INCOMING (Fix for Race Condition/Flooding)
+            -- Count squads that are targeting this smart but not yet there (smart_id mismatch)
+            local incoming_pop = 0
+            local state = memory.get_state()
+            for sid, s_data in pairs(state.squads or {}) do
+                if sid ~= brain.id then -- Don't count self
+                    local s_obj = alife_object(tonumber(sid))
+                    if s_obj and s_obj.scripted_target == name and s_obj.m_smart_terrain_id ~= data.id then
+                        incoming_pop = incoming_pop + 1
+                    end
+                end
+            end
+
+            local total_pop = current_pop + incoming_pop
+
+            local max_pop = 1 -- Strict limit as requested (was 1 Day / 5 Night)
+
+            -- Optional: Allow 2 at night? User said "limit max 1", strict for now to fix flooding.
+            -- if is_night then max_pop = 2 end
+
+            if total_pop < max_pop then
+                -- Calculate distance
+                local dist = calculate_distance(squad, data)
+
+                if dist < best_dist then
+                    best_dist = dist
+                    best_base = data
+                end
+            end
+        end
+        ::continue::
+    end
+
+    if best_base then
+        -- Calculate stay duration
+        local stay_duration
+        if is_night then
+            -- Stay until morning (calculate remaining night hours)
+            local hours_until_morning
+            if hour >= 21 then
+                hours_until_morning = (24 - hour) + 6 -- Hours until 6:00
+            else
+                hours_until_morning = 6 - hour
+            end
+            if hours_until_morning <= 0 then hours_until_morning = 1 end
+            stay_duration = hours_until_morning * 60 -- in game minutes
+        else
+            -- Day: 30-60 minutes game time
+            stay_duration = math.random(30, 60)
+        end
+
+        brain:add_task("MOVE", best_base.name, 2, { -- Priority 2 (High)
+            reason = "BASE_DEFENSE",
+            stay_duration = stay_duration,
+            stay_reason = is_night and "NIGHT_REST" or "BASE_DUTY"
+        })
+
+        logger.siski_log("STRATEGY", "INFO", "Squad [%s] ordered to base [%s] (Pop: %d, Night: %s, Stay: %dm)",
+            squad:name(), best_base.name, get_smart_population(best_base.id), tostring(is_night), stay_duration)
+
+        return true
+    end
+
+    return false
+end
+
+-- [MODULE 3] CAMPFIRE PATROL (ENHANCED)
+-- GOAL: Stalkers sitting by fire (Jobs) or Guarding (Wild)
+-- PRIORITY: HIGH (2) - Primary Activity for Free Squads
+function check_campfire_patrol(brain)
+    local squad = brain.squad
+    local faction = brain.faction
+
+    -- Exclude monsters/zombies
+    if faction == "monster" or faction == "zombied" or faction == "animal" then
+        return false
+    end
+
+    -- Exclude Special Classes
+    -- if brain.squad_class then return false end
+
+    -- GUARD: Don't re-assign if already patrolling a campfire
+    if brain.current_task and brain.current_task.params and (brain.current_task.params.reason == "CAMPFIRE_WILD" or brain.current_task.params.reason == "CAMPFIRE_SMART") then
+        return false
+    end
+
+    brain:log("DEBUG", "ENTERING check_campfire_patrol for %s", squad:name())
+
+    local state = memory.get_state()
+    local campfires = state.campfires or {}
+
+    -- Get squad's current level
+    local squad_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+
+    local function table_empty(t)
+        return not (t and next(t) ~= nil)
+    end
+
+    if table_empty(state.smarts) and siski_intel and siski_intel.scan_smarts then
+        pcall(function() siski_intel.scan_smarts() end)
+        state = memory.get_state()
+        campfires = state.campfires or {}
+    end
+
+    local function get_level_from_gvid(gvid)
+        if not gvid then return nil end
+        local ok_v, vert = pcall(function() return game_graph():vertex(gvid) end)
+        if not (ok_v and vert) then return nil end
+        return alife():level_name(vert:level_id())
+    end
+
+    local function get_smart_level(smart_name)
+        if not (state.smarts and smart_name) then return nil end
+        local data = state.smarts[smart_name]
+        return data and data.level or nil
+    end
+
+    local function compute_level_centers(start_level)
+        if not state.smarts then return { [start_level] = vector():set(0, 0, 0) } end
+        local centers = {}
+        local counts = {}
+        for _, data in pairs(state.smarts) do
+            local lvl = data.level
+            local pos = data.position
+            if lvl and pos then
+                if not centers[lvl] then
+                    centers[lvl] = vector():set(0, 0, 0)
+                    counts[lvl] = 0
+                end
+                centers[lvl].x = centers[lvl].x + pos.x
+                centers[lvl].y = centers[lvl].y + pos.y
+                centers[lvl].z = centers[lvl].z + pos.z
+                counts[lvl] = counts[lvl] + 1
+            end
+        end
+        for lvl, c in pairs(counts) do
+            if c > 0 then
+                centers[lvl].x = centers[lvl].x / c
+                centers[lvl].y = centers[lvl].y / c
+                centers[lvl].z = centers[lvl].z / c
+            end
+        end
+        return centers
+    end
+
+    local function get_levels_by_distance(start_level)
+        local centers = compute_level_centers(start_level)
+        if not centers[start_level] then
+            return { start_level }
+        end
+
+        local out = {}
+        for lvl, center in pairs(centers) do
+            local dist = center:distance_to(centers[start_level])
+            out[#out + 1] = { level = lvl, dist = dist }
+        end
+        table.sort(out, function(a, b) return a.dist < b.dist end)
+        local levels = {}
+        for _, e in ipairs(out) do
+            levels[#levels + 1] = e.level
+        end
+        return levels
+    end
+
+    local function get_task_target_level(task)
+        if not (task and task.params) then return nil end
+        if task.type == "MOVE" and type(task.target) == "string" then
+            return get_smart_level(task.target)
+        end
+        if task.params.gvid then
+            return get_level_from_gvid(task.params.gvid)
+        end
+        return nil
+    end
+
+    local function campfire_level_count_for_faction(target_level)
+        local count = 0
+        for sid, s_data in pairs(state.squads or {}) do
+            local sq = alife():object(tonumber(sid))
+            if sq and sq.player_id == faction and s_data.current_task and s_data.current_task.params and sid ~= brain.id then
+                local reason = s_data.current_task.params.reason
+                if reason == "CAMPFIRE_WILD" or reason == "CAMPFIRE_SMART" or reason == "GUARD_CAMPFIRE" or reason == "KAMP" then
+                    local lvl = get_task_target_level(s_data.current_task)
+                    if lvl == target_level then
+                        count = count + 1
+                    end
+                end
+            end
+        end
+        return count
+    end
+
+    local levels = get_levels_by_distance(squad_level)
+    if squad.online then
+        levels = { squad_level }
+    end
+
+    -- Campfire History (to avoid loops): Keep last 3 visited campfires
+    brain.campfire_history = brain.campfire_history or {}
+    local history = brain.campfire_history
+    local max_history = 3
+
+    -- Build set of recently visited for fast lookup
+    local visited = {}
+    for _, cf_id in ipairs(history) do
+        visited[cf_id] = true
+    end
+
+    -- Build set of occupied/reserved campfires by other squads
+    local occupied_count = {}
+    for sid, s_data in pairs(state.squads or {}) do
+        -- Exclude self from occupancy check
+        if sid ~= brain.id and s_data.current_task and s_data.current_task.params then
+            local cf_id = s_data.current_task.params.cf_id
+            if cf_id then
+                occupied_count[cf_id] = (occupied_count[cf_id] or 0) + 1
+            end
+        end
+    end
+
+    local squad_pos = game_graph():vertex(squad.m_game_vertex_id):game_point()
+
+    local function get_nearest_smart_id(level_name, pos)
+        if not (state.smarts and pos) then return nil, nil end
+        local best = nil
+        local best_dist = nil
+        for _, data in pairs(state.smarts) do
+            if data.level == level_name and data.position then
+                local d = data.position:distance_to(pos)
+                if not best_dist or d < best_dist then
+                    best_dist = d
+                    best = data
+                end
+            end
+        end
+        return best and best.id or nil, best_dist
+    end
+
+    local selected_cf = nil
+    local target_type = "POS"
+    local selected_level = nil
+
+    for _, level_name in ipairs(levels) do
+        if campfire_level_count_for_faction(level_name) > 0 then
+            goto continue_level
+        end
+
+        local level_campfires = campfires[level_name]
+        if not (level_campfires and #level_campfires > 0) then
+            goto continue_level
+        end
+
+        local function find_candidates(ignore_history)
+            local c_smart = {}
+            local c_wild = {}
+            for _, cf in ipairs(level_campfires) do
+                local current_occupants = occupied_count[cf.id] or 0
+                if (ignore_history or not visited[cf.id]) and current_occupants < 2 then
+                    local dist = 1000000
+                    if cf.gvid then
+                        local ok_v, vtx = pcall(function() return game_graph():vertex(cf.gvid) end)
+                        if ok_v and vtx then
+                            local cf_pos = vtx:game_point()
+                            dist = squad_pos:distance_to(cf_pos)
+                        end
+                    end
+
+                    if level_name ~= squad_level or dist > 20 then
+                        local entry = { cf = cf, dist = dist }
+                        if cf.smart_id then
+                            c_smart[#c_smart + 1] = entry
+                        else
+                            c_wild[#c_wild + 1] = entry
+                        end
+                    end
+                end
+            end
+            return c_smart, c_wild
+        end
+
+        local candidates_smart, candidates_wild = find_candidates(false)
+        if #candidates_smart == 0 and #candidates_wild == 0 then
+            candidates_smart, candidates_wild = find_candidates(true)
+        end
+
+        local function sort_dist(a, b) return a.dist < b.dist end
+
+        if #candidates_smart > 0 then
+            table.sort(candidates_smart, sort_dist)
+            local limit = math.min(#candidates_smart, 3)
+            selected_cf = candidates_smart[math.random(limit)].cf
+            target_type = "SMART"
+            selected_level = level_name
+            break
+        end
+
+        if #candidates_wild > 0 then
+            table.sort(candidates_wild, sort_dist)
+            local entry = candidates_wild[1]
+
+            if squad.online then
+                if level_name == squad_level then
+                    selected_cf = entry.cf
+                    target_type = "POS"
+                    selected_level = level_name
+                    break
+                end
+            else
+                local nearest_id, dist = get_nearest_smart_id(level_name, entry.cf.position)
+                if nearest_id and dist and dist < 100 then
+                    selected_cf = entry.cf
+                    selected_cf.smart_id = nearest_id
+                    target_type = "SMART"
+                    selected_level = level_name
+                    break
+                elseif level_name == squad_level then
+                    selected_cf = entry.cf
+                    target_type = "POS"
+                    selected_level = level_name
+                    break
+                end
+            end
+        end
+
+        ::continue_level::
+    end
+
+    if selected_cf then
+        -- UPDATE HISTORY (Only if we didn't just pick it from history? No, always update to keep it fresh)
+        history[#history + 1] = selected_cf.id
+        if #history > max_history then table.remove(history, 1) end
+
+        -- ASSIGN TASK
+        if target_type == "SMART" and selected_cf.smart_id then
+            -- OPTION 2: Bind to Smart Terrain
+            -- Squad will become part of smart and take available jobs (kamp, guard, patrol)
+            local smart = alife():object(selected_cf.smart_id)
+            if smart then
+                brain:add_task("MOVE", smart:name(), 2, {
+                    reason = "CAMPFIRE_SMART",
+                    cf_id = selected_cf.id,
+                    stay_duration = math.random(30, 60), -- Long rest
+                    stay_reason = "KAMP"
+                })
+                brain:log("INFO", "Squad [%s] joining smart [%s] for campfire (KAMP) (CF ID: %d)",
+                    squad:name(), smart:name(), selected_cf.id)
+                return true
+            end
+        end
+
+        -- OPTION 1: Guard Position (Wild)
+        brain:add_task("MOVE_TO_POS", "Campfire Patrol", 2, {
+            reason = "CAMPFIRE_WILD",
+            cf_id = selected_cf.id,
+            pos_x = selected_cf.position.x,
+            pos_y = selected_cf.position.y,
+            pos_z = selected_cf.position.z,
+            lvid = selected_cf.lvid,
+            gvid = selected_cf.gvid,
+            stay_duration = math.random(20, 40),
+            stay_reason = "GUARD_CAMPFIRE",
+            arrive_dist = 3
+        })
+
+        brain:log("INFO", "Squad [%s] guarding wild campfire [%s] (Dist: %dm) (CF ID: %d)",
+            squad:name(), selected_cf.name, squad_pos:distance_to(selected_cf.position), selected_cf.id)
+
+        return true
+    end
+
+    return false
+end
+
+-- ==============================================================================================
+-- [SECTION 3] LIMIT ENFORCEMENT
+-- ==============================================================================================
+
+function enforce_limits(brain)
+    local task = brain.current_task
+    if not (task and task.params and task.params.reason) then return false end
+
+    local reason = task.params.reason
+    local squad = brain.squad
+    local faction = brain.faction
+    local gv_id = squad.m_game_vertex_id
+    if not gv_id then return false end
+
+    local gv = game_graph():vertex(gv_id)
+    if not gv then return false end
+
+    local squad_level = alife():level_name(gv:level_id())
+
+    -- 1. BASE DEFENSE LIMIT
+    if reason == "BASE_DEFENSE" or reason == "BASE_DUTY" or reason == "NIGHT_REST" then
+        local hour = level.get_time_hours()
+        local is_night = (hour >= 21 or hour < 6)
+
+        -- Night rest cleanup: If it was a night rest and now it's day, release
+        if reason == "NIGHT_REST" and not is_night then
+            brain:log("INFO", "Limit Enforcer: Night is over. Releasing squad [%s] from base.", squad:name())
+            brain.current_task = nil
+            brain.state = "IDLE"
+            return true
+        end
+
+        -- Population cleanup: If base is overpopulated, release
+        if squad.smart_id and squad.smart_id ~= 65535 then
+            local current_pop = get_smart_population(squad.smart_id)
+            if current_pop > 1 then
+                brain:log("INFO", "Limit Enforcer: Base [%s] overpopulated (%d). Releasing squad [%s].",
+                    alife_object(squad.smart_id):name(), current_pop, squad:name())
+                brain.current_task = nil
+                brain.state = "IDLE"
+                return true
+            end
+        end
+    end
+
+    -- 2. CAMPFIRE PATROL LIMIT
+    if reason == "CAMPFIRE_WILD" or reason == "CAMPFIRE_SMART" or reason == "GUARD_CAMPFIRE" or reason == "KAMP" then
+        local current_patrols = get_active_task_count(faction, squad_level,
+            { "CAMPFIRE_WILD", "CAMPFIRE_SMART", "GUARD_CAMPFIRE", "KAMP" })
+        local max_patrols = 1
+
+        if current_patrols > max_patrols then
+            brain:log("INFO", "Limit Enforcer: Level [%s] has too many patrols (%d/%d). Releasing squad [%s].",
+                squad_level, current_patrols, max_patrols, squad:name())
+            brain.current_task = nil
+            brain.state = "IDLE"
+            return true
+        end
+    end
+
+    return false
+end
+
+-- ==============================================================================================
+-- [GUIDE] ADDING NEW MODULES
+-- 1. Create a function `check_your_strategy(brain)`.
+-- 2. Implement logic to check conditions (e.g. valid target, squad strength).
+-- 3. If conditions met, call `brain:add_task(...)` and return true.
+-- 4. Register call in `siski_brain.script` inside `SquadBrain:think()`.
+-- ==============================================================================================

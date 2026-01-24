@@ -1,0 +1,138 @@
+-- ==============================================================================================
+-- SISKI VENDETTA MODULE
+-- Manages squad rivalries ("Feuds").
+-- ==============================================================================================
+
+local memory = siski_memory
+local logger = siski_logger
+
+-- ==============================================================================================
+-- CORE LOGIC
+-- ==============================================================================================
+
+function register_feud(victim_squad_id, offender_squad_id)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("vendetta")) then return end
+    if not victim_squad_id or not offender_squad_id then return end
+    if victim_squad_id == offender_squad_id then return end -- No suicidals
+
+    local state = memory.get_state()
+    local v_sq = alife_object(victim_squad_id)
+    local o_sq = alife_object(offender_squad_id)
+    local v_name = v_sq and v_sq:name() or victim_squad_id
+    local o_name = o_sq and o_sq:name() or offender_squad_id
+
+    if v_sq and o_sq and v_sq.player_id == o_sq.player_id then
+        siski_logger.log_warn("VENDETTA", "Suppressed Friendly Feud between [%s] and [%s] (Same Faction: %s)",
+            v_name, o_name, v_sq.player_id)
+        return
+    end
+
+    -- Structure: [victim_id] = { [offender_id] = { timestamp = ..., last_pos = ... } }
+    if not state.vendettas[victim_squad_id] then
+        state.vendettas[victim_squad_id] = {}
+    end
+
+    -- Check if already exists to avoid spam
+    if state.vendettas[victim_squad_id][offender_squad_id] then
+        -- Update timestamp ?
+        return
+    end
+
+    state.vendettas[victim_squad_id][offender_squad_id] = {
+        timestamp = time_global(),
+        active = true
+    }
+
+    siski_logger.log_warn("VENDETTA", "Feud started: [%s] hates [%s]", v_name, o_name)
+
+end
+
+function check_feuds(brain)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("vendetta")) then return false end
+    local state = memory.get_state()
+    local my_feuds = state.vendettas[brain.id]
+
+    if not my_feuds then return false end
+    local now = time_global()
+
+    for enemy_id, info in pairs(my_feuds) do
+        local enemy_squad = alife_object(enemy_id)
+        local my_squad = brain.squad
+
+        -- [FIX] Retroactive Cleanup: If we are friendly, END IT.
+        if enemy_squad and my_squad and enemy_squad.player_id == my_squad.player_id then
+            info.active = false
+            info.end_tg = now
+            siski_logger.log_warn("VENDETTA", "Cleaning up illegal friendly feud with [%s]", enemy_squad:name())
+
+        elseif info.active then
+            if enemy_squad and enemy_squad:npc_count() > 0 then
+                local has_alive_member = false
+                for k in enemy_squad:squad_members() do
+                    local se_npc = alife_object(k.id)
+                    if se_npc and siski_ef_utils.is_alive(se_npc) then
+                        has_alive_member = true
+                        break
+                    end
+                end
+
+                if not has_alive_member then
+                    info.active = false
+                    info.end_tg = now
+                    siski_logger.log_info("VENDETTA", "Feud ended: Target squad [%s] has no alive members.", enemy_id)
+                else
+                    if not (brain.current_task and brain.current_task.type == "KILL" and brain.current_task.target == enemy_id) then
+                        local sim = alife()
+                        local gv_my = game_graph():vertex(brain.squad.m_game_vertex_id)
+                        local gv_en = game_graph():vertex(enemy_squad.m_game_vertex_id)
+
+                        if gv_my and gv_en then
+                            local my_level = sim:level_name(gv_my:level_id())
+                            local enemy_level = sim:level_name(gv_en:level_id())
+
+                            if my_level == enemy_level then
+                                brain:add_task("KILL", enemy_id, 3, { reason = "VENDETTA" })
+                                siski_logger.log_info("VENDETTA", "Squad [%s] pursuing feud target [%s]", brain.squad:name(),
+                                    enemy_squad:name())
+                                return true
+                            end
+                        end
+                    end
+                end
+            else
+                info.active = false
+                info.end_tg = now
+                siski_logger.log_info("VENDETTA", "Feud ended: Target [%s] dead/gone.", enemy_id)
+            end
+        end
+    end
+
+    local ttl = 600000
+    for enemy_id, info in pairs(my_feuds) do
+        if not (type(info) == "table" and info.active) then
+            local ts = 0
+            if type(info) == "table" then
+                ts = tonumber(info.end_tg) or tonumber(info.timestamp) or 0
+            end
+            if (now - ts) > ttl then
+                my_feuds[enemy_id] = nil
+            end
+        end
+    end
+
+    local any = false
+    for _ in pairs(my_feuds) do any = true break end
+    if not any then
+        state.vendettas[brain.id] = nil
+    end
+
+    return false
+end
+
+function get_enemy_location(enemy_id)
+    local squad = alife_object(enemy_id)
+    if squad then
+        return squad.position, squad.m_level_vertex_id, squad.m_game_vertex_id
+    end
+    return nil
+end

@@ -1,0 +1,583 @@
+-- ==============================================================================================
+-- SISKI SETTINGS
+-- Configuration for Population, Spawning, and Game Logic
+-- ==============================================================================================
+
+local ini = ini_file("siski_settings.ltx") -- Placeholder for future LTX loading
+
+-- POPULATION TARGETS
+-- How many squads of each faction should be active in the zone (GLOBAL)
+-- These are loose targets; the system tries to maintain this count.
+
+-- CACHED TABLES (Loaded from LTX)
+local t_population = nil
+local t_squad_size = nil
+local t_activities = nil
+local t_spawn = nil
+local t_af_hunter = nil
+local t_offline_scripted_move = nil
+local t_protector_pinned_sections = nil
+
+-- LOADERS
+
+function load_population()
+    if t_population then return t_population end
+    
+    t_population = {}
+    -- local ini = ini_file("siski\\siski_settings.ltx") -- Fixed: Use global ini (correct path)
+    
+    if ini and ini:section_exist("population") then
+        local line_count = ini:line_count("population")
+        for i = 0, line_count - 1 do
+            local result, id, value = ini:r_line("population", i, "", "")
+            if id and value then
+                 t_population[id] = tonumber(value)
+            end
+        end
+    end
+    
+    -- NORMALIZE KEYS TO INTERNAL IDs (MCM COMPATIBILITY)
+    -- LTX uses "duty", "merc" -> Game/MCM uses "dolg", "killer"
+    
+    if t_population["duty"] then 
+        t_population["dolg"] = t_population["duty"]
+        t_population["duty"] = nil -- Remove duplicate to prevent double iteration
+    end
+    
+    if t_population["merc"] then 
+        t_population["killer"] = t_population["merc"]
+        t_population["merc"] = nil -- Remove duplicate
+    end
+    
+    return t_population
+end
+
+function load_squad_sizes()
+    if t_squad_size then return t_squad_size end
+    t_squad_size = { min=2, max=4, overrides={} }
+    
+    if ini then
+        -- Generic
+        if ini:section_exist("squad_size") then
+            t_squad_size.min = tonumber(ini:r_string("squad_size", "min")) or 2
+            t_squad_size.max = tonumber(ini:r_string("squad_size", "max")) or 4
+        end
+        
+        -- Overrides
+        if ini:section_exist("squad_size_overrides") then
+            local n = ini:line_count("squad_size_overrides") or 0
+            for i = 0, n - 1 do
+                local result, faction, value = ini:r_line("squad_size_overrides", i, "", "")
+                if faction and value then
+                    local min, max = string.match(value, "(%d+)%s*,%s*(%d+)")
+                    if min and max then
+                        t_squad_size.overrides[faction] = { min=tonumber(min), max=tonumber(max) }
+                    end
+                end
+            end
+        end
+    end
+    return t_squad_size
+end
+
+function load_activities()
+    if t_activities then return t_activities end
+    t_activities = { enabled=true, max_loot_weight=50, gather_speed=1, trade_time_sec=60 }
+    
+    if ini and ini:section_exist("activities") then
+        t_activities.enabled = ini:r_bool("activities", "enabled")
+        t_activities.max_loot_weight = ini:r_float("activities", "max_loot_weight") or 50
+        t_activities.gather_speed = ini:r_float("activities", "gather_speed") or 1
+        t_activities.trade_time_sec = ini:r_float("activities", "trade_time_sec") or 60
+    end
+    return t_activities
+end
+
+function load_spawn_settings()
+    if t_spawn then return t_spawn end
+    t_spawn = { enabled=true, cooldown_sec=10, min_dist_to_actor=150, max_dist_to_actor=1000, check_enemies_radius=50 }
+    
+    if ini and ini:section_exist("spawn_settings") then
+        t_spawn.enabled = ini:r_bool("spawn_settings", "enabled")
+        t_spawn.cooldown_sec = ini:r_float("spawn_settings", "cooldown_sec") or 10
+        t_spawn.min_dist_to_actor = ini:r_float("spawn_settings", "min_dist_to_actor") or 150
+        t_spawn.max_dist_to_actor = ini:r_float("spawn_settings", "max_dist_to_actor") or 1000
+        t_spawn.check_enemies_radius = ini:r_float("spawn_settings", "check_enemies_radius") or 50
+    end
+    return t_spawn
+end
+
+function load_offline_scripted_move_settings()
+    if t_offline_scripted_move then return t_offline_scripted_move end
+    t_offline_scripted_move = { enabled = true, interval_ms = 20000, buffer_m = 100 }
+
+    if ini and ini:section_exist("offline_scripted_move") then
+        t_offline_scripted_move.enabled = ini:r_bool("offline_scripted_move", "enabled")
+        t_offline_scripted_move.interval_ms = tonumber(ini:r_string("offline_scripted_move", "interval_ms")) or t_offline_scripted_move.interval_ms
+        t_offline_scripted_move.buffer_m = tonumber(ini:r_string("offline_scripted_move", "buffer_m")) or t_offline_scripted_move.buffer_m
+    end
+
+    return t_offline_scripted_move
+end
+
+function load_protector_pinned_sections()
+    if t_protector_pinned_sections then return t_protector_pinned_sections end
+    t_protector_pinned_sections = {}
+
+    if ini and ini:section_exist("protector_pinned_sections") then
+        local n = ini:line_count("protector_pinned_sections") or 0
+        for i = 0, n - 1 do
+            local result, id, value = ini:r_line("protector_pinned_sections", i, "", "")
+            if id and id ~= "" then
+                t_protector_pinned_sections[id] = true
+            end
+        end
+    end
+
+    return t_protector_pinned_sections
+end
+
+function is_protector_pinned_section(section_name)
+    if not section_name or section_name == "" then return false end
+    local t = load_protector_pinned_sections()
+    return t[section_name] == true
+end
+
+function get_all_populations()
+    -- Prioritize MCM if available (reconstruct table)
+    local t = load_population()
+    if ui_mcm then
+        local result = {}
+        for k, v in pairs(t) do
+            result[k] = ui_mcm.get("siski/pop_"..k) or v
+        end
+        return result
+    end
+    return t
+end
+
+function get_spawn_settings()
+    local t = load_spawn_settings()
+    if ui_mcm then
+        local res = {}
+        -- Copy safe defaults
+        for k,v in pairs(t) do res[k] = v end
+        
+        -- Override
+        res.enabled = ui_mcm.get("siski/spawn_enabled")
+        if res.enabled == nil then res.enabled = t.enabled end
+        
+        res.cooldown_sec = ui_mcm.get("siski/spawn_cooldown") or t.cooldown_sec
+        res.min_dist_to_actor = ui_mcm.get("siski/spawn_min_dist") or t.min_dist_to_actor
+        res.max_dist_to_actor = ui_mcm.get("siski/spawn_max_dist") or t.max_dist_to_actor
+        res.check_enemies_radius = ui_mcm.get("siski/spawn_safe_radius") or t.check_enemies_radius
+        
+        return res
+    end
+    return t
+end
+
+function get_offline_scripted_move_settings()
+    return load_offline_scripted_move_settings()
+end
+
+function get_activities_settings()
+    local t = load_activities()
+    if ui_mcm then
+        local res = {}
+        for k,v in pairs(t) do res[k] = v end
+        
+        res.enabled = ui_mcm.get("siski/activities_enabled")
+        if res.enabled == nil then res.enabled = t.enabled end
+        
+        res.max_loot_weight = ui_mcm.get("siski/max_loot_weight") or t.max_loot_weight
+        res.gather_speed = ui_mcm.get("siski/loot_gather_speed") or t.gather_speed
+        res.trade_time_sec = ui_mcm.get("siski/trade_time") or t.trade_time_sec
+        
+        return res
+    end
+    return t
+end
+
+function get_af_hunter_settings()
+    local t = get_af_hunter_settings_internal() -- Renamed the loader wrapper
+    if ui_mcm then
+         local res = {}
+         for k,v in pairs(t) do res[k] = v end
+         
+         res.count = ui_mcm.get("siski/af_hunter_count") or t.count
+         
+         local use_camp = ui_mcm.get("siski/af_hunter_campfire")
+         if use_camp == nil then use_camp = t.campfire_fallback end
+         res.campfire_fallback = use_camp
+         
+         return res
+    end
+    return t
+end
+
+-- Helper to avoid recursion since I renamed the public getter
+function get_af_hunter_settings_internal()
+     if t_af_hunter then return t_af_hunter end
+     t_af_hunter = { count = 2, campfire_fallback = true }
+     
+     if ini and ini:section_exist("af_hunter_settings") then
+         t_af_hunter.count = ini:r_float("af_hunter_settings", "target_count_per_level") or 2
+         t_af_hunter.campfire_fallback = ini:r_bool("af_hunter_settings", "spawn_fallback_campfire")
+     end
+     return t_af_hunter
+end
+
+function get_population(faction)
+    -- Handle Aliases for Getter
+    if faction == "duty" then faction = "dolg" end
+    if faction == "merc" then faction = "killer" end
+
+    -- If MCM is active, read from it. Else use loaded table.
+    local t = load_population()
+    if ui_mcm then
+        local key = "pop_" .. faction
+        return ui_mcm.get("siski/"..key) or t[faction] or 0
+    end
+    return t[faction] or 0
+end
+
+function get_squad_size_min(faction)
+    local t = load_squad_sizes()
+    if ui_mcm then
+        return ui_mcm.get("siski/squad_size_min") or t.min
+    end
+    return (t.overrides[faction] and t.overrides[faction].min) or t.min
+end
+
+function get_squad_size_max(faction)
+    local t = load_squad_sizes()
+    if ui_mcm then
+        return ui_mcm.get("siski/squad_size_max") or t.max
+    end
+    return (t.overrides[faction] and t.overrides[faction].max) or t.max
+end
+
+-- TIER WEIGHTS
+-- When spawning a squad, probability of tier:
+t_tier_weights = {
+    novice      = 50,
+    advanced    = 30,
+    veteran     = 15,
+    master      = 5
+}
+
+-- LORE TASK STAY DURATIONS (in game minutes)
+LORE_TASK_MIN_STAY = 30
+LORE_TASK_MAX_STAY = 120
+
+-- ALLOWED LEVELS CACHE
+local allowed_levels_cache = nil
+
+function load_allowed_levels()
+    if allowed_levels_cache then return allowed_levels_cache end
+    
+    allowed_levels_cache = {}
+    
+    if not ini or not ini:section_exist("allowed_levels") then
+        siski_logger.log_warn("SETTINGS", "No [allowed_levels] section found in settings.ltx")
+        return allowed_levels_cache
+    end
+    
+    local n = ini:line_count("allowed_levels") or 0
+    for i = 0, n - 1 do
+        local result, faction, value = ini:r_line("allowed_levels", i, "", "")
+        if faction and value then
+            allowed_levels_cache[faction] = {}
+            if value == "ALL" then
+                allowed_levels_cache[faction] = "ALL"
+            else
+                -- Parse comma separated list
+                for level in string.gmatch(value, "([^,]+)") do
+                    -- Trim whitespace
+                    local trim = level:match("^%s*(.-)%s*$")
+                    if trim and trim ~= "" then
+                        local list = allowed_levels_cache[faction]
+                        list[#list+1] = trim
+                    end
+                end
+            end
+        end
+    end
+    
+    return allowed_levels_cache
+end
+
+-- SMART BLACKLIST CACHE
+local smart_blacklist_cache = nil
+
+function load_smart_blacklist()
+    if smart_blacklist_cache then return smart_blacklist_cache end
+    
+    smart_blacklist_cache = {}
+    
+    if not ini or not ini:section_exist("smart_blacklist") then
+        return smart_blacklist_cache
+    end
+    
+    local n = ini:line_count("smart_blacklist") or 0
+    for i = 0, n - 1 do
+        local result, smart_name, value = ini:r_line("smart_blacklist", i, "", "")
+        if smart_name and value then
+            smart_blacklist_cache[smart_name] = {}
+            if value == "all" or value == "ALL" then
+                smart_blacklist_cache[smart_name] = "ALL"
+            else
+                -- Parse comma separated list
+                for faction in string.gmatch(value, "([^,]+)") do
+                    local trim = faction:match("^%s*(.-)%s*$")
+                    if trim and trim ~= "" then
+                        local list = smart_blacklist_cache[smart_name]
+                        list[#list+1] = trim
+                    end
+                end
+            end
+        end
+    end
+    
+    return smart_blacklist_cache
+end
+
+-- NEW: Get expanded blacklist for a specific smart (for Intel Cache)
+function get_smart_blacklist(smart_name)
+    local all_blacklists = load_smart_blacklist()
+    local cfg = all_blacklists[smart_name]
+    
+    if not cfg then return nil end
+    
+    -- Compile into set for fast lookup
+    local set = {}
+    
+    if cfg == "ALL" then
+        set["all"] = true
+    else
+        -- Need aliases to expand scope
+        -- If config says "duty", we should ban "dolg" too
+        local aliases = load_faction_aliases()
+        
+        -- Build reverse alias map (canonical -> list of aliases)
+        local rev_aliases = {}
+        for alias, canon in pairs(aliases) do
+            if not rev_aliases[canon] then rev_aliases[canon] = {} end
+            local list = rev_aliases[canon]
+            list[#list+1] = alias
+        end
+        
+        for _, banned_fac in ipairs(cfg) do
+            -- Add the listed faction
+            set[banned_fac] = true
+            
+            -- Add its canonical form if it is an alias
+            local canon = aliases[banned_fac]
+            if canon then set[canon] = true end
+            
+            -- Add any aliases that map TO this faction (e.g. if config says 'duty', ban 'dolg')
+            -- If 'banned_fac' is 'duty' (canonical), then 'dolg' maps to it.
+            if rev_aliases[banned_fac] then
+                for _, alias in ipairs(rev_aliases[banned_fac]) do
+                    set[alias] = true
+                end
+            end
+            
+            -- Also expand canonical's aliases
+            if canon and rev_aliases[canon] then
+                for _, alias in ipairs(rev_aliases[canon]) do
+                    set[alias] = true
+                end
+            end
+        end
+    end
+    
+    return set
+end
+
+function is_smart_blacklisted(smart_name, faction)
+    local blacklist = load_smart_blacklist()
+    
+    -- Not listed = Safe
+    if not blacklist[smart_name] then return false end
+    
+    local cfg = blacklist[smart_name]
+    
+    -- 1. All Banned
+    if cfg == "ALL" then return true end
+    
+    -- 2. Specific Check
+    -- Handle alias for input faction
+    local aliases = load_faction_aliases()
+    local canonical = aliases[faction] or faction
+    
+    for _, banned_fac in ipairs(cfg) do
+        -- Handle alias for banned config
+        local ban_canonical = aliases[banned_fac] or banned_fac
+        
+        if ban_canonical == canonical then
+            return true
+        end
+    end
+    
+    return false
+end
+
+function is_level_allowed(faction, level_name)
+    local allowed_table = load_allowed_levels()
+    
+    -- Handle aliases (e.g. dolg -> duty config)
+    local aliases = load_faction_aliases()
+    local canonical = aliases[faction] or faction
+    
+    local allowed = allowed_table[canonical]
+    
+    -- If Not Configured: Default to ALL or None? 
+    -- If checking 'monster', it might not be in the list if user didn't add it.
+    -- Default behavior: If faction NOT listed, ALLOW.
+    if not allowed then return true end 
+    
+    if allowed == "ALL" then return true end
+    
+    for _, lvl in ipairs(allowed) do
+        if lvl == level_name then return true end
+    end
+    
+    return false
+end
+
+-- ==============================================================================================
+-- MCM INTEGRATION
+-- ==============================================================================================
+
+function get_config(key, default)
+    if ui_mcm then
+        local val = ui_mcm.get("siski/"..key)
+        if val ~= nil then return val end
+    end
+    return default
+end
+
+function is_debug_enabled()
+    local enabled = get_config("debug_enabled", true)
+    if not ui_mcm and ini and ini:section_exist("debug") then
+        return ini:r_bool("debug", "enabled")
+    end
+    return enabled
+end
+
+function is_debug_hud_enabled()
+    return get_config("debug_hud_enabled", true)
+end
+
+function is_offline_log_enabled()
+    -- Default FALSE to reduce spam
+    return get_config("debug_offline_logging", false)
+end
+
+-- ==============================================================================================
+-- LTX LOADING
+-- ==============================================================================================
+
+local squad_sections_cache = nil
+local faction_aliases_cache = nil
+local squad_sections_set_cache = nil
+
+function load_squad_sections()
+    if squad_sections_cache then return squad_sections_cache end
+    
+    squad_sections_cache = {}
+    
+    if not ini or not ini:section_exist("spawner_allowed_sections_stalker") then
+        siski_logger.log_err("SETTINGS", "Failed to load siski_settings.ltx or sections missing!")
+        return squad_sections_cache
+    end
+    
+    -- Load all faction sections
+    local factions = {
+        "stalker", "bandit", "duty", "freedom", "merc", "army", 
+        "ecolog", "monolith", "csky", "renegade", "greh", "isg",
+        "monster", "zombied"
+    }
+    
+    for _, faction in ipairs(factions) do
+        local section_name = "spawner_allowed_sections_" .. faction
+        if ini:section_exist(section_name) then
+            squad_sections_cache[faction] = {}
+            local n = ini:line_count(section_name) or 0
+            for i = 0, n - 1 do
+                local result, id, value = ini:r_line(section_name, i, "", "")
+                if id and id ~= "" then
+                    local list = squad_sections_cache[faction]
+                    list[#list+1] = id
+                end
+            end
+        end
+    end
+    
+    siski_logger.log_info("SETTINGS", "Loaded squad sections for %d factions", table.size(squad_sections_cache))
+    return squad_sections_cache
+end
+
+function load_faction_aliases()
+    if faction_aliases_cache then return faction_aliases_cache end
+    
+    faction_aliases_cache = {}
+    
+    if not ini or not ini:section_exist("faction_aliases") then
+        return faction_aliases_cache
+    end
+    
+    local n = ini:line_count("faction_aliases") or 0
+    for i = 0, n - 1 do
+        local result, id, value = ini:r_line("faction_aliases", i, "", "")
+        if id and value and id ~= "" and value ~= "" then
+            faction_aliases_cache[id] = value
+        end
+    end
+    
+    return faction_aliases_cache
+end
+
+function get_squad_sections(faction)
+    local sections = load_squad_sections()
+    local aliases = load_faction_aliases()
+    
+    -- Try direct lookup
+    if sections[faction] then
+        return sections[faction]
+    end
+    
+    -- Try alias
+    local canonical = aliases[faction]
+    if canonical and sections[canonical] then
+        return sections[canonical]
+    end
+    
+    return nil
+end
+
+function is_allowed_squad_section(faction, section_name)
+    if not faction or not section_name or section_name == "" then
+        return false
+    end
+
+    local sections = load_squad_sections()
+    local aliases = load_faction_aliases()
+    local canonical = aliases[faction] or faction
+
+    if not squad_sections_set_cache then
+        squad_sections_set_cache = {}
+        for f, list in pairs(sections) do
+            squad_sections_set_cache[f] = {}
+            for _, sec in ipairs(list) do
+                squad_sections_set_cache[f][sec] = true
+            end
+        end
+    end
+
+    local set = squad_sections_set_cache[canonical]
+    return set and set[section_name] == true or false
+end
+

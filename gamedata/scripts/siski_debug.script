@@ -1,0 +1,190 @@
+-- ==============================================================================================
+-- SISKI DEBUG HUD
+-- Visualizes SquadBrain state via Map Spots.
+-- ==============================================================================================
+
+local settings = siski_settings
+local logger = siski_logger
+
+local last_debug_update = 0
+local UPDATE_INTERVAL_MS = 1000 -- 1 second update
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("debug")) then return end
+    logger.siski_log("DEBUG_HUD", "INFO", "Debug HUD Initialized (Icon: ui_inGame2_PD_Obitatel_pustoshi)")
+    RegisterScriptCallback("actor_on_update", update)
+end
+
+local hud_cleared = false
+function update()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("debug")) then return end
+    if not settings.is_debug_hud_enabled() then
+        if not hud_cleared then
+            clear()
+            hud_cleared = true
+        end
+        return
+    end
+    hud_cleared = false
+
+    local tg = time_global()
+    if tg < last_debug_update + UPDATE_INTERVAL_MS then
+        update_crosshair_hud() -- Crosshair HUD needs more frequent updates than map
+        return
+    end
+    last_debug_update = tg
+
+    local brains = siski_brain.get_all_brains()
+    if not brains then return end
+
+    for id, brain in pairs(brains) do
+        render_brain_info(brain)
+    end
+
+    update_crosshair_hud()
+end
+
+local last_crosshair_update = 0
+function update_crosshair_hud()
+    local tg = time_global()
+    if tg < last_crosshair_update + 200 then return end
+    last_crosshair_update = tg
+
+    local obj = level.get_target_obj()
+    if not siski_ef_utils.is_alive(obj) or not IsStalker(obj) then
+        -- Clear help message if no target
+        return
+    end
+
+    local squad = get_object_squad(obj)
+    if not squad then
+        -- DEBUG: No squad for target
+        -- logger.siski_log("DEBUG_HUD", "WARN", "No squad for target obj [%s]", obj:name())
+        return
+    end
+
+    -- DEBUG: Log the lookup (commented to reduce spam)
+    -- logger.siski_log("DEBUG_HUD", "DEBUG", "Looking up brain for squad.id=[%s] (type: %s)", tostring(squad.id), type(squad.id))
+
+    local brain = siski_brain.get_brain(squad.id)
+    if not brain then
+        -- LAZY REGISTRATION: If brain missing (due to 10s throttle), try to register immediately
+        if siski_brain.try_register_brain(squad.id, squad) then
+            brain = siski_brain.get_brain(squad.id)
+        else
+            return
+        end
+    end
+
+    render_hud_panel(brain)
+end
+
+function render_hud_panel(brain)
+    local squad = alife_object(brain.id)
+    if not squad then return end
+
+    -- READ FROM MEMORY (same as dashboard) instead of brain object
+    local state = siski_memory.get_state()
+    local data = state.squads and state.squads[brain.id]
+
+    if not data then
+        -- Fallback to brain if no memory data yet
+        data = brain
+    end
+
+    -- Resolve Target Name (Match Dashboard Logic)
+    local target_str = data.assigned_target
+    if not target_str and data.current_task and data.current_task.target then
+        target_str = tostring(data.current_task.target)
+    end
+    target_str = target_str or "-"
+
+    local task_info = data.current_task and string.format("[%s] -> %s", data.current_task.type, target_str) or "IDLE"
+    local dist_to_target = "N/A"
+
+    if data.current_task and data.current_task.params and data.current_task.params.pos then
+        local p1 = squad.position
+        local p2 = data.current_task.params.pos
+        dist_to_target = string.format("%.1f m", p1:distance_to(p2))
+    end
+
+    local info = string.format(
+        "--- SISKI DEBUG ---\\n" ..
+        "SQUAD: %s\\n" ..
+        "CLASS: %s\\n" ..
+        "STATE: %s\\n" ..
+        "TASK: %s\\n" ..
+        "DIST: %s\\n" ..
+        "LOOT: %.1f kg\\n" ..
+        "MONEY: %d RU",
+        squad:name(),
+        data.squad_class or "Standard",
+        data.current_state or data.state or "IDLE",
+        task_info,
+        dist_to_target,
+        data.loot_weight or 0,
+        data.money or 0
+    )
+
+    -- Display as screen message for now (simplest non-broken HUD)
+    -- In a real mod we'd use a dedicated UI element, but this is 100% reliable
+    if db.actor then
+        db.actor:give_game_news(
+            "SISKI Intelligence",
+            info,
+            "ui_inGame2_PD_Obitatel_pustoshi", -- Safe Vanilla Icon
+            0,
+            2000,                              -- Longer duration (2s)
+            0
+        )
+    end
+end
+
+function render_brain_info(brain)
+    -- CRITICAL SAFETY CHECK
+    -- Brain might be stale if cleanup hasn't run yet.
+    -- Always re-fetch the server object to ensure it exists.
+    local squad = alife_object(brain.id)
+    if not squad then return end
+
+    -- Ensure squad has a map spot
+    -- In Anomaly, simulation squads usually have spots. We just want to update the hint.
+    -- Or we can add a custom dedicated spot "siski_debug_spot" if we defined it in XML.
+    -- For now, let's try to update the existing spot's hint if possible, or add a generic one.
+
+    -- READ FROM MEMORY (same as dashboard) instead of brain object
+    local state = siski_memory.get_state()
+    local data = state.squads and state.squads[brain.id] or brain
+
+    local desc = string.format("Name: %s\\nClass: %s\\nState: %s\\nTask: %s\\nTarget: %s\\nLoot: %.1f kg",
+        squad:name(),
+        data.squad_class or "Standard",
+        data.current_state or data.state or "IDLE",
+        data.current_task and data.current_task.type or "NONE",
+        data.current_task and tostring(data.current_task.target) or "N/A",
+        data.loot_weight or 0
+    )
+
+    -- Check if we can set hint dynamically on existing spot
+    -- level.map_change_spot_hint(id, type, hint)
+
+    -- Let's assume standard spot type 'alife_presentation_squad_neutral' etc is hard to guess.
+    -- So we stick a 'blue_location' on top for debug.
+
+    if level.map_has_object_spot(squad.id, "blue_location") == 0 then
+        level.map_add_object_spot(squad.id, "blue_location", "SISKI BRAIN")
+    end
+
+    level.map_change_spot_hint(squad.id, "blue_location", desc)
+end
+
+function clear()
+    -- Loop all known brains and remove spots
+    local brains = siski_brain.get_all_brains()
+    if not brains then return end
+    for id, _ in pairs(brains) do
+        if level.map_has_object_spot(id, "blue_location") ~= 0 then
+            level.map_remove_object_spot(id, "blue_location")
+        end
+    end
+end

@@ -1,0 +1,160 @@
+-- ==============================================================================================
+-- SISKI PATCHES MODULE
+-- Runtime overrides for vanilla scripts to enable expanded capacity and cleaner campfire logic
+-- ==============================================================================================
+
+local logger = siski_logger
+
+-- ==============================================================================================
+-- 1. PATCH SMART TERRAIN CAPACITY
+-- ==============================================================================================
+
+local function patch_smart_terrain()
+    if not se_smart_terrain then
+        logger.siski_log("PATCH", "WARN", "se_smart_terrain class not found!")
+        return
+    end
+
+    local org_read_params = se_smart_terrain.read_params
+
+    se_smart_terrain.read_params = function(self)
+        -- Call original
+        org_read_params(self)
+
+        -- Override Max Population
+        if self.max_population and self.max_population > 0 then
+            local old_pop = self.max_population
+            self.max_population = math.max(self.max_population * 2, 30)
+            -- logger.siski_log("PATCH", "INFO", "Smart [%s] capacity boosted: %s -> %s", self:name(), old_pop, self.max_population)
+        end
+    end
+
+    logger.siski_log("PATCH", "INFO", "se_smart_terrain.read_params patched successfully.")
+end
+
+-- ==============================================================================================
+-- 2. PATCH SQUAD MOVEMENT (Precise Positioning)
+-- ==============================================================================================
+
+local function patch_squad_movement()
+    if not sim_squad_scripted or not sim_squad_scripted.sim_squad_scripted then
+        logger.siski_log("PATCH", "WARN", "sim_squad_scripted class not found! Movement patch skipped.")
+        return
+    end
+
+    local script_cls = sim_squad_scripted.sim_squad_scripted
+
+    if not script_cls.get_location then
+        logger.siski_log("PATCH", "WARN", "sim_squad_scripted.get_location not found!")
+        return
+    end
+
+    local org_get_location = script_cls.get_location
+
+    script_cls.get_location = function(self)
+        -- SISKI OVERRIDE: Precise Position
+        -- If siski_target_pos is set, use it instead of smart terrain center
+        if self.siski_target_pos and self.siski_target_lvid and self.siski_target_gvid then
+            local gg = game_graph()
+            if gg:valid_vertex_id(self.siski_target_gvid) then
+                local lvl_id = gg:vertex(self.siski_target_gvid):level_id()
+                local lvl_name = alife():level_name(lvl_id)
+                return lvl_name, self.siski_target_gvid, self.siski_target_lvid, self.siski_target_pos
+            end
+        end
+
+        return org_get_location(self)
+    end
+
+    logger.siski_log("PATCH", "INFO", "sim_squad_scripted.get_location patched for precise movement.")
+end
+
+local function patch_offline_scripted_move_siski_only()
+    if not sim_squad_scripted or not sim_squad_scripted.sim_squad_scripted then
+        logger.siski_log("PATCH", "WARN", "sim_squad_scripted class not found! Offline move patch skipped.")
+        return
+    end
+
+    local script_cls = sim_squad_scripted.sim_squad_scripted
+    if not script_cls.specific_update then
+        logger.siski_log("PATCH", "WARN", "sim_squad_scripted.specific_update not found! Offline move patch skipped.")
+        return
+    end
+
+    local original_specific_update = script_cls.specific_update
+
+    local function is_siski_squad(squad_id)
+        if not (squad_id and siski_memory and siski_memory.get_state) then return false end
+        local ok, st = pcall(function() return siski_memory.get_state() end)
+        if not (ok and st and st.squads) then return false end
+        return st.squads[squad_id] ~= nil
+    end
+
+    local function get_cfg()
+        if siski_settings and siski_settings.get_offline_scripted_move_settings then
+            local ok, cfg = pcall(function() return siski_settings.get_offline_scripted_move_settings() end)
+            if ok then return cfg end
+        end
+        return { enabled = false }
+    end
+
+    script_cls.specific_update = function(self, script_target_id)
+        local cfg = get_cfg()
+        if cfg and cfg.enabled and TeleportSquad and script_target_id and self and self.id and self.online ~= true and is_siski_squad(self.id) then
+            local ok = pcall(function()
+                local sim = alife()
+                local se_actor = sim and sim:actor()
+                if not se_actor then return end
+                if not (simulation_objects and simulation_objects.is_on_the_same_level and simulation_objects.is_on_the_same_level(self, se_actor)) then
+                    return
+                end
+
+                local target = alife_object(script_target_id)
+                if not (target and target.clsid and target:clsid() == clsid.smart_terrain) then
+                    return
+                end
+
+                local dist = (self.position and se_actor.position) and self.position:distance_to(se_actor.position) or nil
+                if not dist then return end
+
+                local switch_dist = sim and sim.switch_distance and sim:switch_distance() or 150
+                local buffer_m = tonumber(cfg.buffer_m) or 100
+                if dist <= (switch_dist + buffer_m) then
+                    return
+                end
+
+                local now = time_global()
+                local interval_ms = tonumber(cfg.interval_ms) or 20000
+                if self.siski_offline_tp_at and (now - self.siski_offline_tp_at) < interval_ms then
+                    return
+                end
+
+                self.siski_offline_tp_at = now
+                TeleportSquad(self, target.position, target.m_level_vertex_id, target.m_game_vertex_id)
+            end)
+            if not ok then
+                local now = time_global()
+                if not self.siski_offline_tp_err_at or (now - self.siski_offline_tp_err_at) > 10000 then
+                    self.siski_offline_tp_err_at = now
+                    logger.siski_log("PATCH", "WARN", "Offline SISKI move patch failed for squad %s", tostring(self.id))
+                end
+            end
+        end
+
+        return original_specific_update(self, script_target_id)
+    end
+
+    logger.siski_log("PATCH", "INFO", "sim_squad_scripted.specific_update patched for SISKI-only offline movement.")
+end
+
+-- ==============================================================================================
+-- INIT
+-- ==============================================================================================
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("patches")) then return end
+    patch_smart_terrain()
+    patch_squad_movement() -- REQUIRED for siski_brain.script
+    patch_offline_scripted_move_siski_only()
+end
+

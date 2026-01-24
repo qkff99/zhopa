@@ -1,0 +1,1445 @@
+-- ==============================================================================================
+-- SISKI BRAIN MODULE
+-- The "Operating System" for squads. Manages Task Queues and Decision Making.
+-- ==============================================================================================
+
+local logger = siski_logger
+local memory = siski_memory
+local intel = siski_intel
+local activities = siski_activities
+local vendetta = siski_vendetta
+local lore = siski_lore
+local strategic = siski_strategic
+local classes = siski_classes
+local settings = siski_settings
+
+
+-- New modular systems
+local scanner = siski_scanner
+local inventory = siski_inventory
+local trading = siski_trading
+local force_loot = siski_force_loot
+local megabrain = siski_megabrain
+
+-- Local Registry of Brains
+-- [squad_id] = BrainInstance
+local brains = {}
+
+function get_brain(id)
+    return brains[id]
+end
+
+function get_all_brains()
+    return brains
+end
+
+-- Cache Globals
+local math_random = math.random
+local math_floor = math.floor
+local table_insert = table.insert
+local table_remove = table.remove
+local string_format = string.format
+local tostring = tostring
+local tonumber = tonumber
+local ipairs = ipairs
+local pairs = pairs
+
+-- ==============================================================================================
+-- VALIDATION LOGIC
+-- ==============================================================================================
+
+local function is_valid_squad(squad)
+    if not squad then return false end
+
+    -- 1. Story ID Check (CRITICAL)
+    if get_object_story_id(squad.id) then return false end
+
+    -- 2. Commander Check
+    local commander_id = squad:commander_id()
+    if get_object_story_id(commander_id) then return false end
+
+    -- 3. Companion Check (axr_companions)
+    if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad.id] then
+        return false
+    end
+
+    -- 4. Monster Exclusion (User Request: disable monsters from brain completely)
+    local faction = squad.player_id
+    if faction == "monster" or faction == "monster_predatory_day" or faction == "monster_predatory_night"
+        or faction == "monster_zombied_day" or faction == "monster_zombied_night"
+        or faction == "monster_vegetarian" or faction == "monster_special" or faction == "animal" then
+        return false
+    end
+
+    return true
+end
+
+-- [CRASH PREVENTION] Safely force NPC out of dangerous schemes (Smart Cover, Kamp, etc.)
+-- [CRASH PREVENTION] Safely force NPC out of dangerous schemes (Smart Cover, Kamp, etc.)
+local function safely_reset_npc_logic(npc)
+    if not npc then return end
+    local npc_id = siski_ef_utils.safe_id(npc)
+    if not npc_id then return end
+    local st = db.storage[npc_id]
+
+    -- [STABILITY] 0. Kill velocity/movement state immediately to stop path manager
+    pcall(function()
+        npc:set_movement_type(0)    -- move_type_stand
+        npc:set_detail_path_type(0) -- detail_path_type_smooth
+    end)
+
+    -- 1. ENGINE: Explicitly disable smart cover usage
+    -- This is the primary point where the engine detaches from the patrol path.
+    local ok_sc, has_sc = pcall(function() return npc.use_smart_cover ~= nil end)
+    if ok_sc and has_sc then
+        pcall(function() npc:use_smart_cover(false) end)
+    end
+
+    -- 2. STATE MANAGER: Force transition to IDLE
+    if state_mgr then
+        -- Unlock if possible
+        if state_mgr.lock then
+            pcall(function() state_mgr.lock(npc, false) end)
+        elseif st and st.state_mgr then
+            st.state_mgr.locked = false
+        end
+
+        -- Force IDLE state to break animation loops
+        pcall(function()
+            state_mgr.set_state(npc, "idle", nil, nil, nil, { fast_set = true, force = true })
+        end)
+    end
+
+    -- 3. MOVEMENT: Reset path type to level_path (1)
+    -- [CRASH FIX] Engine source (movement_manager_space.h) shows:
+    -- 0: GamePath, 1: LevelPath, 2: PatrolPath, 3: NoPath
+    -- Previously we used 2, which triggered Patrol point selection and crashed.
+    -- We use 3 (NoPath) first to flush, then 1 (LevelPath) as a safe default.
+    pcall(function()
+        npc:set_path_type(3)
+        npc:set_path_type(1)
+    end)
+
+    -- 4. LOGIC: Disable active scheme logic signals
+    if st and st.active_scheme then
+        local scheme = st.active_scheme
+        if scheme == "kamp" or scheme == "animpoint" or scheme == "smartcover" then
+            -- [STABILITY] Don't nil .logic table as it might be read later in the same frame.
+            -- Instead, tell the binder we want to exit.
+            -- Often scripts look for 'st.active_section = nil' to stop updates.
+            -- But for SiS_Ki, we just want to ensure it doesn't try to go BACK into the scheme next frame.
+            st.siski_moving = true -- Hint for other modules
+        end
+    end
+
+    -- 5. ANIMATIONS: Final flush
+    pcall(function() npc:clear_animations() end)
+end
+
+-- ==============================================================================================
+-- SQUAD BRAIN CLASS
+-- ==============================================================================================
+class "SquadBrain"
+
+-- SMART LOGGING: Filters out spam from offline levels
+function SquadBrain:log(msg_type, fmt, ...)
+    -- Filter out logs from other levels unless "Offline Logging" is enabled
+    -- msg_type "ERR" is always shown (or critical errors '*')
+    -- Also allowing "!" (WARN) to pass through might be useful, but plan said suppress debugs.
+    -- Let's stick to plan: Suppress everything non-error if offline.
+    if msg_type ~= "ERR" and msg_type ~= "*" then
+        if not settings.is_offline_log_enabled() then
+            -- Safety check for squad object
+            if not self.squad then return end
+
+            local level_id = game_graph():vertex(self.squad.m_game_vertex_id):level_id()
+            if not level_id then return end
+
+            local squad_level = alife():level_name(level_id)
+            local player_level = level.name()
+            if squad_level ~= player_level then
+                return -- SUPPRESS
+            end
+        end
+    end
+
+    logger.siski_log("BRAIN", msg_type, fmt, ...)
+end
+
+-- Brain States:
+-- IDLE    = No active task, waiting for think() to assign one
+-- MOVING  = Executing a MOVE/MOVE_TO_POS task, traveling to target
+-- BUSY    = Executing a task (generic)
+-- COMBAT  = In combat, brain suspended until fight ends
+
+function SquadBrain:__init(squad, restore_data)
+    self.id = squad.id
+    self.squad = squad
+    self.faction = squad.player_id
+
+    if restore_data then
+        -- Restore from saved state
+        self.queue = restore_data.queue or {}
+        self.current_task = restore_data.current_task
+        self.state = restore_data.current_state or restore_data.state or "IDLE" -- Support both field names
+        self.last_update = restore_data.last_update or 0
+        self.loot_weight = restore_data.loot_weight or 0.0
+        self.money = restore_data.money or 0
+        self.squad_class = restore_data.squad_class
+        self.spawned_by_siski = restore_data.spawned_by_siski == true
+        -- Cooldown tracking
+        self.last_base_name = restore_data.last_base_name
+        self.last_base_leave_game_time = restore_data.last_base_leave_game_time
+        self.last_anomaly_name = restore_data.last_anomaly_name
+        self.last_anomaly_leave_game_time = restore_data.last_anomaly_leave_game_time
+        self.campfire_history = restore_data.campfire_history or {}
+        self.is_responding_to_sos = restore_data.is_responding_to_sos or false
+        self.last_action_time = restore_data.last_action_time or game.get_game_time()
+        self:log("INFO", "Brain [%s] restored (Class: %s, State: %s)", squad:name(), self.squad_class or "None",
+            self.state)
+    else
+        -- Fresh init
+        self.queue = {}
+        self.current_task = nil
+        self.state = "IDLE"
+        self.last_update = 0
+        self.loot_weight = 0.0
+        self.money = 0
+        self.is_responding_to_sos = false
+        self.last_action_time = game.get_game_time()
+
+        -- Check if spawner already set squad_class in memory
+        local state = memory.get_state()
+        local existing_data = state.squads and state.squads[squad.id]
+        self.spawned_by_siski = existing_data and existing_data.spawned_by_siski == true or false
+        if existing_data and existing_data.squad_class then
+            self.squad_class = existing_data.squad_class
+            self:log("INFO", "Brain [%s] created with class [%s] from spawner", squad:name(), self.squad_class)
+        else
+            self.squad_class = nil
+        end
+
+        -- Initialize cooldown tracking
+        self.last_base_name = nil
+        self.last_base_leave_game_time = nil
+        self.last_anomaly_name = nil
+        self.last_anomaly_leave_game_time = nil
+        self.campfire_history = {}
+    end
+end
+
+function SquadBrain:add_task(type, target, priority, params)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return end
+    local task = {
+        type = type,
+        target = target,
+        priority = priority or 0,
+        params = params or {},
+        created_at = game.get_game_time()
+    }
+    -- Priority Queue Insertion
+    if task.priority > 1 then
+        table_insert(self.queue, 1, task)
+    else
+        self.queue[#self.queue + 1] = task
+    end
+
+    -- IMMEDIATE UPDATE: REMOVED to ensure execute_task handles SIMBOARD binding correctly
+
+    -- DEBUG TRACE: Log who added this task
+    local reason = (params and params.reason) or "unknown"
+    self:log("DEBUG", "Task added to queue [%s] for squad [%s] (Pri: %d, Reason: %s)",
+        type, self.squad:name(), priority, reason)
+    -- if type == "MOVE" or type == "TRADE" or type == "MOVE_TO_POS" then ... end
+end
+
+function SquadBrain:check_combat_status()
+    local commander_id = self.squad:commander_id()
+    local commander = commander_id and db.storage[commander_id] and db.storage[commander_id].object
+
+    if not commander or not siski_ef_utils.is_alive(commander) then
+        if self.state == "COMBAT" then
+            self:log("INFO", "Squad [%s] leaving COMBAT mode (no online commander).", self.squad:name())
+            megabrain.report_combat(self.id, false)
+            self.state = "IDLE"
+        end
+        return false
+    end
+
+    -- Online Combat Check
+    local now = time_global()
+    local enemy = nil
+    if not self._combat_check_tg or now >= (self._combat_check_tg + 500) then
+        self._combat_check_tg = now
+        enemy = siski_ef_utils.safe_best_enemy(commander)
+        if enemy then
+            local is_enemy_active = false
+            if siski_ef_utils.is_alive(enemy) then
+                local e_pos = siski_ef_utils.safe_position(enemy)
+                local c_pos = siski_ef_utils.safe_position(commander)
+
+                if e_pos and c_pos then
+                    local dist = e_pos:distance_to(c_pos)
+
+                    local last_seen = nil
+                    local ok_mem, res_mem = pcall(function() return commander:memory_time(enemy) end)
+                    if ok_mem then last_seen = res_mem end
+
+                    if last_seen and last_seen > 0 then
+                        self.combat_last_seen = last_seen
+                    end
+
+                    local seen_recent = last_seen and (now - last_seen < 20000)
+
+                    if dist < 60 then
+                        is_enemy_active = true
+                    elseif seen_recent and dist < 200 then
+                        is_enemy_active = true
+                    end
+                end
+            end
+
+            if is_enemy_active then
+                local enemy_id = siski_ef_utils.safe_id(enemy)
+                if not enemy_id then return false end
+
+                local enemy_squad = nil
+
+                if is_on_civilian_alife_id then
+                    local s_id = is_on_civilian_alife_id(enemy_id)
+                    if s_id then enemy_squad = { id = s_id } end
+                end
+
+                local enemy_squad_id = enemy_squad and enemy_squad.id or enemy_id
+
+                if self.state ~= "COMBAT" then
+                    self:log("WARN", "Squad [%s] entering COMBAT mode (Brain Suspended) (Enemy: %s)", self.squad:name(),
+                        siski_ef_utils.safe_name(enemy))
+                    megabrain.report_combat(self.id, true, enemy_squad_id)
+                end
+                self.combat_last_active_at = now
+                self.state = "COMBAT"
+                return true
+            end
+        end
+    end
+
+    -- If we were in combat but now clear, return to IDLE
+    if self.state == "COMBAT" then
+        if self.combat_last_active_at and (now - self.combat_last_active_at) < 15000 then
+            return true
+        end
+        self:log("INFO", "Squad [%s] leaving COMBAT mode (Brain Resumed)", self.squad:name())
+        megabrain.report_combat(self.id, false)
+        self.state = "IDLE"
+        self.combat_last_active_at = nil
+    end
+
+    return false
+end
+
+function SquadBrain:update()
+    -- BOREDOM TRACKER
+    -- If moving or in combat, we are active. Update timestamp.
+    if self.state == "MOVING" or self.state == "MOVING_TO_POS" or self.state == "COMBAT" then
+        self.last_action_time = game.get_game_time()
+    end
+
+    -- Check Idleness (6 hours = 21600 game seconds)
+    if (self.state == "IDLE" or self.state == "STAYING") and not self.squad_class then
+        if self.last_action_time and game.get_game_time():diffSec(self.last_action_time) > 21600 then
+            -- BOREDOM TRIGGERED
+            -- self.last_action_time = game.get_game_time() -- Reset timer (happens in execute_task anyway)
+
+            -- Only interrupt if no high priority task pending?
+            -- Actually, boredom IS high priority if they are rotting.
+
+            local task = lore.get_background_task(self)
+            if task then
+                self:log("INFO", "Squad [%s] is BORED (>6h idle). Forcing task: %s", self.squad:name(), task.type)
+
+                -- Force override current STAY task if any
+                self.current_task = task
+                self.queue = {} -- Clear queue to focus on this
+                self:execute_task(task)
+
+                -- Update timer manually here just in case execute_task doesn't catch it immediately
+                self.last_action_time = game.get_game_time()
+                return
+            end
+        end
+    end
+
+    -- DEBUG PULSE (Throttled per squad)
+    if math_random() < 0.01 then -- 1% chance per update to log presence
+        -- logger.siski_log("BRAIN", "DEBUG", "Brain Update Tick: [%s] State: [%s] Task: [%s]",
+        --     self.squad:name(), self.state, self.current_task and self.current_task.type or "NONE")
+    end
+
+    -- ==========================================
+    -- PROTECTION LAYER (Priority 0 - Always Run)
+    -- ==========================================
+
+    -- ==========================================
+
+    -- FAILSAFE: Deadlock Detection
+    -- If state is not IDLE/COMBAT but we have NO task, we are stuck.
+    local deadlock_reset = false
+    if not self.current_task and self.state ~= "IDLE" and self.state ~= "COMBAT" then
+        self:log("ERR", "DEADLOCK DETECTED on [%s]. State [%s] but no Task! Resetting to IDLE.", self.squad:name(),
+            self.state)
+        self.state = "IDLE"
+        deadlock_reset = true
+    end
+
+    -- WATCHDOG: Detect external scripted_target override
+    if self.squad_class and self.expected_target then
+        if self.squad.scripted_target ~= self.expected_target then
+            self:log("WARN", "Watchdog: [%s] external override detected (%s -> %s). Reverting.",
+                self.squad:name(), self.expected_target, tostring(self.squad.scripted_target))
+            self.squad.scripted_target = self.expected_target
+        end
+    end
+
+    -- LEVEL LEASH: Force return if out of bounds
+    if self.squad_class then
+        local cfg = classes and classes.get_class_config(self.squad_class)
+        if cfg and cfg.enforce_level then
+            local state = memory.get_state()
+            local data = state.squads and state.squads[self.id]
+            if data and data.spawn_level then
+                local gv = game_graph():vertex(self.squad.m_game_vertex_id)
+                local current_lvl = alife():level_name(gv:level_id())
+
+                if current_lvl ~= data.spawn_level then
+                    -- FORCE RETURN
+                    local smart = classes.get_return_smart(self.squad, data.spawn_level)
+                    if smart then
+                        logger.siski_log("BRAIN", "WARN", "Leash: [%s] on wrong level (%s). Forcing return to [%s].",
+                            self.squad:name(), current_lvl, smart:name())
+                        self.squad.scripted_target = smart:name()
+                        self.expected_target = smart:name()
+                        self.current_task = { type = "MOVE", target = smart:name(), priority = 99, params = { reason = "LEASH_RETURN" } }
+                        self.state = "MOVING"
+
+                        -- SYNC BEFORE RETURN
+                        self:sync_to_memory()
+                        return -- Exit update immediately
+                    end
+                end
+            end
+        end
+    end
+
+    -- 0. Check Combat Status (Brain Release)
+    local ok_combat, combat_res = pcall(function() return self:check_combat_status() end)
+    if not ok_combat then
+        local now = time_global()
+        if not self.last_combat_error_at or (now - self.last_combat_error_at) > 5000 then
+            self.last_combat_error_at = now
+            self:log("ERR", "check_combat_status failed: %s", tostring(combat_res))
+        end
+        if self.state == "COMBAT" then
+            pcall(function() megabrain.report_combat(self.id, false) end)
+            self.state = "IDLE"
+            self.combat_last_active_at = nil
+        end
+    elseif combat_res then
+        -- SYNC BEFORE RETURN (Critical so dashboard shows COMBAT status)
+        -- Note: check_combat_status sets self.state="COMBAT" internally if needed
+        self:sync_to_memory()
+        return -- Release control to Tactical AI
+    end
+
+    if self.squad_class and classes then
+        pcall(function() classes.process(self) end)
+    end
+
+    -- Throttling locally if needed (though global update usually handles this)
+
+    -- PASSIVE GATHERING
+    if self.state ~= "COMBAT" then
+        activities.perform_gather(self)
+    end
+
+    -- 1. Check Current Task Status
+
+    -- [PERIODIC LIMIT CHECK] (Once per game hour approx, or on specific interval)
+    -- We do this before checking status to potentially cancel the task immediately
+    if self.current_task and self.state == "STAYING" then
+        local now = game.get_game_time()
+        if not self.last_limit_check then self.last_limit_check = now end
+
+        -- Check every 30 game minutes (approx 5 sec real time with tf=10)
+        -- Actually, let's just do it every Real Time interval to be cheaper?
+        -- No, user asked "game hour".
+        if now:diffSec(self.last_limit_check) > 3600 then
+            self.last_limit_check = now
+            if strategic and strategic.enforce_limits(self) then
+                -- Task cancelled by enforcer, return to loop
+                self:log("INFO", "Limit Enforcer cancelled current task. Re-thinking.")
+                return
+            end
+        end
+    end
+
+    if self.current_task then
+        -- STATE RESTORATION: If IDLE but has task (e.g. after Combat reset), restore state
+        if self.state == "IDLE" then
+            local type = self.current_task.type
+            if type == "STAY" then
+                self.state = "STAYING"
+                self:log("WARN", "Squad [%s] restored state IDLE->STAYING for task [%s]", self.squad:name(), type)
+            elseif type == "MOVE_TO_POS" then
+                self.state = "MOVING_TO_POS"
+                self:log("WARN", "Squad [%s] restored state IDLE->MOVING_TO_POS for task [%s]", self.squad:name(), type)
+            elseif type == "MOVE" or type == "TRADE" or type == "KILL" or type == "DIRECTOR_ORDER" then
+                self.state = "MOVING"
+                self:log("WARN", "Squad [%s] restored state IDLE->MOVING for task [%s]", self.squad:name(), type)
+            end
+        end
+
+        local status = self:check_task_status()
+        if status == "COMPLETED" then
+            self:log("DEBUG", "TRACE: Squad [%s] COMPLETED task [%s]", self.squad:name(), self.current_task.type)
+            -- Special Completion Logic
+            if self.current_task.type == "TRADE" then
+                -- Try Real Trading first (for AF Hunters etc)
+                local traded_value = 0
+                if trading and self.squad.smart_id then
+                    local smart = alife_object(self.squad.smart_id)
+                    traded_value = trading.perform_trade(self.squad, smart)
+                end
+
+                -- Fallback to Activities (Virtual Eco) if no real items sold but task checks out
+                if traded_value == 0 then
+                    activities.perform_trade(self)
+                end
+            end
+
+            -- Track last base/anomaly for cooldown (if STAY task with base_name or anomaly_name)
+            if self.current_task.type == "STAY" then
+                local params = self.current_task.params or {}
+                if params.base_name then
+                    self.last_base_name = params.base_name
+                    self.last_base_leave_game_time = game.get_game_time()
+                    self:log("INFO", "Squad [%s] finished resting at base [%s], cooldown started.", self.squad:name(),
+                        params.base_name)
+                end
+                if params.anomaly_name then
+                    self.last_anomaly_name = params.anomaly_name
+                    self.last_anomaly_leave_game_time = game.get_game_time()
+                    self:log("INFO", "Squad [%s] finished hunting at anomaly [%s], cooldown started.", self.squad:name(),
+                        params.anomaly_name)
+                end
+            end
+
+            self:log("INFO", "Squad [%s] finished task [%s]", self.squad:name(), self.current_task.type)
+
+            -- ON ARRIVAL: Clear engine target to allow jobs (kamp, etc.) to trigger
+            self.squad.scripted_target = nil
+
+            -- ON ARRIVAL: Create STAY task to perform smart activity
+            local last_task_type = self.current_task.type
+            local params = self.current_task.params or {}
+            local current_smart = self.squad.smart_id and alife_object(self.squad.smart_id)
+
+            -- Special Classes clear task and go IDLE to think() next update
+            if self.squad_class then
+                self.current_task = nil
+                self.state = "IDLE"
+            elseif (current_smart or params.reason == "CAMPFIRE_WILD" or params.reason == "CAMPFIRE_SMART") and last_task_type ~= "STAY" then
+                -- Check for custom stay_duration from BASE_DEFENSE or similar
+                local custom_stay_duration = params.stay_duration -- in game minutes
+                local stay_reason = params.stay_reason or (params.reason == "CAMPFIRE_WILD" and "Camping" or "Resting")
+                local base_name = params.reason == "BASE_DEFENSE" and current_smart and current_smart:name() or nil
+                local anomaly_name = params.reason == "ANOMALY_HUNT" and current_smart and current_smart:name() or nil
+
+                local stay_duration_ms
+                local tf = level.get_time_factor()
+
+                if not custom_stay_duration and (params.reason == "CAMPFIRE_WILD" or params.reason == "CAMPFIRE_SMART") then
+                    custom_stay_duration = math_random(5, 60) -- 5 to 60 game minutes
+                end
+
+                if custom_stay_duration then
+                    -- Convert game minutes to real milliseconds
+                    stay_duration_ms = ((custom_stay_duration * 60 * 1000) / tf)
+                else
+                    stay_duration_ms = math_random(30000, 120000) -- 30-120 seconds real time fallback
+                end
+
+                self.current_task = {
+                    type = "STAY",
+                    target = (current_smart and current_smart:name() or "Campfire") .. " (" .. stay_reason .. ")",
+                    priority = 0,
+                    params = {
+                        duration_ms = stay_duration_ms,
+                        started_at = time_global(),
+                        base_name = base_name,       -- For base cooldown tracking
+                        anomaly_name = anomaly_name, -- For anomaly cooldown tracking
+                        reason = params.reason,      -- Persist reason
+                        cf_id = params.cf_id         -- Persist cf_id
+                    },
+                    created_at = game.get_game_time()
+                }
+
+                -- (ANIMATIONS moved to check_task_status for 1-minute delay)
+                self:log("INFO", "Squad [%s] will %s at [%s] for %d min",
+                    self.squad:name(), stay_reason, self.current_task.target, math_floor(stay_duration_ms / 60000))
+            else
+                self.current_task = nil
+            end
+
+            -- Set state based on whether we have a STAY task
+            if self.current_task then
+                self.state = "STAYING" -- We have a STAY task, so we're STAYING
+            else
+                self.state = "IDLE"    -- No task, ready for think()
+            end
+        elseif status == "FAILED" then
+            self:log("WARN", "Squad [%s] failed task [%s]", self.squad:name(), self.current_task.type)
+            self.current_task = nil
+            self.state = "IDLE"
+        end
+    end
+
+    -- 2. Pick New Task from Queue (BATCH PROCESS instant tasks)
+    local max_instant_tasks = 5 -- Process up to 5 instant tasks per update
+    local processed = 0
+
+    while not self.current_task and #self.queue > 0 and processed < max_instant_tasks do
+        self.current_task = table_remove(self.queue, 1)
+        self:execute_task(self.current_task)
+
+        -- Check if task completed instantly (LOOT)
+        if not self.current_task then
+            processed = processed + 1
+        else
+            break -- Non-instant task, wait for next update
+        end
+    end
+
+    -- 3. Proactive Thinking (If IDLE and No Queue and No Current Task)
+    -- DEBUG: Log the condition check
+    local should_think = (not self.current_task and #self.queue == 0 and self.state == "IDLE")
+    if not should_think then
+        self:log("DEBUG", "Squad [%s] NOT thinking: task=%s, queue=%d, state=%s",
+            self.squad:name(),
+            self.current_task and self.current_task.type or "nil",
+            #self.queue,
+            self.state)
+    end
+
+    if should_think then
+        self:think()
+    end
+
+    -- 4. Sync to Memory
+    self:sync_to_memory()
+end
+
+function SquadBrain:sync_to_memory()
+    local state = memory.get_state()
+    if not state.squads[self.id] then
+        state.squads[self.id] = {}
+    end
+
+    -- DEBUG: Log what we're syncing (throttled)
+    if math_random() < 0.02 then -- 2% chance
+        self:log("DEBUG", "SYNC [%s]: task=%s, state=%s",
+            self.squad:name(),
+            self.current_task and self.current_task.type or "nil",
+            self.state)
+    end
+
+    state.squads[self.id].queue = self.queue
+    state.squads[self.id].current_task = self.current_task
+    state.squads[self.id].current_state = self.state -- Reporter expects 'current_state'
+    state.squads[self.id].assigned_target = self.squad.scripted_target
+    state.squads[self.id].last_update = self.last_update
+    state.squads[self.id].loot_weight = self.loot_weight
+    state.squads[self.id].money = self.money
+    state.squads[self.id].squad_class = self.squad_class
+    state.squads[self.id].spawned_by_siski = self.spawned_by_siski and true or false
+
+    -- Cooldown tracking persistence
+    state.squads[self.id].last_base_name = self.last_base_name
+    state.squads[self.id].last_base_leave_game_time = self.last_base_leave_game_time
+    state.squads[self.id].last_anomaly_name = self.last_anomaly_name
+    state.squads[self.id].last_anomaly_leave_game_time = self.last_anomaly_leave_game_time
+    state.squads[self.id].campfire_history = self.campfire_history
+    state.squads[self.id].is_responding_to_sos = self.is_responding_to_sos
+    state.squads[self.id].last_action_time = self.last_action_time
+
+    -- Extended Data for Reporter
+    state.squads[self.id].active_section = self.active_section
+    state.squads[self.id].combat_state = (self.state == "COMBAT" or self.state == "COMBAT_SEARCH")
+end
+
+function SquadBrain:think()
+    -- 0. Check SPECIAL CLASS Logic (Priority 4 - Ultimate)
+    -- 0. Check SPECIAL CLASS Logic (Priority 4 - Ultimate)
+    if self.squad_class then
+        -- logger.siski_log("BRAIN", "DEBUG", "Brain [%s] calling CLASS PROCESSOR for [%s]", self.squad:name(), self.squad_class)
+        if classes and classes.process(self) then
+            return
+        end
+        logger.siski_log("BRAIN", "WARN", "Brain [%s] CLASS PROCESSOR [%s] returned false/ignored", self.squad:name(),
+            self.squad_class)
+    end
+
+    -- 0. Check Feuds (Vendetta - Priority 3)
+    if vendetta and vendetta.check_feuds(self) then
+        return
+    end
+
+
+    -- 2. Inventory Check - Need to Trade? (Priority 2)
+    if inventory and inventory.check_and_add_trade_task(self) then
+        return -- Inventory manager added a trade task
+    end
+
+    -- 2.1 Scanner Check - Loot/Corpses available? (Priority 2+ - Opportunistic)
+    -- Moved UP (was Priority 1) to prevent Campfire Patrol from starvation.
+    -- If there is loot nearby (30m), grab it before doing strategic moves.
+    if scanner and scanner.check_and_add_tasks(self) then
+        logger.siski_log("BRAIN", "INFO", "Squad [%s] priority winner: SCANNER (LOOT)", self.squad:name())
+        return -- Scanner added loot tasks
+    end
+
+    -- 2.5 Strategic Base Defense (Priority 2 - High)
+    if strategic and strategic.check_base_fulfillment(self) then
+        logger.siski_log("BRAIN", "DEBUG", "Squad [%s] priority winner: BASE_DEFENSE", self.squad:name())
+        return -- Strategic module assigned a base defense task
+    end
+
+    -- 2.6 Campfire Patrol (Priority 2 - Lower than Base Defense)
+    -- Enhanced: Primary fallback for free squads (Smart kamping or Wild guarding)
+    if strategic and strategic.check_campfire_patrol(self) then
+        logger.siski_log("BRAIN", "DEBUG", "Squad [%s] priority winner: CAMPFIRE_PATROL", self.squad:name())
+        return -- Strategic module assigned campfire patrol
+    end
+
+    -- 4. [NEW] Artifact Hunter (Priority 1)
+    if scanner and scanner.check_artifact_hunt(self) then
+        return -- Global scanner added a hunt task
+    end
+
+    -- 5. Background Task (Priority 1/2) - Lore-based
+    local lore_task = lore.get_background_task(self)
+    if lore_task then
+        -- [DYNAMIC PRIORITY] Online squads get Priority 2 for Lore to compete with Base Defense
+        -- Offline squads get Priority 1 to fill gaps without abandoning strategic roles
+        local prio = self.squad.online and 2 or 1
+
+        self:add_task(lore_task.type, lore_task.target, prio, lore_task.params)
+        logger.siski_log("BRAIN", "INFO", "Squad [%s] assigned background task [%s] (%s) Prio: %d",
+            self.squad:name(), lore_task.params.state or lore_task.type, lore_task.target, prio)
+        return
+    end
+
+    -- 6. ULTIMATE FALLBACK: Wander Locally (Prevent Cross-Level Leaks)
+    -- If ALL modules failed, send to a random smart terrain ON THIS LEVEL
+    local squad_level = alife():level_name(game_graph():vertex(self.squad.m_game_vertex_id):level_id())
+    local smart = intel.get_random_smart(self.faction, squad_level)
+
+    if smart and smart.id ~= self.squad.smart_id then
+        self:add_task("MOVE_TO_POS", "Local Wander", 0, {
+            reason = "FALLBACK_WANDER",
+            pos_x = smart.position.x,
+            pos_y = smart.position.y,
+            pos_z = smart.position.z,
+            lvid = smart.lvid,
+            gvid = smart.gvid,
+            stay_duration = math_random(settings.LORE_TASK_MIN_STAY or 30, settings.LORE_TASK_MAX_STAY or 120)
+        })
+        return
+    end
+end
+
+function SquadBrain:execute_task(task)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return false end
+    self.state = "BUSY"
+    logger.siski_log("BRAIN", "INFO", "Squad [%s] starting task [%s] -> [%s]", self.squad:name(), task.type,
+        tostring(task.target))
+
+    -- (Consolidated MOVE/MOVE_TO_POS logic follows)
+
+
+    -- INTERCEPTOR LOGIC: Tactical "Pulse Pursuit"
+    -- If on the same level as target, convert Strategic Task (Smart) to Tactical Task (Position)
+    if task.type == "KILL" or task.type == "VENDETTA" or (task.type == "DIRECTOR_ORDER" and task.params and task.params.reason == "SOS") then
+        local target_obj = nil
+        local target_id = tonumber(task.target)
+
+        if target_id == 0 then
+            target_obj = db.actor -- Special case for Actor
+        else
+            target_obj = alife_object(target_id)
+        end
+
+        if target_obj and target_obj.m_game_vertex_id then
+            local my_level = alife():level_name(game_graph():vertex(self.squad.m_game_vertex_id):level_id())
+            local target_level = alife():level_name(game_graph():vertex(target_obj.m_game_vertex_id):level_id())
+
+            if my_level == target_level then
+                -- TACTICAL INTERCEPT MODE
+                -- Target is close (Same Level). Ignore Smart Terrains. Go for the throat.
+                -- Valid for Actor (online) or Squads (offline/online)
+
+                local t_pos = target_obj.position
+                local t_lvid = target_obj.m_level_vertex_id
+                local t_gvid = target_obj.m_game_vertex_id
+
+                if not t_pos or not t_lvid or not t_gvid then
+                    self:log("ERR",
+                        "INTERCEPTOR: Target [%s] has invalid position/vertex data. Aborting tactial pursuit.",
+                        siski_ef_utils.safe_name(target_obj))
+                    return false
+                end
+
+                task.type = "MOVE_TO_POS"
+                task.params = task.params or {}
+                task.params.pos_x = t_pos.x
+                task.params.pos_y = t_pos.y
+                task.params.pos_z = t_pos.z
+                task.params.lvid = t_lvid
+                task.params.gvid = t_gvid
+                task.params.arrive_dist = 15     -- Get close (15m), then let combat logic take over OR recalc
+                task.params.squad_id = target_id -- Store who we are chasing
+
+                local my_pos = self.squad.position
+                local dist = my_pos and t_pos and my_pos:distance_to(t_pos) or 0
+
+                self:log("INFO", "INTERCEPTOR: Squad [%s] switching to TACTICAL PURSUIT of [%s] (Dist: %.1fm)",
+                    self.squad:name(), siski_ef_utils.safe_name(target_obj), dist)
+
+                return self:execute_task(task) -- RECURSIVE RESTART with new type
+            end
+        end
+    end
+
+    if task.type == "MOVE" or task.type == "TRADE" or task.type == "KILL" or task.type == "DIRECTOR_ORDER" or task.type == "VENDETTA" then
+        -- Check if squad is already en route to a different target
+        -- Only set new target if squad has arrived at current destination
+        local current_smart = self.squad.smart_id and alife_object(self.squad.smart_id)
+        local current_target_name = current_smart and current_smart:name() or nil
+
+        -- Determine new target name
+        local new_target_name = nil
+        if task.type == "KILL" or task.type == "VENDETTA" then
+            local enemy_id = task.target
+            if enemy_id == 0 then -- ACTOR
+                local gvid = db.actor and siski_ef_utils.safe_game_vertex_id(db.actor)
+                local apos = db.actor and siski_ef_utils.safe_position(db.actor)
+                if gvid and apos then
+                    local level_name = alife():level_name(game_graph():vertex(gvid):level_id())
+                    local smart = intel.get_nearest_smart(level_name, apos)
+                    if smart then new_target_name = smart:name() end
+                end
+            else
+                local enemy_squad = alife_object(enemy_id)
+                if enemy_squad then
+                    if enemy_squad.smart_id and enemy_squad.smart_id ~= 65535 then
+                        local s = alife_object(enemy_squad.smart_id)
+                        if s then new_target_name = s:name() end
+                    end
+
+                    -- Fallback: Use nearest smart to current enemy position
+                    local e_pos = enemy_squad.position
+                    if not new_target_name and e_pos then
+                        local level_name = alife():level_name(game_graph():vertex(enemy_squad.m_game_vertex_id):level_id())
+                        local smart = intel.get_nearest_smart(level_name, e_pos)
+                        if smart then new_target_name = smart:name() end
+                    end
+                end
+            end
+        elseif task.type == "DIRECTOR_ORDER" and task.params and task.params.reason == "SOS" then
+            local requester = alife_object(task.target)
+            if requester and requester.smart_id then
+                local s = alife_object(requester.smart_id)
+                if s then new_target_name = s:name() end
+            end
+        else
+            new_target_name = task.target
+        end
+
+        -- Only set scripted_target if:
+        -- 1. We have a valid new target
+        -- 2. Squad is not already moving to this target
+        if new_target_name and (not self.squad.scripted_target or self.squad.scripted_target ~= new_target_name) then
+            -- Determine if we should allow immediate retargeting (AF Hunters need this)
+            local allow_retarget = (self.squad_class == "af_hunter")
+
+            -- Check if squad has arrived OR if we force retarget
+            if allow_retarget or not self.squad.scripted_target or current_target_name == self.squad.scripted_target then
+                self.squad.scripted_target = new_target_name
+                self.expected_target = new_target_name
+
+                -- ROBUST BINDING: Assign if target is a valid smart
+                if SIMBOARD and SIMBOARD.assign_squad_to_smart and SIMBOARD.smarts_by_names then
+                    local target_smart = SIMBOARD.smarts_by_names[new_target_name]
+                    if target_smart then
+                        SIMBOARD:assign_squad_to_smart(self.squad, target_smart.id)
+                    end
+                elseif SIMBOARD and SIMBOARD.assign_squad_to_smart and SIMBOARD.get_smart_by_name then
+                    local target_smart = SIMBOARD:get_smart_by_name(new_target_name)
+                    if target_smart then
+                        SIMBOARD:assign_squad_to_smart(self.squad, target_smart.id)
+                    end
+                end
+
+                self:log("DEBUG", "Squad [%s] new target [%s] (Retarget: %s)", self.squad:name(), new_target_name,
+                    tostring(allow_retarget))
+
+                -- CRITICAL: Clear any leftover siski_target_pos to prevent oscillation
+                -- When using Smart-Based MOVE, we don't want get_location patch to return old coords
+                if SIMBOARD and SIMBOARD.squads then
+                    local sim_squad = SIMBOARD.squads[self.squad.id]
+                    if sim_squad and type(sim_squad) == "table" then
+                        sim_squad.siski_target_pos = nil
+                        sim_squad.siski_target_lvid = nil
+                        sim_squad.siski_target_gvid = nil
+                    end
+                end
+
+                if self.squad.online then
+                    local target_obj = intel and intel.get_smart_by_name and intel.get_smart_by_name(new_target_name)
+                    if target_obj and target_obj.position and target_obj.m_level_vertex_id and target_obj.m_game_vertex_id then
+                        local commander_id = self.squad:commander_id()
+                        for k in self.squad:squad_members() do
+                            if k.id == commander_id then
+                                local npc = db.storage[k.id] and db.storage[k.id].object
+                                if npc then
+                                    pcall(function()
+                                        npc:set_dest_level_vertex_id(target_obj.m_level_vertex_id)
+                                        npc:set_dest_game_vertex_id(target_obj.m_game_vertex_id)
+                                        npc:set_desired_position(target_obj.position)
+                                    end)
+                                end
+                                break
+                            end
+                        end
+                    end
+                end
+            else
+                -- Generic Squad still en route - defer
+                self:log("WARN", "Squad [%s] en route to [%s], deferring task [%s]", self.squad:name(),
+                    self.squad.scripted_target, task.type)
+                table.insert(self.queue, 1, task)
+                self.current_task = nil
+                self.state = "MOVING"
+                return
+            end
+        elseif new_target_name and self.squad.scripted_target == new_target_name then
+            -- FIX INFINITE LOOP: Already heading to this target
+            -- Check if we're physically AT the target (Vanilla Logic using am_i_reached)
+            local target_smart = nil
+            if SIMBOARD and SIMBOARD.smarts_by_names then
+                target_smart = SIMBOARD.smarts_by_names[new_target_name]
+            elseif SIMBOARD and SIMBOARD.get_smart_by_name then
+                target_smart = SIMBOARD:get_smart_by_name(new_target_name)
+            end
+
+            if target_smart and target_smart.am_i_reached then
+                local ok_reached, reached = pcall(function() return target_smart:am_i_reached(self.squad) end)
+                if ok_reached and reached then
+                    -- Actually there! Same smart AND same level AND within distance.
+                    self:log("INFO",
+                        "Squad [%s] already at target [%s] (am_i_reached). Marking COMPLETED for arrival logic.",
+                        self.squad:name(), new_target_name)
+                    return "COMPLETED"
+                end
+            end
+
+            -- Still moving to this target, keep task active
+            self:log("DEBUG", "Squad [%s] already moving to [%s], keeping task active.", self.squad:name(),
+                new_target_name)
+        end
+
+        self.state = "MOVING"
+
+        -- [CRASH FIX] Unified Safe Reset for ALL squad members
+        if self.squad.online then
+            for k in self.squad:squad_members() do
+                local npc_id = k.id
+                local npc = db.storage[npc_id] and db.storage[npc_id].object
+                if npc then
+                    safely_reset_npc_logic(npc)
+                end
+            end
+        end
+    elseif task.type == "MOVE_TO_POS" then
+        -- Direct position movement (no smart terrain required)
+        -- task.params should contain: pos_x, pos_y, pos_z, lvid, gvid
+        local params = task.params or {}
+
+        if params.pos_x and params.pos_y and params.pos_z then
+            -- Store target position in brain for distance checking
+            self.move_to_pos_target = {
+                x = params.pos_x,
+                y = params.pos_y,
+                z = params.pos_z,
+                lvid = params.lvid,
+                gvid = params.gvid,
+                arrive_dist = params.arrive_dist or 3 -- Default 3m arrival radius
+            }
+
+            self:log("INFO", "Squad [%s] starting MOVE_TO_POS: (%.1f, %.1f, %.1f) [Arrive: %dm, LVID: %s, GVID: %s]",
+                self.squad:name(), params.pos_x, params.pos_y, params.pos_z, self.move_to_pos_target.arrive_dist,
+                params.lvid, params.gvid)
+            -- Force clear engine target so script can drive
+            self.squad.scripted_target = nil
+            self.expected_target = nil
+
+            local dist_vec = vector():set(params.pos_x, params.pos_y, params.pos_z)
+
+            -- Use SIMBOARD to guide squad towards position (If supported by engine/addon)
+            if SIMBOARD and SIMBOARD.squads then
+                local sim_squad = SIMBOARD.squads[self.squad.id]
+                if sim_squad and type(sim_squad) == "table" then
+                    sim_squad.siski_target_pos = dist_vec
+                    sim_squad.siski_target_lvid = params.lvid
+                    sim_squad.siski_target_gvid = params.gvid
+                end
+            end
+
+            -- ONLINE DRIVING: Force online squads to walk to the point
+            if self.squad.online then
+                for k in self.squad:squad_members() do
+                    local npc_id = k.id
+                    local npc = db.storage[npc_id] and db.storage[npc_id].object
+                    if npc then
+                        -- [CRASH FIX] Safely Exit previous schemes
+                        safely_reset_npc_logic(npc)
+
+                        -- Set new movement target
+                        pcall(function()
+                            npc:set_dest_level_vertex_id(params.lvid)
+                            npc:set_dest_game_vertex_id(params.gvid)
+                            npc:set_desired_position(dist_vec)
+                        end)
+
+                        -- Only commander needs strict pathing, but for MOVE_TO_POS (Direct) we command everyone
+                        if npc_id == self.squad:commander_id() then
+                            self:log("DEBUG", "Online Drive: Commander [%s] commanded to LVID %s",
+                                siski_ef_utils.safe_name(npc), params.lvid)
+                        end
+                    end
+                end
+            end
+
+
+
+            self.state = "MOVING_TO_POS"
+        else
+            logger.siski_log("BRAIN", "ERR", "MOVE_TO_POS missing position data!")
+            self.current_task = nil
+            self.state = "IDLE"
+            return
+        end
+    elseif task.type == "LOOT" then
+        -- LOOT task: Pick up item or loot corpse
+        -- Requires squad commander to be online
+        local commander_id = self.squad:commander_id()
+        local commander = commander_id and db.storage[commander_id] and db.storage[commander_id].object
+
+        if commander and force_loot then
+            local target_obj = task.params and task.params.obj_id and level.object_by_id(task.params.obj_id)
+
+            if target_obj then
+                local loot_type = task.params and task.params.loot_type
+
+                if loot_type == "CORPSE" then
+                    logger.siski_log("BRAIN", "DEBUG", "Squad [%s] executing LOOT CORPSE on [%s]", self.squad:name(),
+                        siski_ef_utils.safe_name(target_obj))
+                    pcall(function() force_loot.loot_corpse(commander, target_obj) end)
+                else
+                    logger.siski_log("BRAIN", "DEBUG", "Squad [%s] executing PICKUP ITEM on [%s]", self.squad:name(),
+                        siski_ef_utils.safe_name(target_obj))
+                    pcall(function() force_loot.pickup_item(commander, target_obj) end)
+                end
+
+                logger.siski_log("BRAIN", "INFO", "Squad [%s] looted [%s]", self.squad:name(),
+                    siski_ef_utils.safe_name(target_obj))
+            end
+        end
+
+        -- LOOT tasks complete immediately
+        self.state = "IDLE"
+        self.current_task = nil
+    elseif task.type == "STAY" then
+        -- STAY task: Wait at current location for specified duration
+        -- duration is in params as game minutes, convert to real ms
+        local params = task.params or {}
+        local duration_game_min = params.stay_duration or params.duration or 30 -- Support both names
+
+        -- Set timing params for check_task_status
+        task.params = task.params or {}
+
+        -- CRITICAL: Only calculate if not already set by update()
+        if not task.params.duration_ms then
+            local tf = math.max(level.get_time_factor(), 1)
+            local duration_ms = ((duration_game_min * 60 * 1000) / tf)
+            task.params.duration_ms = duration_ms
+            task.params.started_at = time_global()
+
+            self:log("INFO", "Squad [%s] STAYING for %d game min (%.1f real sec) [TF: %.2f] (Reason: %s)",
+                self.squad:name(), duration_game_min, duration_ms / 1000, tf, params.reason or "unknown")
+        else
+            self:log("INFO", "Squad [%s] STAYING (using pre-existing duration: %.1f real sec)",
+                self.squad:name(), task.params.duration_ms / 1000)
+        end
+
+        -- FIX HUD NIL: Set a display target
+        task.target = "Holding Position (" .. duration_game_min .. "m)"
+
+        -- FIX WATCHDOG LOOP: expected_target must be actual smart name or nil
+        -- Get current smart name for watchdog validation
+        local current_smart = self.squad.smart_id and alife_object(self.squad.smart_id)
+        if current_smart then
+            self.expected_target = current_smart:name()
+        else
+            self.expected_target = nil -- Disable watchdog for this task
+        end
+
+        self.state = "STAYING"
+
+        -- ROBUST BINDING: Re-assert smart binding to preventing wandering
+        if self.squad.smart_id and SIMBOARD and SIMBOARD.assign_squad_to_smart then
+            SIMBOARD:assign_squad_to_smart(self.squad, self.squad.smart_id)
+        end
+    end
+end
+
+function SquadBrain:check_task_status()
+    if not self.current_task then return "NONE" end
+
+    if self.current_task.type == "STAY" then
+        -- Check if duration expired (using real time, not game time)
+        local params = self.current_task.params or {}
+        local started_at = params.started_at
+        local duration_ms = params.duration_ms
+
+        -- Safety: If started_at or duration_ms is nil, complete immediately
+        if not started_at or not duration_ms then
+            logger.siski_log("BRAIN", "WARN", "Squad [%s] STAY task missing timing params. Auto-completing.",
+                self.squad:name())
+            return "COMPLETED"
+        end
+
+        local current_time = time_global()
+        local elapsed_ms = current_time - started_at
+
+        -- FIX: Handle time_global reset on load (persistence fix)
+        if elapsed_ms < 0 then
+            self:log("WARN", "Squad [%s] STAY timer desync (elapsed < 0). Resetting timer.", self.squad:name())
+            params.started_at = current_time
+            started_at = current_time
+            elapsed_ms = 0
+        end
+
+        -- DEBUG: Log timing for first few checks
+        if math.random() < 0.05 then -- 5% chance to log
+            self:log("DEBUG", "STAY CHECK [%s]: elapsed=%dms / duration=%dms (%.1f%%)",
+                self.squad:name(), elapsed_ms, duration_ms, (elapsed_ms / duration_ms) * 100)
+        end
+
+        if elapsed_ms >= duration_ms then
+            self:log("INFO", "Squad [%s] STAY completed: elapsed=%dms >= duration=%dms",
+                self.squad:name(), elapsed_ms, duration_ms)
+            return "COMPLETED"
+        end
+
+        return "RUNNING"
+    elseif self.current_task.type == "MOVE" or self.current_task.type == "TRADE" or self.current_task.type == "DIRECTOR_ORDER" then
+        -- Check if arrived (Vanilla Logic using am_i_reached)
+        -- We trust the engine to detect arrival based on arrive_dist (default 50m)
+        local target_smart = nil
+        if SIMBOARD and SIMBOARD.get_smart_by_name then
+            target_smart = SIMBOARD:get_smart_by_name(self.current_task.target)
+        end
+
+        if target_smart and target_smart.am_i_reached then
+            local ok_reached, reached = pcall(function() return target_smart:am_i_reached(self.squad) end)
+            if ok_reached and reached then
+                logger.siski_log("BRAIN", "INFO", "Squad [%s] arrived at [%s] (am_i_reached). Task COMPLETED.",
+                    self.squad:name(), target_smart:name() or "unknown")
+                return "COMPLETED"
+            end
+        end
+
+        -- Fallback: If no smart object (rare), manual check
+        if not target_smart then
+            -- Simple distance check if smart object is missing for some reason
+            local smart_obj = alife_object(self.squad.smart_id)
+            if smart_obj and smart_obj:name() == self.current_task.target then
+                local dist = self.squad.position:distance_to(smart_obj.position)
+                if dist < 50 then return "COMPLETED" end
+            end
+        end
+
+        return "RUNNING"
+    elseif self.current_task.type == "MOVE_TO_POS" then
+        -- Check if arrived at position (distance-based)
+        if self.move_to_pos_target then
+            local target_pos = vector():set(
+                self.move_to_pos_target.x,
+                self.move_to_pos_target.y,
+                self.move_to_pos_target.z
+            )
+            local squad_pos = self.squad.position
+            local dist = squad_pos:distance_to(target_pos)
+            local arrive_dist = self.move_to_pos_target.arrive_dist or 10
+
+            -- Check if arrived at position (distance-based)
+            if dist <= arrive_dist then
+                -- Arrived! Clear SIMBOARD override
+                if SIMBOARD and SIMBOARD.squads then
+                    local sim_squad = SIMBOARD.squads[self.squad.id]
+                    if sim_squad and type(sim_squad) == "table" then
+                        sim_squad.siski_target_pos = nil
+                        sim_squad.siski_target_lvid = nil
+                        sim_squad.siski_target_gvid = nil
+                    end
+                end
+                self.move_to_pos_target = nil
+                logger.siski_log("BRAIN", "INFO", "Squad [%s] ARRIVED at position (Dist: %.1fm)", self.squad:name(), dist)
+                return "COMPLETED"
+            else
+                -- VELOCITY-BASED STALL DETECTION (Only for squads in transit)
+                local now = time_global()
+
+                -- Initialize velocity tracking on first check
+                if not self.move_to_pos_target.last_pos then
+                    self.move_to_pos_target.last_pos = vector():set(squad_pos.x, squad_pos.y, squad_pos.z)
+                    self.move_to_pos_target.last_velocity_check = now
+                    self.move_to_pos_target.velocity_stuck_timer = 0
+                end
+
+                -- Check every 5 seconds
+                if now - self.move_to_pos_target.last_velocity_check > 5000 then
+                    self.move_to_pos_target.last_velocity_check = now
+
+                    local delta = squad_pos:distance_to(self.move_to_pos_target.last_pos)
+
+                    if delta < 1.0 then
+                        -- Not moving significantly
+                        self.move_to_pos_target.velocity_stuck_timer =
+                            (self.move_to_pos_target.velocity_stuck_timer or 0) + 5000
+                    else
+                        -- Moving, reset timer
+                        self.move_to_pos_target.velocity_stuck_timer = 0
+                        self.move_to_pos_target.last_pos = vector():set(squad_pos.x, squad_pos.y, squad_pos.z)
+                    end
+
+                    -- Force complete after 120 seconds of no movement
+                    if self.move_to_pos_target.velocity_stuck_timer > 120000 then
+                        logger.siski_log("BRAIN", "WARN",
+                            "Squad [%s] VELOCITY STALL (Dist: %.1fm, Stalled: %ds). Forcing arrival.",
+                            self.squad:name(), dist, self.move_to_pos_target.velocity_stuck_timer / 1000)
+
+                        -- Cleanup SIMBOARD
+                        if SIMBOARD and SIMBOARD.squads then
+                            local sim_squad = SIMBOARD.squads[self.squad.id]
+                            if sim_squad and type(sim_squad) == "table" then
+                                sim_squad.siski_target_pos = nil
+                                sim_squad.siski_target_lvid = nil
+                                sim_squad.siski_target_gvid = nil
+                            end
+                        end
+                        self.move_to_pos_target = nil
+                        return "COMPLETED"
+                    end
+                end
+            end
+        else
+            -- No target data - task is invalid
+            return "FAILED"
+        end
+    elseif self.current_task.type == "KILL" or self.current_task.type == "VENDETTA" then
+        -- Check if enemy dead
+        local enemy_id = self.current_task.target
+        local enemy = alife_object(enemy_id)
+
+        -- [FIX] Check .alive() for server object (alife_object returns dead bodies too)
+        local is_dead = false
+        if not enemy then
+            is_dead = true
+        else
+            if not siski_ef_utils.is_alive(enemy) then is_dead = true end
+        end
+
+        if is_dead then
+            self:log("INFO", "Task [%s] finished: Target [%s] is dead/gone.", self.current_task.type, tostring(enemy_id))
+            return "COMPLETED"
+        end
+
+
+
+        -- RE-TARGETING: Update smart target if enemy moved to a new smart
+        local new_target = nil
+        if enemy_id == 0 then
+            local gvid = db.actor and siski_ef_utils.safe_game_vertex_id(db.actor)
+            local apos = db.actor and siski_ef_utils.safe_position(db.actor)
+            if gvid and apos then
+                local level_name = alife():level_name(game_graph():vertex(gvid):level_id())
+                local smart = intel.get_nearest_smart(level_name, apos)
+                if smart then new_target = smart:name() end
+            end
+        elseif enemy and enemy.smart_id and enemy.smart_id ~= 65535 then
+            local target_smart = alife_object(enemy.smart_id)
+            if target_smart then new_target = target_smart:name() end
+        end
+
+        -- Fallback for targets without smarts (like wild mutants)
+        if not new_target and enemy and enemy.position then
+            local level_name = alife():level_name(game_graph():vertex(enemy.m_game_vertex_id):level_id())
+            local smart = intel.get_nearest_smart(level_name, enemy.position)
+            if smart then new_target = smart:name() end
+        end
+
+        if new_target and new_target ~= self.squad.scripted_target then
+            self:log("DEBUG", "Vendetta/Kill re-targeting: enemy moved to [%s]", new_target)
+            self.squad.scripted_target = new_target
+            self.expected_target = new_target
+        end
+
+        -- If arrived at enemy's smart, we stay in RUNNING until they are dead or we are attacked
+        -- (Logic for actually being "in range" for online combat is handled by engine)
+    elseif self.current_task.type == "DIRECTOR_ORDER" and self.current_task.params.reason == "SOS" then
+        local requester_id = self.current_task.target
+        local requester = alife_object(requester_id)
+
+        -- 1. If requester is dead -> SOS fails but converts to VENDETTA
+        if not requester then
+            self:log("WARN", "SOS target [%s] DIED. Converting to VENDETTA against attacker.", requester_id)
+            local attacker_id = self.current_task.params.attacker_id
+            if attacker_id then
+                -- Transition: Change current task to VENDETTA
+                self.current_task.type = "VENDETTA"
+                self.current_task.target = attacker_id
+                self.current_task.priority = 5       -- Maximum priority
+                self.current_task.params.reason = "VENGEANCE"
+                self:execute_task(self.current_task) -- Re-kick logic
+            else
+                return "FAILED"
+            end
+            return "RUNNING"
+        end
+
+        -- 2. If close to requester -> SOS completed
+        local s_pos = self.squad.position
+        local r_pos = requester.position
+        if s_pos and r_pos then
+            local dist = s_pos:distance_to(r_pos)
+            if dist < 50 then
+                self:log("INFO", "SOS completed: Joined squad [%s] (Dist: %.1fm)", siski_ef_utils.safe_name(requester),
+                    dist)
+                self.is_responding_to_sos = false -- Reset SOS flag so we can help again later
+                return "COMPLETED"
+            end
+        end
+
+        return "RUNNING"
+    end
+
+    return "RUNNING"
+end
+
+-- ==============================================================================================
+-- MODULE API
+-- ==============================================================================================
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return end
+    logger.siski_log("BRAIN", "INFO", "Module Initializing...")
+
+    -- DELAY START: Reduce load lag and race conditions with other mods (like swm_legs)
+    -- We wait 5 seconds before the first brain update ticks.
+    last_update_global = time_global() + 3000
+
+    RegisterScriptCallback("actor_on_update", update_brains)
+end
+
+local last_update_global = 0
+local last_discovery_global = 0
+local last_brain_update_error_at = {}
+
+function update_brains()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("brain")) then return end
+    local tg = time_global()
+
+    -- 1. UPDATE EXISTING BRAINS (Every 2 seconds)
+    if tg > last_update_global + 2000 then
+        last_update_global = tg
+
+        -- Cleanup Dead Brains
+        for id, brain in pairs(brains) do
+            local sq = alife_object(id)
+            if not sq then
+                logger.siski_log("BRAIN", "INFO", "Squad [%s] removed. Cleaning up Brain and Memory.", id)
+                memory.unregister_squad(id)
+                brains[id] = nil
+            end
+        end
+
+        -- Update Existing
+        for id, brain in pairs(brains) do
+            local ok, err = pcall(function() brain:update() end)
+            if not ok then
+                local now = time_global()
+                if not last_brain_update_error_at[id] or (now - last_brain_update_error_at[id]) > 5000 then
+                    last_brain_update_error_at[id] = now
+                    logger.siski_log("BRAIN", "ERR", "Brain update failed for squad [%s]: %s", tostring(id), tostring(err))
+                end
+            end
+        end
+    end
+
+    -- 2. DISCOVER NEW SQUADS (Every 10 seconds - Expensive Loop!)
+    if tg > last_discovery_global + 10000 then
+        last_discovery_global = tg
+
+        if SIMBOARD then
+            for id, squad in pairs(SIMBOARD.squads) do
+                local squad_obj = squad
+                if type(squad) == "boolean" then squad_obj = alife_object(id) end
+
+                if squad_obj and squad_obj.player_id then
+                    if not brains[id] then
+                        try_register_brain(id, squad_obj)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function try_register_brain(id, squad_obj)
+    -- CHECK CONTROL AUTHORITY
+    if not is_valid_squad(squad_obj) then return false end
+
+    local state = memory.get_state()
+    local squad_data = state.squads[id]
+
+    if squad_data and squad_data.spawned_by_siski then
+        brains[id] = SquadBrain(squad_obj, squad_data)
+        logger.siski_log("BRAIN", "INFO", "Brain attached to [%s] (SISKI Controlled)", squad_obj:name())
+        return true
+    end
+
+    if settings and settings.get_config and settings.get_config("alife_vanilla_squads", false) then
+        local sec = siski_ef_utils.safe_section(squad_obj)
+        if sec and settings.is_allowed_squad_section and settings.is_allowed_squad_section(squad_obj.player_id, sec) then
+            memory.register_squad(id, { spawned_by_siski = false, vanilla = true, spawn_type = "vanilla" })
+            squad_data = state.squads[id]
+            brains[id] = SquadBrain(squad_obj, squad_data)
+            logger.siski_log("BRAIN", "INFO", "Brain attached to [%s] (Vanilla Squad: %s)", squad_obj:name(), sec)
+            return true
+        end
+    end
+
+    return false
+end

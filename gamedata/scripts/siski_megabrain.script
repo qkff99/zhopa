@@ -1,0 +1,92 @@
+-- ==============================================================================================
+-- SISKI MEGABRAIN (THE DIRECTOR)
+-- "The Director" manages global pacing and entropy.
+-- It ensures the Zone stays alive by forcing movement and events if things get too static.
+-- ==============================================================================================
+
+local logger = siski_logger
+
+-- ==============================================================================================
+-- DIRECTOR AWARENESS
+-- ==============================================================================================
+
+function report_combat(squad_id, is_entering, attacker_id)
+    local squad = alife_object(squad_id)
+    if not squad then return end
+    
+    if is_entering then
+        logger.siski_log("DIRECTOR", "INFO", "Acknowledge: Squad [%s] is now in COMBAT (Attacker: %s).", squad:name(), tostring(attacker_id))
+        
+        -- SYSTEM SOS: Only trigger if attacker is known and requester is not already a responder
+        if attacker_id then
+            local brain = siski_brain.get_brain(squad_id)
+            if brain and not brain.is_responding_to_sos then
+                trigger_sos(squad_id, attacker_id)
+            end
+        end
+    else
+        logger.siski_log("DIRECTOR", "INFO", "Acknowledge: Squad [%s] has finished combat.", squad:name())
+    end
+end
+
+function trigger_sos(requester_id, attacker_id)
+    local sim = alife()
+    local requester = sim:object(requester_id)
+    local attacker = sim:object(attacker_id)
+    
+    if not requester or not attacker then return end
+    
+    local gv_req = game_graph():vertex(requester.m_game_vertex_id)
+    if not gv_req then return end
+    local req_level = sim:level_name(gv_req:level_id())
+    local best_responder = nil
+    local best_dist = 500 -- Max 500m for local SOS
+    
+    local all_brains = siski_brain.get_all_brains()
+    
+    for id, brain in pairs(all_brains) do
+        -- Skip self, attacker, and those already responding to help
+        if id ~= requester_id and id ~= attacker_id and not brain.is_responding_to_sos then
+            local responder_squad = brain.squad
+            local gv_res = game_graph():vertex(responder_squad.m_game_vertex_id)
+            local res_level = gv_res and sim:level_name(gv_res:level_id())
+
+            
+            -- Only same level
+            if res_level == req_level then
+                -- CHECK RELATIONS
+                -- Responder must be Ally to Requester OR (Neutral to Requester AND Enemy to Attacker)
+                local is_ally = game_relations.get_factions_community(responder_squad.player_id, requester.player_id) >= 1000
+                local is_neutral = not is_ally and game_relations.get_factions_community(responder_squad.player_id, requester.player_id) >= -1000
+                local is_enemy_to_attacker = game_relations.get_factions_community(responder_squad.player_id, attacker.player_id) <= -1000
+                
+                if is_ally or (is_neutral and is_enemy_to_attacker) then
+                    -- Distance check
+                    local dist = responder_squad.position:distance_to(requester.position)
+                    if dist < best_dist then
+                        -- Check if responder is available (not in critical task)
+                        if brain.state == "IDLE" or brain.state == "STAYING" then
+                            best_dist = dist
+                            best_responder = brain
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    if best_responder then
+        logger.siski_log("DIRECTOR", "INFO", "SOS: Squad [%s] is sending backup to [%s] (Dist: %.1fm)", 
+            best_responder.squad:name(), requester:name(), best_dist)
+        
+        -- Mark as responder BEFORE adding task to prevent feedback loops
+        best_responder.is_responding_to_sos = true
+        
+        -- Issue high priority SOS order
+        best_responder:add_task("DIRECTOR_ORDER", requester_id, 3, { 
+            reason = "SOS", 
+            sos_target_id = requester_id,
+            attacker_id = attacker_id
+        })
+    end
+end

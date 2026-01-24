@@ -1,0 +1,443 @@
+-- SISKI Reporter
+-- Generates HTML dashboards from game state with Tabbed Interface.
+
+local function build_section_table(title, headers, rows, table_id)
+    local html = {}
+    table.insert(html, string.format([[
+        <div class="table-wrapper">
+            <h3>%s <span class="count">(%d)</span></h3>
+            <table id="%s">
+                <thead><tr>
+    ]], title, #rows, table_id))
+    
+    for i, h in ipairs(headers) do
+        table.insert(html, string.format('<th onclick="sortTable(\'%s\', %d)">%s</th>', table_id, i-1, h))
+    end
+    
+    table.insert(html, "</tr></thead><tbody>")
+    
+    for _, row_data in ipairs(rows) do
+        -- row_data is { cells = {}, level = "zaton", faction = "bandit" }
+        local level_attr = row_data.level and string.format('data-level="%s"', row_data.level) or ""
+        local faction_attr = row_data.faction and string.format('data-faction="%s"', row_data.faction) or ""
+        
+        table.insert(html, string.format('<tr %s %s>', level_attr, faction_attr))
+        for _, cell in ipairs(row_data.cells) do
+            table.insert(html, string.format("<td>%s</td>", cell))
+        end
+        table.insert(html, "</tr>")
+    end
+    
+    table.insert(html, "</tbody></table></div>")
+    return table.concat(html)
+end
+
+function generate_dashboard(state, current_level)
+    if not state then return "<html><body><h1>Error: No State Data</h1></body></html>" end
+    
+    current_level = current_level or "unknown"
+    local time_str = game.get_game_time():timeToString(game.CTime.TimeToSeconds)
+    
+    -- ==============================================================================================
+    -- 1. PREPARE DATA
+    -- ==============================================================================================
+    
+    -- Squads Data
+    local squad_rows = {}
+    local faction_counts = {}
+    local squad_count = 0
+    local combat_count = 0
+    
+    if state.squads then
+        for id, data in pairs(state.squads) do
+            squad_count = squad_count + 1
+            if data.combat_state then combat_count = combat_count + 1 end
+            
+            local squad = alife_object(id)
+            local name = squad and squad:name() or "Unknown"
+            local faction = "unknown"
+            local s_level = "unknown"
+            
+            if squad then
+                 if squad.player_id then faction = squad.player_id
+                 elseif squad.section_name then faction = squad:section_name() end
+                 if squad.m_game_vertex_id then
+                    s_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+                 end
+            end
+            faction_counts[faction] = (faction_counts[faction] or 0) + 1
+            
+            local f_badge = string.format('<span class="badge f-%s">%s</span>', faction, faction)
+            
+            -- Task & Reason
+            local task_type = "-"
+            local task_target = "-"
+            local task_reason = "-"
+            
+            local ct = data.current_task
+            if ct then
+                if type(ct) == "table" then
+                    task_type = ct.type or "?"
+                    task_target = ct.target or "-"
+                    if task_type == "MOVE_TO_POS" then
+                        local coords_level = nil
+                        if ct.params then
+                            local gvid = ct.params.gvid
+                            if gvid then
+                                local ok_v, vert = pcall(function() return game_graph():vertex(gvid) end)
+                                if ok_v and vert then
+                                    coords_level = alife():level_name(vert:level_id())
+                                end
+                            end
+                        end
+                        if coords_level then
+                            task_target = "Coords (" .. coords_level .. ")"
+                        else
+                            task_target = "Coords"
+                        end
+                    end
+                    
+                    if ct.params and ct.params.reason then
+                        task_reason = ct.params.reason
+                    end
+                else
+                    task_type = tostring(ct)
+                end
+            end
+            
+            -- Resolve Target Name (Priority override)
+            if data.assigned_target then
+                 task_target = data.assigned_target
+            end
+            
+            if type(task_target) == "number" then
+                local t_obj = alife():object(task_target)
+                if t_obj then
+                    task_target = string.format("%s (%d)", t_obj:name(), task_target)
+                end
+            end
+            
+            -- Details (Active Section / Combat)
+            local details = ""
+            if data.active_section then
+                details = string.format('<span class="tag">Hunting: %s</span>', data.active_section)
+            end
+            if data.combat_state then
+                details = details .. ' <span class="tag tag-combat">COMBAT</span>'
+            end
+            
+            table.insert(squad_rows, {
+                cells = {id, name, f_badge, s_level, task_type, task_reason, task_target, data.current_state or "Idle", details},
+                level = s_level,
+                faction = faction
+            })
+        end
+    end
+    
+    -- World Data
+    local smart_rows = {}
+    if state.smarts then
+        for name, data in pairs(state.smarts) do
+            table.insert(smart_rows, {
+                cells = {name, data.level or "?", data.max_population or "-"},
+                level = data.level
+            })
+        end
+    end
+
+    local anomaly_rows = {}
+    local anomaly_count = 0
+    if state.anomaly_zones then
+        for lvl, list in pairs(state.anomaly_zones) do
+             for _, az in ipairs(list) do
+                anomaly_count = anomaly_count + 1
+                table.insert(anomaly_rows, {
+                    cells = {az.name, lvl, az.section or "-"},
+                    level = lvl
+                })
+             end
+        end
+    end
+    
+    local campfire_rows = {}
+    local campfire_total = 0
+    if state.campfires then
+        for lvl, list in pairs(state.campfires) do
+            for _, cf in ipairs(list) do
+                campfire_total = campfire_total + 1
+                local smart_name = "-"
+                if cf.smart_id then
+                    local s = alife_object(cf.smart_id)
+                    smart_name = s and s:name() or string.format("ID:%d", cf.smart_id)
+                end
+                
+                local pos = cf.position
+                local coords = pos and string.format("%.1f, %.1f, %.1f", pos.x, pos.y, pos.z) or "???"
+                
+                table.insert(campfire_rows, {
+                    cells = {cf.id, cf.name, lvl, smart_name, coords},
+                    level = lvl
+                })
+            end
+        end
+    end
+
+    -- System Data
+    local vendetta_rows = {}
+    if state.vendettas then
+        for aggr, data in pairs(state.vendettas) do
+            table.insert(vendetta_rows, { cells = {aggr, data.victim_id or "?"} })
+        end
+    end
+
+    local loot_rows = {}
+    if state.global_loot then
+        for id, data in pairs(state.global_loot) do
+            table.insert(loot_rows, { cells = {id, data.level or "?", data.value or 0, data.type or "?"}, level = data.level })
+        end
+    end
+    
+    local claim_rows = {}
+    if state.item_claims then
+        for item_id, v in pairs(state.item_claims) do
+            local squad_id = v
+            if type(v) == "table" then
+                squad_id = v.squad_id
+            end
+            table.insert(claim_rows, { cells = {item_id, squad_id} })
+        end
+    end
+
+    -- ==============================================================================================
+    -- 2. BUILD HTML
+    -- ==============================================================================================
+    local html = {}
+    table.insert(html, [[
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SISKI Brain Dashboard V2</title>
+    <style>
+        :root {
+            --bg: #121212; --card-bg: #1e1e1e; --text: #e0e0e0; --accent: #ff9800; --border: #333;
+            --f-stalker: #ffeb3b; --f-bandit: #212121; --f-duty: #d32f2f; --f-freedom: #4caf50; 
+            --f-csky: #03a9f4; --f-army: #8bc34a; --f-monolith: #e0f7fa; --f-merc: #3f51b5;
+        }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 20px; margin:0; }
+        
+        /* HEADER */
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+        h1 { color: var(--accent); margin: 0; }
+        .meta { color: #666; font-size: 0.9em; }
+        
+        /* STATS GRID */
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .card { background: var(--card-bg); padding: 10px; border-radius: 6px; border: 1px solid var(--border); text-align: center; }
+        .card-val { font-size: 1.5em; font-weight: bold; color: #fff; }
+        .card-lbl { color: #888; text-transform: uppercase; font-size: 0.7em; letter-spacing: 1px; }
+        .text-accent { color: var(--accent); }
+        .text-red { color: #fe5f55; }
+        
+        /* TABS */
+        .tabs { display: flex; gap: 5px; margin-bottom: 15px; border-bottom: 2px solid var(--border); }
+        .tab-btn { background: #222; border: none; color: #888; padding: 10px 20px; cursor: pointer; font-size: 1em; font-weight: bold; border-radius: 6px 6px 0 0; transition: 0.2s; }
+        .tab-btn:hover { background: #333; color: #ccc; }
+        .tab-btn.active { background: var(--card-bg); color: var(--accent); border-bottom: 2px solid var(--accent); margin-bottom: -2px; }
+        
+        .tab-content { display: none; animation: fadeIn 0.3s; }
+        .tab-content.active { display: block; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* CONTROLS */
+        .controls { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; background: #222; padding: 10px; border-radius: 6px; align-items: center; }
+        input[type="text"] { background: #333; border: 1px solid #555; color: #fff; padding: 8px; border-radius: 4px; flex: 1; min-width: 200px; }
+        .toggle-container { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: #2a2a2a; border-radius: 4px; }
+        
+        /* TABLES */
+        .table-wrapper { background: var(--card-bg); border-radius: 6px; border: 1px solid var(--border); overflow: hidden; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { background: #2a2a2a; cursor: pointer; color: #bbb; position: sticky; top: 0; }
+        th:hover { color: #fff; background: #333; }
+        tr:hover { background: #2d2d2d; }
+        
+        /* BADGES & TAGS */
+        .badge { padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.8em; text-transform: uppercase; color: #000; min-width: 60px; display: inline-block; text-align: center; }
+        .f-stalker { background: var(--f-stalker); }
+        .f-bandit { background: var(--f-bandit); color: #fff; border: 1px solid #555; }
+        .f-dolg { background: var(--f-duty); color: #fff; }
+        .f-freedom { background: var(--f-freedom); color: #fff; }
+        .f-csky { background: var(--f-csky); }
+        .f-army { background: var(--f-army); }
+        .f-monolith { background: var(--f-monolith); color: #000; }
+        .f-killer { background: var(--f-merc); color: #fff; }
+        .f-unknown { background: #666; }
+        
+        .tag { display: inline-block; background: #333; color: #ccc; padding: 2px 5px; border-radius: 4px; font-size: 0.85em; }
+        .tag-combat { background: #b71c1c; color: #fff; font-weight: bold; border: 1px solid #ff5252; }
+        
+        .hidden { display: none !important; }
+        
+        button.filter-btn { background: #333; border: 1px solid #555; color: #ccc; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+        button.filter-btn:hover { background: #444; color: #fff; }
+        button.filter-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+    </style>
+    <script>
+        var CURRENT_LEVEL = "]] .. current_level .. [[";
+        
+        function openTab(evt, tabName) {
+            var i, tabcontent, tablinks;
+            tabcontent = document.getElementsByClassName("tab-content");
+            for (i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].classList.remove("active");
+            }
+            tablinks = document.getElementsByClassName("tab-btn");
+            for (i = 0; i < tablinks.length; i++) {
+                tablinks[i].classList.remove("active");
+            }
+            document.getElementById(tabName).classList.add("active");
+            evt.currentTarget.classList.add("active");
+        }
+        
+        function updateFilters() {
+            let search = document.getElementById("searchProps").value.toLowerCase();
+            let levelOnly = document.getElementById("levelToggle").checked;
+            let activeFaction = document.querySelector(".filter-btn.active")?.dataset.faction;
+
+            let rows = document.querySelectorAll("tbody tr");
+            rows.forEach(row => {
+                let text = row.innerText.toLowerCase();
+                let rFaction = row.dataset.faction; 
+                let rLevel = row.dataset.level; 
+
+                let matchSearch = text.includes(search);
+                let matchFaction = !activeFaction || rFaction === activeFaction;
+                let matchLevel = !levelOnly || !rLevel || rLevel === CURRENT_LEVEL;
+                
+                if (matchSearch && matchFaction && matchLevel) {
+                    row.classList.remove("hidden");
+                } else {
+                    row.classList.add("hidden");
+                }
+            });
+            
+            // Recalculate visible counts
+            document.querySelectorAll("table").forEach(tbl => {
+                 let visible = tbl.querySelectorAll("tbody tr:not(.hidden)").length;
+                 let total = tbl.querySelectorAll("tbody tr").length;
+                 let headerCount = tbl.closest(".table-wrapper").querySelector(".count");
+                 if(headerCount) headerCount.textContent = `(${visible}/${total})`;
+            });
+        }
+        
+        function filterByFaction(btn) {
+             let buttons = document.querySelectorAll(".filter-btn");
+            if (btn.classList.contains("active")) {
+                btn.classList.remove("active");
+            } else {
+                buttons.forEach(b => b.classList.remove("active"));
+                btn.classList.add("active");
+            }
+            updateFilters();
+        }
+
+        function sortTable(tableId, n) {
+            var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
+            table = document.getElementById(tableId);
+            switching = true;
+            dir = "asc"; 
+            while (switching) {
+                switching = false;
+                rows = table.rows;
+                for (i = 1; i < (rows.length - 1); i++) {
+                    shouldSwitch = false;
+                    x = rows[i].getElementsByTagName("TD")[n];
+                    y = rows[i + 1].getElementsByTagName("TD")[n];
+                    let xVal = x.textContent.toLowerCase();
+                    let yVal = y.textContent.toLowerCase();
+                    if (!isNaN(parseFloat(xVal)) && !isNaN(parseFloat(yVal))) {
+                        xVal = parseFloat(xVal); yVal = parseFloat(yVal);
+                    }
+                    if (dir == "asc") { if (xVal > yVal) { shouldSwitch = true; break; } }
+                    else if (dir == "desc") { if (xVal < yVal) { shouldSwitch = true; break; } }
+                }
+                if (shouldSwitch) {
+                    rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
+                    switching = true; switchcount ++;      
+                } else {
+                    if (switchcount == 0 && dir == "asc") { dir = "desc"; switching = true; }
+                }
+            }
+        }
+    </script>
+</head>
+<body>
+    <header>
+        <h1>SISKI BRAIN</h1>
+        <div class="meta">Time: ]] .. time_str .. [[ | Level: <span class="text-accent">]] .. current_level .. [[</span></div>
+    </header>
+    
+    <div class="stats-grid">
+         <div class="card"><div class="card-val">]] .. squad_count .. [[</div><div class="card-lbl">Total Squads</div></div>
+         <div class="card"><div class="card-val text-red">]] .. combat_count .. [[</div><div class="card-lbl">In Combat</div></div>
+         <div class="card"><div class="card-val">]] .. #smart_rows .. [[</div><div class="card-lbl">Smarts</div></div>
+         <div class="card"><div class="card-val">]] .. anomaly_count .. [[</div><div class="card-lbl">Anomalies</div></div>
+         <div class="card"><div class="card-val text-accent">]] .. campfire_total .. [[</div><div class="card-lbl">Campfires</div></div>
+    </div>
+    
+    <div class="controls">
+        <input type="text" id="searchProps" onkeyup="updateFilters()" placeholder="Filter...">
+        <div class="toggle-container">
+            <input type="checkbox" id="levelToggle" onchange="updateFilters()">
+            <label for="levelToggle" style="color:#ccc; font-size:0.9em">Current Level</label>
+        </div>
+        <div style="flex-grow:1"></div>
+        ]])
+        
+    for fac, cnt in pairs(faction_counts) do
+        table.insert(html, string.format('<button class="filter-btn" data-faction="%s" onclick="filterByFaction(this)">%s (%d)</button>', fac, fac:upper(), cnt))
+    end
+    
+    table.insert(html, [[
+    </div>
+    
+    <!-- TABS -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="openTab(event, 'tab-squads')">Squads</button>
+        <button class="tab-btn" onclick="openTab(event, 'tab-world')">World</button>
+        <button class="tab-btn" onclick="openTab(event, 'tab-system')">System</button>
+    </div>
+    
+    <!-- TAB: SQUADS -->
+    <div id="tab-squads" class="tab-content active">
+        ]] .. build_section_table("Active Brains", {"ID", "Name", "Faction", "Level", "Task", "Reason", "Target", "State", "Details"}, squad_rows, "tbl_squads") .. [[
+    </div>
+    
+    <!-- TAB: WORLD -->
+    <div id="tab-world" class="tab-content">
+        ]] .. build_section_table("Smart Terrains", {"Smart Name", "Level", "Max Pop"}, smart_rows, "tbl_smarts") .. [[
+        ]] .. build_section_table("Anomaly Zones", {"Zone Name", "Level", "Section"}, anomaly_rows, "tbl_anomalies") .. [[
+        ]] .. build_section_table("Campfires (Safe Zones)", {"ID", "Object Name", "Level", "Smart Terrain", "Coordinates"}, campfire_rows, "tbl_campfires") .. [[
+    </div>
+    
+    <!-- TAB: SYSTEM -->
+    <div id="tab-system" class="tab-content">
+        ]] .. build_section_table("Active Vendettas", {"Aggressor", "Victim"}, vendetta_rows, "tbl_vendettas") .. [[
+        ]] .. build_section_table("Scanned Items (Cache)", {"Item ID", "Level", "Value", "Type"}, loot_rows, "tbl_loot") .. [[
+        ]] .. build_section_table("Item Claims", {"Item ID", "Claimed By"}, claim_rows, "tbl_claims") .. [[
+        
+        <br>
+        <div style="background:var(--card-bg); padding:10px; border:1px solid var(--border);">
+            <h4 style="color:#666; margin:0 0 10px 0;">Raw State Dump</h4>
+            <textarea style="width:100%; height:200px; background:#111; color:#0f0; border:none; padding:10px; font-family:monospace; font-size:0.8em;">]] .. (siski_logger and siski_logger.table_to_string(state) or "") .. [[</textarea>
+        </div>
+    </div>
+    
+</body>
+</html>
+    ]])
+
+    return table.concat(html)
+end

@@ -1,0 +1,529 @@
+-- ==============================================================================================
+-- SISKI CLASSES MODULE
+-- Specialized AI behaviors for unique squad classes (AF Hunters, etc.)
+-- ==============================================================================================
+
+local logger = siski_logger
+local memory = siski_memory
+local intel = siski_intel
+local inventory = siski_inventory
+local trading = siski_trading
+local settings = siski_settings
+
+-- Helper: Filtered Logging
+local function log(squad, msg_type, fmt, ...)
+    if not settings.is_offline_log_enabled() then
+        -- Filter checks
+        local actor_level = level.name()
+        local squad_level = "unknown"
+        if squad.m_game_vertex_id then
+             squad_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+        end
+        
+        -- If offline, suppress everything except ERR
+        if squad_level ~= actor_level then
+             if msg_type ~= "ERR" then return end
+        end
+    end
+    logger.siski_log("CLASS", msg_type, fmt, ...)
+end
+
+-- ==============================================================================================
+-- HELPERS
+-- ==============================================================================================
+
+local function find_nearest_smart(squad, pattern)
+    local gg = game_graph()
+    local squad_pos = squad.position
+    local squad_gvid = squad.m_game_vertex_id
+    local squad_lvl_id = gg:vertex(squad_gvid):level_id()
+    local squad_lvl_name = alife():level_name(squad_lvl_id)
+    
+    -- Check for forced Spawn Level
+    local state = memory.get_state()
+    local squad_data = state.squads and state.squads[squad.id]
+    local target_lvl_name = squad_data and squad_data.spawn_level
+    
+    if not target_lvl_name then target_lvl_name = squad_lvl_name end
+    
+    local best_smart = nil
+    local best_dist = 9999999
+    
+    local sim = alife()
+    
+    -- Iterate all smarts (from memory for speed, or sim_board)
+    -- Using SIMBOARD is safer for global smarts
+    local sim_board_obj = SIMBOARD or (sim_board and sim_board.get_sim_board())
+    if sim_board_obj and sim_board_obj.smarts then
+        for id, smart in pairs(sim_board_obj.smarts) do
+            local smart_obj = alife_object(id)
+            if smart_obj then
+                local s_gvid = smart_obj.m_game_vertex_id
+                local s_lvl_id = gg:vertex(s_gvid):level_id()
+                local s_lvl_name = alife():level_name(s_lvl_id)
+                
+                -- Strict Level Check (Must match Spawn Level)
+                if s_lvl_name == target_lvl_name then
+                    local name = smart_obj:name()
+                    -- Pattern match logic
+                    local matches = false
+                    if pattern == "TRADER" then
+                        -- Check props
+                        local props = smart_obj.props
+                        if props and (props.trader or props.base) then
+                             matches = true
+                        end
+                    elseif pattern == "ANOMALY" then
+                        -- ... (rest of logic same) ...
+                        local props = smart_obj.props
+                        if props and props["resource"] and props["resource"] > 0 then
+                            matches = true
+                        end
+                        -- Fallback for safety (Name check)
+                        if not matches and string.find(name, "anomal_zone") then matches = true end
+                    end
+                    
+                    if matches then
+                        local dist = squad_pos:distance_to(smart_obj.position)
+                        -- Avoid current smart if possible (for patrolling)
+                        if squad.smart_id == id then dist = dist + 1000 end 
+                        
+                        if dist < best_dist then
+                            best_dist = dist
+                            best_smart = smart_obj
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return best_smart
+end
+
+-- Get list of anomalies currently targeted by other AF Hunters
+local function get_occupied_anomalies(self_id)
+    local occupied = {}
+    local state = memory.get_state()
+    if not state.squads then return occupied end
+    
+    for id, data in pairs(state.squads) do
+        -- Ignore self
+        if id ~= self_id and data.squad_class == "af_hunter" and data.target_anomaly_name then
+            occupied[data.target_anomaly_name] = true
+        end
+    end
+    return occupied
+end
+
+local function pick_random_anomaly(squad, exclude_name)
+    local candidates = {}
+    local gg = game_graph()
+    local squad_gvid = squad.m_game_vertex_id
+    
+    -- Check if squad is valid (game_vertex might be missing if offline?)
+    if not squad_gvid then return nil end
+    
+    local g_vertex = gg:vertex(squad_gvid)
+    if not g_vertex then return nil end
+    
+    -- RESTRICTION: Only pick anomalies on SPAWN LEVEL
+    local state = memory.get_state()
+    local squad_data = state.squads and state.squads[squad.id]
+    local target_level = squad_data and squad_data.spawn_level
+    
+    -- Fallback for legacy squads: use current level
+    if not target_level then
+        target_level = alife():level_name(g_vertex:level_id())
+    end
+    
+    -- Use INTEL cache (same as spawner)
+    local all_anomalies = intel.get_all_anomaly_zones_cached()
+    if not all_anomalies then return nil end
+    
+    local anomalies_on_level = all_anomalies[target_level]
+    
+    -- Get list of anomalies already targeted by other AF Hunters
+    local occupied = get_occupied_anomalies(squad.id)
+    
+    if anomalies_on_level then
+        for _, anomaly in ipairs(anomalies_on_level) do
+            local skip = false
+            -- Skip excluded anomaly (last one worked)
+            if exclude_name and anomaly.name == exclude_name then
+                skip = true
+            -- Skip already occupied anomalies (other AF Hunters are working there)
+            elseif occupied[anomaly.name] then
+                skip = true
+            end
+
+            if not skip then
+                -- Don't pick if we are already there (simple dist check)
+                local dist = squad.position:distance_to(anomaly.position)
+                if dist > 30 then -- Only pick far anomalies
+                    -- CHECK VALIDITY: Must have ASSOCIATED Smart Terrain (by name pattern)
+                    -- This must match the check in process_af_hunter!
+                    local anomaly_smart_name = intel.get_anomaly_smart_name(anomaly.name)
+                    local anomaly_smart = anomaly_smart_name and intel.get_smart_by_name(anomaly_smart_name)
+                    if anomaly_smart then
+                        candidates[#candidates+1] = anomaly
+                    end
+                end
+            end
+        end
+    end
+    
+    if #candidates > 0 then
+        local chosen = candidates[math.random(#candidates)]
+        log(squad, "INFO", "AF Hunter [%s] picked random target [%s] (Candidates: %d)", squad:name(), chosen.name, #candidates)
+        return chosen
+    end
+    
+    -- Fallback: Pick ANY on level if all are close (e.g. only 1 anomaly exists)
+    -- BUT: Must have an associated smart terrain!
+    if anomalies_on_level and #anomalies_on_level > 0 then
+         -- Filter occupied AND filter those without smarts!
+         local free_anomalies = {}
+         for _, a in ipairs(anomalies_on_level) do
+             if not occupied[a.name] then
+                 -- Check if anomaly has associated smart terrain
+                 local anomaly_smart_name = intel.get_anomaly_smart_name(a.name)
+                 local anomaly_smart = anomaly_smart_name and intel.get_smart_by_name(anomaly_smart_name)
+                 if anomaly_smart then
+                     free_anomalies[#free_anomalies+1] = a
+                 end
+             end
+         end
+         
+         if #free_anomalies > 0 then
+             local chosen = free_anomalies[math.random(#free_anomalies)]
+             log(squad, "INFO", "AF Hunter [%s] picked fallback target [%s] (Free with Smart: %d)", squad:name(), chosen.name, #free_anomalies)
+             return chosen
+         end
+         
+         log(squad, "WARN", "AF Hunter [%s] no valid anomalies on [%s] (Total: %d, None with Smart Terrain)", squad:name(), target_level, #anomalies_on_level)
+         return nil
+    else
+         log(squad, "WARN", "AF Hunter [%s] no anomalies found on level [%s]", squad:name(), target_level)
+    end
+    
+    return nil
+end
+
+-- ==============================================================================================
+-- LOGIC: AF HUNTER
+-- ==============================================================================================
+
+function process_af_hunter(brain)
+    local squad = brain.squad
+    local state = memory.get_state()
+    
+    -- Ensure squad data exists
+    if not state.squads[squad.id] then state.squads[squad.id] = {} end
+    local data = state.squads[squad.id]
+
+    -- Initialize AF Hunter specific data
+    if not data.afh_state then
+        data.afh_state = "IDLE" -- Enum: "TRADING", "HUNTING", "WORKING", "RESTING"
+        data.afh_timer = 0      -- Accumulated work time (ms)
+    end
+
+    -- ==========================================================
+    -- 0. PRE-CHECK: WRONG LEVEL SAFETY
+    -- ==========================================================
+    local spawn_level = data.spawn_level
+    local current_level = nil
+    if squad.m_game_vertex_id then
+        current_level = alife():level_name(game_graph():vertex(squad.m_game_vertex_id):level_id())
+    else
+        current_level = level.name()
+    end
+    
+    -- Only check if we are NOT on spawn level AND not currently trading (traders might be on other levels)
+    if spawn_level and current_level ~= spawn_level and data.afh_state ~= "TRADING" then
+        -- Check if we have a valid target on THIS level? If not, go home.
+        local current_smart = squad.smart_id and alife_object(squad.smart_id)
+        if not current_smart or brain.state == "IDLE" then
+             -- Go back to spawn level (Fall back to Resting if lost)
+             if data.afh_state ~= "RESTING" then
+                 data.afh_state = "RESTING"
+                 data.target_anomaly_name = nil -- Reset target to force re-evaluation
+                 log(squad, "WARN", "AF Hunter [%s] LOST on level [%s]. Switching to RESTING/HOME.", squad:name(), current_level)
+             end
+        end
+    end
+
+    -- ==========================================================
+    -- 1. STATE: TRADING (Priority High)
+    -- Trigger: Inventory Weight > Threshold
+    -- ==========================================================
+    local should_trade = inventory.should_trade(squad)
+    
+    -- If trigger active OR already trading (until done)
+    if should_trade or (data.afh_state == "TRADING" and brain.state == "IDLE") then
+        
+        -- If just triggered, switch state
+        if data.afh_state ~= "TRADING" then
+            data.afh_state = "TRADING"
+            data.target_anomaly_name = nil -- Drop anomaly target
+            log(squad, "INFO", "AF Hunter [%s] inventory FULL. Switching to TRADING state.", squad:name())
+        end
+        
+        -- Execution
+        if brain.state == "IDLE" then
+             -- Find Trader
+             local trading = siski_trading
+             local trader_smart = trading and trading.find_nearest_trader_smart(squad, brain.faction)
+             
+             if trader_smart then
+                 brain:add_task("TRADE", trader_smart:name(), 5, { 
+                    reason = "AF_HUNTER_FULL_LOOT", 
+                    weight = inventory.get_total_weight(squad) 
+                 })
+                 return true
+             else
+                 log(squad, "WARN", "AF Hunter [%s] wants to TRADE but no trader found! Dumping state to HUNTING.", squad:name())
+                 data.afh_state = "IDLE" -- Fallback
+             end
+        end
+        
+        -- If currently TRADING (Task active), just wait.
+        if brain.current_task and brain.current_task.type == "TRADE" then
+             return true
+        end
+        
+        -- If task finished (IDLE), loop will catch it next update and switch back to hunting if weight lowered
+        if data.afh_state == "TRADING" and brain.state == "IDLE" and not should_trade then
+             data.afh_state = "IDLE" -- Done trading
+             log(squad, "INFO", "AF Hunter [%s] finished TRADING. Returning to HUNTING.", squad:name())
+        end
+    end
+
+    -- ==========================================================
+    -- 2. STATE: TARGET ACQUISITION (Find Anomaly)
+    -- ==========================================================
+    if not data.target_anomaly_name then
+        
+        local exclusion = data.last_anomaly_name
+        local target = pick_random_anomaly(squad, exclusion)
+        
+        if target then
+            data.target_anomaly_name = target.name
+            data.afh_state = "MOVING"
+            data.afh_timer = 0 -- Reset work timer
+            log(squad, "INFO", "AF Hunter [%s] picked NEW target [%s]", squad:name(), target.name)
+        elseif data.afh_state ~= "RESTING" then
+            -- FALLBACK: RESTING (Camp)
+            -- No anomalies found? Go rest at base.
+            local faction = squad:get_squad_community()
+            local camp = intel.get_random_smart(faction, spawn_level) -- Get any friendly smart
+            
+            if camp then
+                 data.target_anomaly_name = camp:name() -- Use same field for destination
+                 data.afh_state = "RESTING"
+                 data.afh_timer = 0
+                 log(squad, "INFO", "AF Hunter [%s] no anomalies. Fallback to RESTING at [%s]", squad:name(), camp:name())
+            else
+                 -- Total disaster
+                 return true
+            end
+        end
+    end
+    
+    local target_name = data.target_anomaly_name
+    if not target_name then return true end -- Should not happen if logic works
+    
+    -- ==========================================================
+    -- 3. CHECK ARRIVAL (Visual & Physical)
+    -- ==========================================================
+    -- Resolve smart object
+    local target_smart = nil
+    
+    if data.afh_state == "RESTING" then
+        target_smart = intel.get_smart_by_name(target_name)
+    else 
+        -- Hunting context
+        local smart_name = intel.get_anomaly_smart_name(target_name)
+        target_smart = smart_name and intel.get_smart_by_name(smart_name)
+    end
+    
+    -- Distance Logic
+    local dist_to_smart = 9999
+    if target_smart then
+        dist_to_smart = squad.position:distance_to(target_smart.position)
+    end
+    
+    -- STRICT ARRIVAL: Must be at smart (ID) AND physically close (< 10m)
+    local is_arrived = (target_smart and squad.smart_id == target_smart.id and dist_to_smart < 10)
+    
+    -- ==========================================================
+    -- 4. STATE LOGIC: MOVING vs WORKING
+    -- ==========================================================
+    
+    if is_arrived then
+        -- >>>>>>>>>>> WE ARE AT TARGET <<<<<<<<<<
+        
+        -- Start/Resume WORK (or REST)
+        if data.afh_state == "MOVING" then
+            data.afh_state = "WORKING"
+        end
+        
+        -- TIMER LOGIC (Accumulate "Clean Time")
+        -- 10 Game Minutes = 10 * 60 * 1000 / TF (Real MS)
+        -- For RESTING: 30 Game Minutes
+        local duration_game_min = (data.afh_state == "RESTING") and 30 or 10
+        local tf = level.get_time_factor()
+        local needed_duration_ms = (duration_game_min * 60 * 1000) / tf
+        local now = time_global()
+        if not data.afh_last_tick then
+            data.afh_last_tick = now
+        end
+
+        local delta = now - data.afh_last_tick
+        if delta < 0 then
+            delta = 0
+        elseif delta > 15000 then
+            delta = 15000
+        end
+
+        data.afh_last_tick = now
+        data.afh_timer = (data.afh_timer or 0) + delta
+        
+        -- Debug every 10s
+        if data.afh_timer % 10000 < 2500 then
+             log(squad, "DEBUG", "AF Hunter [%s] state [%s] at [%s]. Progress: %.1f/%.1f sec", 
+                squad:name(), data.afh_state, target_name, data.afh_timer/1000, needed_duration_ms/1000)
+        end
+        
+        -- STAY TASK MANAGER (Keep them in Gulag Logic)
+        if brain.state == "IDLE" and (not brain.current_task or brain.current_task.type ~= "STAY") then
+            brain:add_task("STAY", "Working", 5, { reason = "AF_HUNTER_BUSY", stay_duration = duration_game_min })
+        end
+        
+        -- CHECK COMPLETION
+        if data.afh_timer >= needed_duration_ms then
+             log(squad, "INFO", "AF Hunter [%s] FINISHED [%s] at [%s].", squad:name(), data.afh_state, target_name)
+             
+             -- Cleanup
+             data.last_anomaly_name = target_name
+             data.target_anomaly_name = nil
+             data.afh_state = "IDLE"
+             data.afh_timer = 0
+             data.afh_last_tick = nil
+
+             if brain.current_task and brain.current_task.type == "STAY" then
+                 brain.current_task = nil
+             end
+             brain.state = "IDLE"
+             
+             return true
+        end
+        
+    else
+        -- >>>>>>>>>>> WE ARE MOVING <<<<<<<<<<
+        
+        -- If we were WORKING but lost position (chased away), Timer pauses!
+        
+        if brain.state == "IDLE" and target_smart then
+            brain:add_task("MOVE", target_smart:name(), 3, { reason = "AF_HUNTER_TRAVEL" })
+        elseif brain.state == "IDLE" and not target_smart then
+            -- Target smart disappeared? Invalid target.
+            data.target_anomaly_name = nil
+        end
+    end
+    
+    return true
+end
+
+-- ==============================================================================================
+-- CLASS REGISTRY
+-- ==============================================================================================
+
+local CLASS_REGISTRY = {
+    af_hunter = {
+        processor = process_af_hunter,
+        allow_retarget = true,       -- Can change target mid-movement
+        enforce_level = true,        -- Bound to spawn_level
+        skip_generic_think = true,   -- Skip strategic, scanner, etc.
+        fallback_task = "STAY",      -- If processor returns no task
+        priority = 4                 -- Priority in brain:think()
+    },
+    -- Future classes:
+    -- caravan = { processor = process_caravan, ... },
+    -- patrol = { processor = process_patrol, ... },
+}
+
+function get_class_config(class_name)
+    return CLASS_REGISTRY[class_name]
+end
+
+function get_return_smart(squad, target_level_name)
+    -- Find ANY valid smart on the target level to return to
+    return find_nearest_smart(squad, "TRADER") -- Already filtered by spawn_level in helper
+end
+
+-- ==============================================================================================
+-- DISPATCHER
+-- ==============================================================================================
+
+function process(brain)
+    local cls = brain.squad_class
+    if not cls then return false end
+    
+    local cfg = CLASS_REGISTRY[cls]
+    if not cfg or not cfg.processor then return false end
+    
+    -- Execute class-specific processor
+    local result = cfg.processor(brain)
+    
+    -- SCRIPTED TARGET LOCK: Ensure scripted_target is NEVER nil for classed squads
+    
+    -- SKIP LOCK if performing direct position movement (MOVE_TO_POS)
+    -- This prevents Dispatcher from overriding custom coordinate movement with generic smart logic
+    if brain.current_task and brain.current_task.type == "MOVE_TO_POS" then
+        return true
+    end
+    if brain.state == "MOVING_TO_POS" then
+        return true
+    end
+
+    if not brain.squad.scripted_target then
+        local state = memory.get_state()
+        local squad_data = state.squads and state.squads[brain.squad.id]
+        local spawn_level = squad_data and squad_data.spawn_level
+        
+        local current_smart = brain.squad.smart_id and alife_object(brain.squad.smart_id)
+        
+        -- AF Hunters: ONLY lock to smart on SPAWN LEVEL
+        if cls == "af_hunter" and spawn_level and current_smart then
+            local smart_level = current_smart.level_vertex_id and alife():level_name(game_graph():vertex(current_smart.m_game_vertex_id):level_id())
+            if smart_level ~= spawn_level then
+                -- WRONG LEVEL! Return to Home Smart
+                local home_id = squad_data.home_smart
+                local home = home_id and alife_object(home_id)
+                
+                if home then
+                    brain.squad.scripted_target = home:name()
+                    log(brain.squad, "WARN", "Squad [%s] (%s) Leash: Return to Home [%s]", brain.squad:name(), cls, home:name())
+                else
+                     -- No home? Just wait. Do NOT pick random smart.
+                     -- brain.squad.scripted_target = current_smart:name() -- Lock here to prevent wandering?
+                end
+            else
+                brain.squad.scripted_target = current_smart:name()
+                -- logger.siski_log("CLASS", "WARN", "Squad [%s] (%s) had nil target - locked to [%s]", brain.squad:name(), cls, current_smart:name())
+            end
+        elseif current_smart then
+             brain.squad.scripted_target = current_smart:name()
+             log(brain.squad, "WARN", "Squad [%s] (%s) had nil target - locked to [%s]", brain.squad:name(), cls, current_smart:name())
+        end
+    end
+    
+    -- Store expected target for Watchdog
+    if brain.squad.scripted_target then
+        brain.expected_target = brain.squad.scripted_target
+    end
+    
+    return result or true -- Always return true for classed squads
+end
+

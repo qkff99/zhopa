@@ -1,0 +1,649 @@
+-- ==============================================================================================
+-- SISKI LORE MODULE
+-- Defines "Background Tasks" for squads when they have nothing else to do.
+-- Replaces generic wandering with faction-specific behavior.
+-- ==============================================================================================
+
+local intel = siski_intel
+local memory = siski_memory
+local settings = siski_settings
+local logger = siski_logger
+local ipairs = ipairs
+local pairs = pairs
+local tonumber = tonumber
+local math_random = math.random
+
+-- ==============================================================================================
+-- MAPPINGS
+-- ==============================================================================================
+
+local BEHAVIORS = {
+    ["stalker"] = "EXPLORE",
+    ["ecolog"] = "EXPLORE",
+    ["csky"] = "EXPLORE",
+    
+    ["bandit"] = "AMBUSH",
+    ["renegade"] = "AMBUSH",
+    
+    ["dolg"] = "PATROL",
+    ["army"] = "PATROL",
+    
+    ["killer"] = "CONTRACT",
+    
+    ["monolith"] = "ZEAL",
+    ["zombied"] = "ZEAL",
+    
+    ["freedom"] = "CHILL",
+}
+
+local LORE_GROUP_BY_REASON = {
+    EXPLORE_ANOMALY = "EXPLORE",
+    EXPLORE = "EXPLORE",
+    AMBUSH_STRIKE = "AMBUSH",
+    AMBUSH_WAIT = "AMBUSH",
+    MUTANT_HUNT = "PATROL",
+    PATROL_DEN = "PATROL",
+    ASSASSINATION_CONTRACT = "CONTRACT",
+    CONTRACT_TRANSIT = "CONTRACT",
+    EXPANSION = "ZEAL",
+    ZEAL = "ZEAL",
+    CHILL_OUT = "CHILL",
+    CHILL = "CHILL"
+}
+
+-- ==============================================================================================
+-- CORE LOGIC
+-- ==============================================================================================
+
+local function table_empty(t)
+    return not (t and next(t) ~= nil)
+end
+
+local function get_level_from_gvid(gvid)
+    if not gvid then return nil end
+    local ok_v, vert = pcall(function() return game_graph():vertex(gvid) end)
+    if not (ok_v and vert) then return nil end
+    return alife():level_name(vert:level_id())
+end
+
+local function get_smart_level(state, smart_name)
+    if not (state and state.smarts and smart_name) then return nil end
+    local data = state.smarts[smart_name]
+    return data and data.level or nil
+end
+
+local function get_squad_level_by_id(squad_id)
+    local id = tonumber(squad_id)
+    if not id then return nil end
+    local sq = alife():object(id)
+    if not sq then return nil end
+    local ok_v, vert = pcall(function() return game_graph():vertex(sq.m_game_vertex_id) end)
+    if not (ok_v and vert) then return nil end
+    return alife():level_name(vert:level_id())
+end
+
+local function get_task_target_level(state, task)
+    if not (task and type(task) == "table") then return nil end
+
+    if task.type == "MOVE" and type(task.target) == "string" then
+        return get_smart_level(state, task.target)
+    end
+
+    local params = task.params
+    if params and params.gvid then
+        return get_level_from_gvid(params.gvid)
+    end
+
+    if (task.type == "KILL" or task.type == "VENDETTA") and task.target then
+        return get_squad_level_by_id(task.target)
+    end
+
+    return nil
+end
+
+local function get_task_target_key(task)
+    if not (task and type(task) == "table") then return nil end
+    if task.type == "MOVE" and type(task.target) == "string" then
+        return "SMART:" .. task.target
+    end
+    if task.type == "MOVE_TO_POS" and task.params and task.params.gvid then
+        return "GVID:" .. tostring(task.params.gvid)
+    end
+    if task.params and task.params.cf_id then
+        return "CF:" .. tostring(task.params.cf_id)
+    end
+    if (task.type == "KILL" or task.type == "VENDETTA") and task.target then
+        return "SQUAD:" .. tostring(task.target)
+    end
+    return task.type .. ":" .. tostring(task.target)
+end
+
+local function build_lore_occupancy(state, faction)
+    local taken_by_level = {}
+    local group_count_by_level = {}
+
+    local squads = state and state.squads or nil
+    if not squads then
+        return taken_by_level, group_count_by_level
+    end
+
+    for sid, _ in pairs(squads) do
+        local sq = alife():object(tonumber(sid))
+        if sq and sq.player_id == faction then
+            local st = squads[sid]
+            local tasks = {}
+            if st and st.current_task then tasks[#tasks + 1] = st.current_task end
+            if st and st.queue and type(st.queue) == "table" then
+                for _, t in ipairs(st.queue) do
+                    if t then tasks[#tasks + 1] = t end
+                end
+            end
+
+            for _, t in ipairs(tasks) do
+                local params = t and t.params or nil
+                local reason = params and params.reason or nil
+                local group = reason and LORE_GROUP_BY_REASON[reason] or nil
+                local lvl = get_task_target_level(state, t)
+                local key = get_task_target_key(t)
+
+                if lvl and key then
+                    if not taken_by_level[lvl] then taken_by_level[lvl] = {} end
+                    taken_by_level[lvl][key] = true
+                end
+                if group and lvl then
+                    if not group_count_by_level[lvl] then group_count_by_level[lvl] = {} end
+                    group_count_by_level[lvl][group] = (group_count_by_level[lvl][group] or 0) + 1
+                end
+            end
+        end
+    end
+
+    return taken_by_level, group_count_by_level
+end
+
+local function smart_blacklisted(data, faction)
+    if not data or not data.blacklist then return false end
+    if data.blacklist["all"] then return true end
+    if data.blacklist[faction] then return true end
+    return false
+end
+
+local function smart_accepts_faction(data, faction)
+    local props = data and data.props or nil
+    if not props then return true end
+
+    local is_base = (props["base"] and props["base"] > 0)
+    local is_lair = (props["lair"] and props["lair"] > 0)
+
+    local is_monster = (faction == "monster" or faction == "zombied" or faction == "animal")
+    if is_monster then
+        if is_base and faction ~= "zombied" then
+            return false
+        end
+        return true
+    end
+
+    if is_base then
+        local target_prop = faction
+        if faction == "dolg" then target_prop = "duty" end
+        if faction == "killer" then target_prop = "merc" end
+        if faction == "military" then target_prop = "army" end
+
+        if (props[faction] and props[faction] > 0) or
+            (props[target_prop] and props[target_prop] > 0) or
+            (props["all"] and props["all"] > 0) then
+            return true
+        end
+        return false
+    end
+
+    if is_lair then
+        return false
+    end
+
+    return true
+end
+
+local function compute_level_centers(state)
+    local centers = {}
+    local counts = {}
+    local smarts = state and state.smarts or nil
+    if not smarts then return centers end
+
+    for _, data in pairs(smarts) do
+        local lvl = data.level
+        local pos = data.position
+        if lvl and pos then
+            if not centers[lvl] then
+                centers[lvl] = vector():set(0, 0, 0)
+                counts[lvl] = 0
+            end
+            centers[lvl].x = centers[lvl].x + pos.x
+            centers[lvl].y = centers[lvl].y + pos.y
+            centers[lvl].z = centers[lvl].z + pos.z
+            counts[lvl] = counts[lvl] + 1
+        end
+    end
+
+    for lvl, c in pairs(counts) do
+        if c > 0 then
+            centers[lvl].x = centers[lvl].x / c
+            centers[lvl].y = centers[lvl].y / c
+            centers[lvl].z = centers[lvl].z / c
+        end
+    end
+
+    return centers
+end
+
+local function get_levels_by_distance_from_memory(state, start_level, faction)
+    local centers = compute_level_centers(state)
+    if not (centers and centers[start_level]) then
+        return { start_level }
+    end
+
+    local out = {}
+    for lvl, center in pairs(centers) do
+        if not faction or settings.is_level_allowed(faction, lvl) then
+            local dist = center:distance_to(centers[start_level])
+            out[#out + 1] = { level = lvl, dist = dist }
+        end
+    end
+
+    table.sort(out, function(a, b) return a.dist < b.dist end)
+
+    local levels = {}
+    for _, e in ipairs(out) do
+        levels[#levels + 1] = e.level
+    end
+    return levels
+end
+
+local function pick_random_smart_on_level(state, faction, level, taken_by_level)
+    local smarts = state and state.smarts or nil
+    if not smarts then return nil end
+
+    local candidates = {}
+    for name, data in pairs(smarts) do
+        if data.level == level and not smart_blacklisted(data, faction) and smart_accepts_faction(data, faction) then
+            local taken = taken_by_level[level] and taken_by_level[level]["SMART:" .. name] or false
+            if not taken then
+                candidates[#candidates + 1] = name
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+    return candidates[math_random(#candidates)]
+end
+
+local function get_nearest_smart_in_level(state, level, pos, faction, max_dist)
+    local smarts = state and state.smarts or nil
+    if not (smarts and pos) then return nil end
+    local best_name = nil
+    local best_dist = nil
+
+    for name, data in pairs(smarts) do
+        if data.level == level and data.position and not smart_blacklisted(data, faction) then
+            local d = data.position:distance_to(pos)
+            if (not max_dist or d <= max_dist) and (not best_dist or d < best_dist) then
+                best_dist = d
+                best_name = name
+            end
+        end
+    end
+
+    return best_name
+end
+
+local function pick_smart_with_anomaly(state, faction, level, taken_by_level)
+    local az = state and state.anomaly_zones and state.anomaly_zones[level] or nil
+    if not (az and #az > 0) then return nil end
+
+    for _ = 1, 6 do
+        local anomaly = az[math_random(#az)]
+        local pos = anomaly and anomaly.position or nil
+        local smart_name = get_nearest_smart_in_level(state, level, pos, faction, 150)
+        if smart_name then
+            local taken = taken_by_level[level] and taken_by_level[level]["SMART:" .. smart_name] or false
+            if not taken then
+                return smart_name
+            end
+        end
+    end
+
+    return nil
+end
+
+local function find_enemy_squad_on_level(state, my_faction, level, taken_by_level)
+    local squads = state and state.squads or nil
+    if not squads then return nil end
+
+    local candidates = {}
+    for sid, _ in pairs(squads) do
+        local sq_id = tonumber(sid)
+        local sq = sq_id and alife():object(sq_id) or nil
+        if sq and sq.player_id and sq.player_id ~= my_faction then
+            local sq_level = get_squad_level_by_id(sq_id)
+            if sq_level == level then
+                local hostility = game_relations and game_relations.get_factions_community and
+                    game_relations.get_factions_community(my_faction, sq.player_id) or 0
+                if hostility <= -1000 then
+                    local key = "SQUAD:" .. tostring(sq_id)
+                    local taken = taken_by_level[level] and taken_by_level[level][key] or false
+                    if not taken then
+                        candidates[#candidates + 1] = sq_id
+                    end
+                end
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+    return candidates[math_random(#candidates)]
+end
+
+local function find_mutant_squad_on_level(state, level, taken_by_level)
+    local squads = state and state.squads or nil
+    if not squads then return nil end
+
+    local candidates = {}
+    for sid, _ in pairs(squads) do
+        local sq_id = tonumber(sid)
+        local sq = sq_id and alife():object(sq_id) or nil
+        if sq and sq.player_id then
+            local f = sq.player_id
+            if f == "monster" or f == "animal" or f == "zombied" then
+                local sq_level = get_squad_level_by_id(sq_id)
+                if sq_level == level then
+                    local key = "SQUAD:" .. tostring(sq_id)
+                    local taken = taken_by_level[level] and taken_by_level[level][key] or false
+                    if not taken then
+                        candidates[#candidates + 1] = sq_id
+                    end
+                end
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+    return candidates[math_random(#candidates)]
+end
+
+local function find_mutant_den(state, faction, level, taken_by_level)
+    local smarts = state and state.smarts or nil
+    if not smarts then return nil end
+
+    local candidates = {}
+    for name, data in pairs(smarts) do
+        if data.level == level and data.props and data.props["lair"] and data.props["lair"] > 0 and not smart_blacklisted(data, faction) then
+            local taken = taken_by_level[level] and taken_by_level[level]["SMART:" .. name] or false
+            if not taken then
+                candidates[#candidates + 1] = name
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+    return candidates[math_random(#candidates)]
+end
+
+local function is_faction_on_level(state, faction, level)
+    local squads = state and state.squads or nil
+    if not squads then return false end
+
+    for sid, _ in pairs(squads) do
+        local sq_id = tonumber(sid)
+        local sq = sq_id and alife():object(sq_id) or nil
+        if sq and sq.player_id == faction then
+            local sq_level = get_squad_level_by_id(sq_id)
+            if sq_level == level then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function pick_random_base_on_level(state, faction, level, taken_by_level)
+    local smarts = state and state.smarts or nil
+    if not smarts then return nil end
+
+    local candidates = {}
+    for name, data in pairs(smarts) do
+        if data.level == level and data.props and data.props["base"] and data.props["base"] > 0 and not smart_blacklisted(data, faction) then
+            local taken = taken_by_level[level] and taken_by_level[level]["SMART:" .. name] or false
+            if not taken then
+                candidates[#candidates + 1] = name
+            end
+        end
+    end
+
+    if #candidates == 0 then return nil end
+    return candidates[math_random(#candidates)]
+end
+
+local function ensure_memory_populated()
+    local state = memory.get_state and memory.get_state() or nil
+    local smarts = state and state.smarts or nil
+    if table_empty(smarts) and intel and intel.scan_smarts then
+        pcall(function() intel.scan_smarts() end)
+        state = memory.get_state and memory.get_state() or state
+    end
+    return state
+end
+
+function get_background_task(brain)
+    -- MODULE SHIELD: Skip for classed squads
+    if brain.squad_class then return nil end
+    
+    local state = ensure_memory_populated()
+    if not state or table_empty(state.smarts) then return nil end
+
+    local behavior = BEHAVIORS[brain.faction] or "EXPLORE"
+    local task = nil
+    
+    if behavior == "EXPLORE" then
+         task = create_explore_task(brain)
+    elseif behavior == "AMBUSH" then
+         task = create_ambush_task(brain)
+    elseif behavior == "PATROL" then
+         task = create_patrol_task(brain)
+    elseif behavior == "CONTRACT" then
+         task = create_contract_task(brain)
+    elseif behavior == "ZEAL" then
+         task = create_zeal_task(brain)
+    elseif behavior == "CHILL" then
+         task = create_chill_task(brain)
+    end
+    
+    return task
+end
+
+-- ==============================================================================================
+-- TASK GENERATORS
+-- ==============================================================================================
+
+------------------------------------------------------------------------------------------------
+-- TASK CREATORS (Level Restricted)
+------------------------------------------------------------------------------------------------
+
+local function get_my_level(brain)
+    return alife():level_name(game_graph():vertex(brain.squad.m_game_vertex_id):level_id())
+end
+
+function create_explore_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    local levels = sorted_levels
+    if brain.squad and brain.squad.online then
+        levels = { my_level }
+    end
+
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["EXPLORE"] or 0) == 0 then
+            local smart_name = pick_smart_with_anomaly(state, brain.faction, level, taken_by_level)
+            if smart_name then
+                return { type="MOVE", target=smart_name, priority=0, params={ duration=150, reason="EXPLORE_ANOMALY" } }
+            end
+        end
+    end
+    
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["EXPLORE"] or 0) == 0 then
+            local smart_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+            if smart_name then
+                return { type="MOVE", target=smart_name, priority=0, params={ duration=100, reason="EXPLORE" } }
+            end
+        end
+    end
+end
+
+function create_ambush_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    local levels = sorted_levels
+    if brain.squad and brain.squad.online then
+        levels = { my_level }
+    end
+
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["AMBUSH"] or 0) == 0 then
+            local enemy_id = find_enemy_squad_on_level(state, brain.faction, level, taken_by_level)
+            if enemy_id then
+                return { type="KILL", target=enemy_id, priority=0, params={ reason="AMBUSH_STRIKE" } }
+            end
+        end
+    end
+    
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["AMBUSH"] or 0) == 0 then
+            local smart_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+            if smart_name then
+                return { type="MOVE", target=smart_name, priority=0, params={ duration=1000, reason="AMBUSH_WAIT" } }
+            end
+        end
+    end
+end
+
+function create_patrol_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    local levels = sorted_levels
+    if brain.squad and brain.squad.online then
+        levels = { my_level }
+    end
+
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["PATROL"] or 0) == 0 then
+            local mutant_id = find_mutant_squad_on_level(state, level, taken_by_level)
+            if mutant_id then
+                return { type="KILL", target=mutant_id, priority=0, params={ reason="MUTANT_HUNT" } }
+            end
+        end
+    end
+
+    for _, level in ipairs(levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["PATROL"] or 0) == 0 then
+            local den_name = find_mutant_den(state, brain.faction, level, taken_by_level)
+            if den_name then
+                return { type="MOVE", target=den_name, priority=0, params={ duration=50, reason="PATROL_DEN" } }
+            end
+        end
+    end
+end
+
+function create_contract_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    for _, level in ipairs(sorted_levels) do
+        if level ~= my_level then
+            if (group_count_by_level[level] and group_count_by_level[level]["CONTRACT"] or 0) == 0 then
+                local enemy_id = find_enemy_squad_on_level(state, brain.faction, level, taken_by_level)
+                if enemy_id then
+                    return { type="VENDETTA", target=enemy_id, priority=0, params={ reason="ASSASSINATION_CONTRACT" } }
+                end
+            end
+        end
+    end
+    
+    -- Fallback to normal MOVE
+    for _, level in ipairs(sorted_levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["CONTRACT"] or 0) == 0 then
+            local smart_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+            if smart_name then
+                return { type="MOVE", target=smart_name, priority=0, params={ duration=200, reason="CONTRACT_TRANSIT" } }
+            end
+        end
+    end
+end
+
+function create_zeal_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    -- Expansion: Find a level without our faction
+    for _, level in ipairs(sorted_levels) do
+        if level ~= my_level and not is_faction_on_level(state, brain.faction, level) then
+            if (group_count_by_level[level] and group_count_by_level[level]["ZEAL"] or 0) == 0 then
+                local smart_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+                if smart_name then
+                    return { type="MOVE", target=smart_name, priority=0, params={ duration=300, reason="EXPANSION" } }
+                end
+            end
+        end
+    end
+    
+    -- Fallback to zeal move
+    for _, level in ipairs(sorted_levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["ZEAL"] or 0) == 0 then
+            local smart_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+            if smart_name then
+                return { type="MOVE", target=smart_name, priority=0, params={ duration=300, reason="ZEAL" } }
+            end
+        end
+    end
+end
+
+function create_chill_task(brain)
+    local my_level = get_my_level(brain)
+    local state = memory.get_state()
+    local sorted_levels = get_levels_by_distance_from_memory(state, my_level, brain.faction)
+    local taken_by_level, group_count_by_level = build_lore_occupancy(state, brain.faction)
+    
+    -- Freedom hangs out at neutral bases on other levels
+    for _, level in ipairs(sorted_levels) do
+        if level ~= my_level then
+            if (group_count_by_level[level] and group_count_by_level[level]["CHILL"] or 0) == 0 then
+                local base_name = pick_random_base_on_level(state, brain.faction, level, taken_by_level)
+                if base_name then
+                    return { type="MOVE", target=base_name, priority=0, params={ duration=2000, reason="CHILL_OUT" } }
+                end
+            end
+        end
+    end
+    
+    -- Fallback to local chill
+    for _, level in ipairs(sorted_levels) do
+        if (group_count_by_level[level] and group_count_by_level[level]["CHILL"] or 0) == 0 then
+            local base_name = pick_random_smart_on_level(state, brain.faction, level, taken_by_level)
+            if base_name then
+                return { type="MOVE", target=base_name, priority=0, params={ duration=2000, reason="CHILL" } }
+            end
+        end
+    end
+end

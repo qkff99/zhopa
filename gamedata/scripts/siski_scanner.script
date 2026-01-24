@@ -1,0 +1,600 @@
+-- ==============================================================================================
+-- SISKI SCANNER MODULE
+-- Scans environment for items, corpses, wounded allies.
+-- ==============================================================================================
+
+local logger = siski_logger
+local memory = siski_memory
+local settings = siski_settings
+local vendetta = siski_vendetta
+
+-- Local cache
+local scan_cache = {}               -- [squad_id] = { results, timestamp }
+local SCAN_INTERVAL = 10000         -- 10 seconds real time (was 60)
+local SCAN_RADIUS = 30              -- meters
+local MAX_OBJECTS = 10
+local MAX_ROUTE_LENGTH = 5          -- Reduce to process faster
+
+local GLOBAL_SCAN_INTERVAL = 300000 -- 5 minutes real time
+local last_global_scan = 0
+local ELITE_RANK_THRESHOLD = 3000
+
+-- Optimization State
+local current_global_index = 1
+local is_scanning_global = false
+local SCAN_BLOCK_SIZE = 50 -- Objects per update
+local last_artifact_scan_step_tg = 0
+local ARTIFACT_SCAN_STEP_INTERVAL_MS = 100
+local hunt_check_cache = {}
+local HUNT_CHECK_INTERVAL_MS = 5000
+local GLOBAL_LOOT_MAX = 512
+local global_loot_count = 0
+
+-- List of elite item sections to hunt globally
+-- List of elite item sections to hunt globally
+-- (DEPRECATED: Now strict Artifact Hunt only)
+local GLOBAL_HUNT_ITEMS = {}
+
+-- Cache Globals
+local math_min = math.min
+local string_find = string.find
+local table_sort = table.sort
+local tostring = tostring
+local tonumber = tonumber
+local ipairs = ipairs
+local pairs = pairs
+
+-- ==============================================================================================
+-- HELPERS
+-- ==============================================================================================
+
+local function get_squad_commander(squad)
+    if not squad then return nil end
+    local commander_id = siski_ef_utils.safe_commander_id(squad)
+    if commander_id then
+        return db.storage[commander_id] and db.storage[commander_id].object
+    end
+    return nil
+end
+
+local function is_valuable_item(item)
+    if not item then return false end
+    local section = siski_ef_utils.safe_section(item)
+    if not section then return false end
+
+    -- Artifacts
+    if string_find(section, "af_") then return true end
+
+    -- Weapons
+    if string_find(section, "wpn_") then return true end
+
+    -- Armor
+    if string_find(section, "outfit_") or string_find(section, "helm_") then return true end
+
+    -- Medical
+    if string_find(section, "medkit") or string_find(section, "bandage") or string_find(section, "antirad") then return true end
+
+    -- Ammo
+    if string_find(section, "ammo_") then return true end
+
+    -- Mutant parts (valuable loot)
+    if string_find(section, "mutant_") then return true end
+
+    return false
+end
+
+local function is_ally(npc, faction)
+    if not npc or not faction then return false end
+    local npc_faction = siski_ef_utils.safe_community(npc)
+    return npc_faction == faction
+end
+
+local function is_enemy_corpse(corpse, faction)
+    if not corpse or not faction then return false end
+
+    if siski_ef_utils.is_alive(corpse) then return false end
+
+    local corpse_faction = siski_ef_utils.safe_community(corpse)
+    -- Can loot enemies and neutrals
+    return corpse_faction ~= faction
+end
+
+-- ==============================================================================================
+-- SCANNING
+-- ==============================================================================================
+
+function scan_area(squad)
+    if not squad then return nil end
+
+    local commander = get_squad_commander(squad)
+    if not commander then return nil end
+
+    local pos = siski_ef_utils.safe_position(commander)
+    if not pos then return end
+    local faction = squad.player_id
+
+    local results = {
+        items = {},
+        corpses = {}
+    }
+
+    local item_count = 0
+
+    -- Method 1: Scan using level.iterate_nearest (for NPCs)
+    if level.iterate_nearest then
+        level.iterate_nearest(pos, SCAN_RADIUS, function(obj)
+            if item_count >= MAX_OBJECTS then return end
+            if not obj then return end
+
+            -- ULTRA SAFE CHECK
+            local alive = siski_ef_utils.is_alive(obj)
+
+            -- Corpses and wounded NPCs
+            if IsStalker and IsStalker(obj) then
+                if not alive then
+                    -- Dead NPC = Corpse
+                    if is_enemy_corpse(obj, faction) then
+                        local o_pos = siski_ef_utils.safe_position(obj)
+                        local dist = o_pos and pos:distance_to(o_pos) or 999
+                        local list = results.corpses
+                        -- Store ID instead of Obj
+                        list[#list + 1] = { id = obj:id(), dist = dist }
+                        item_count = item_count + 1
+                    end
+                else
+                end
+            end
+
+            -- Items on ground (no parent)
+            local ok_p, parent = pcall(function() return obj:parent() end)
+            if ok_p and parent == nil and not IsStalker(obj) and not (IsMonster and IsMonster(obj)) then
+                if is_valuable_item(obj) then
+                    local o_pos = siski_ef_utils.safe_position(obj)
+                    local dist = o_pos and pos:distance_to(o_pos) or 999
+                    local list = results.items
+                    -- Store ID instead of Obj to prevent "destroyed object" errors later
+                    list[#list + 1] = { id = obj:id(), dist = dist }
+                    item_count = item_count + 1
+                end
+            end
+        end)
+    end
+
+    -- Method 2: Check near commander directly (for close items)
+    -- FALLBACK ONLY: If iterate_nearest is missing (very old engines)
+    if not level.iterate_nearest then
+        local search_dist = 10 -- Very close items
+        for i = 1, 65535 do
+            if item_count >= MAX_OBJECTS then break end
+
+            local obj = level.object_by_id(i)
+            local ok_p, parent = pcall(function() return obj:parent() end)
+            if obj and ok_p and parent == nil then
+                local obj_pos = siski_ef_utils.safe_position(obj)
+                if obj_pos then
+                    local dist = pos:distance_to(obj_pos)
+                    if dist <= search_dist then
+                        if not IsStalker(obj) and not (IsMonster and IsMonster(obj)) then
+                            if is_valuable_item(obj) then
+                                -- Check if not already added
+                                local already_added = false
+                                local my_id = obj:id()
+                                for _, existing in ipairs(results.items) do
+                                    if existing.id == my_id then
+                                        already_added = true
+                                        break
+                                    end
+                                end
+                                if not already_added then
+                                    local list = results.items
+                                    list[#list + 1] = { id = my_id, dist = dist }
+                                    item_count = item_count + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Sort by distance
+    table_sort(results.items, function(a, b) return a.dist < b.dist end)
+    table_sort(results.corpses, function(a, b) return a.dist < b.dist end)
+
+    if #results.items > 0 or #results.corpses > 0 then
+        logger.siski_log("SCANNER", "DEBUG", "Squad [%s] scanned: %d items, %d corpses",
+            siski_ef_utils.safe_name(squad), #results.items, #results.corpses)
+    end
+
+    return results
+end
+
+function get_cached_scan(squad)
+    if not squad then return nil end
+
+    local cache = scan_cache[squad.id]
+    local now = time_global()
+
+    if cache and (now - cache.timestamp) < SCAN_INTERVAL then
+        return cache.results
+    end
+
+    -- Perform new scan
+    local results = scan_area(squad)
+    scan_cache[squad.id] = {
+        results = results,
+        timestamp = now
+    }
+
+    return results
+end
+
+-- ==============================================================================================
+-- GLOBAL ARTIFACT SCANNER
+-- ==============================================================================================
+
+local ARTIFACT_SCAN_FREQ = 3600     -- 1 Game Hour (in seconds)
+local last_artifact_scan_time = nil -- CTime object
+
+function update_artifact_scan()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("scanner")) then return end
+    local tg = time_global()
+    if (tg - last_artifact_scan_step_tg) < ARTIFACT_SCAN_STEP_INTERVAL_MS then
+        return
+    end
+    last_artifact_scan_step_tg = tg
+    local now = game.get_game_time()
+
+    local st = memory and memory.get_state and memory.get_state() or nil
+    local squads = st and st.squads or nil
+    if not (squads and next(squads) ~= nil) then
+        is_scanning_global = false
+        return
+    end
+
+    -- Check Interval (Game Time)
+    if not is_scanning_global then
+        if last_artifact_scan_time then
+            if now:diffSec(last_artifact_scan_time) < ARTIFACT_SCAN_FREQ then
+                return
+            end
+        end
+
+        -- Start New Scan
+        is_scanning_global = true
+        current_global_index = 1
+        last_artifact_scan_time = now
+        global_loot_count = 0
+        local global_loot = memory.get_global_loot()
+        if global_loot then
+            for _ in pairs(global_loot) do
+                global_loot_count = global_loot_count + 1
+            end
+        end
+        logger.siski_log("SCANNER", "INFO", "Starting Artifact Scan (Game Time: %s)",
+            now:timeToString(game.CTime.TimeToMinutes))
+    end
+
+    local sim = alife()
+    if not sim then
+        is_scanning_global = false
+        return
+    end
+
+    local end_index = math_min(current_global_index + SCAN_BLOCK_SIZE, 65534)
+    local found_count = 0
+
+    for i = current_global_index, end_index do
+        local se_obj = sim:object(i)
+        if se_obj then
+            process_artifact_object(se_obj)
+        end
+    end
+
+    current_global_index = end_index + 1
+
+    -- Check if finished
+    if current_global_index >= 65534 then
+        is_scanning_global = false
+        logger.siski_log("SCANNER", "INFO", "Artifact Scan Complete.")
+    end
+end
+
+function process_artifact_object(se_obj)
+    local sim = alife()
+
+    -- ONLY ARTIFACTS
+    if se_obj.parent_id == 65535 then -- On ground
+        local sec = se_obj:section_name()
+        if sec and sec:sub(1, 3) == "af_" then
+            -- Found Artifact!
+            local gg = game_graph()
+            local vert = gg:vertex(se_obj.m_game_vertex_id)
+            local level_id = vert and vert:level_id() or nil
+
+            local pos = se_obj.position
+            local px = pos and pos.x or nil
+            local py = pos and pos.y or nil
+            local pz = pos and pos.z or nil
+
+            local global_loot = memory.get_global_loot()
+            if global_loot then
+                local existing = global_loot[se_obj.id]
+                if not existing and global_loot_count >= GLOBAL_LOOT_MAX then
+                    return
+                end
+                if not existing then
+                    existing = {}
+                    memory.update_global_loot(se_obj.id, existing)
+                    global_loot_count = global_loot_count + 1
+                end
+                existing.id = se_obj.id
+                existing.pos_x = px
+                existing.pos_y = py
+                existing.pos_z = pz
+                existing.lvid = se_obj.m_level_vertex_id
+                existing.gvid = se_obj.m_game_vertex_id
+                existing.level_id = level_id
+                existing.value = 5000
+                existing.type = "ARTIFACT"
+                existing.section = sec
+                existing.timestamp = time_global()
+                existing.hunters = nil
+            end
+        end
+    end
+end
+
+-- Helper: Find 2 nearest squads for a target
+local function assign_hunters_to_target(target)
+    if target.hunters then return end -- Already assigned
+
+    target.hunters = {}
+
+    -- Get all potential hunters (squads on same level)
+    local candidates = {}
+    local state = memory.get_state()
+    local squads = state.squads or {}
+
+    if not (target.pos_x and target.pos_y and target.pos_z) then return end
+    local target_pos = vector():set(target.pos_x, target.pos_y, target.pos_z)
+
+    local sim = alife()
+    local target_level_id = target.level_id
+
+    for sq_id, sq_data in pairs(squads) do
+        local squad = sim:object(tonumber(sq_id))
+        if squad then
+            -- Level Check
+            local gv = game_graph():vertex(squad.m_game_vertex_id)
+            if gv then
+                local sq_level_id = gv:level_id()
+                if target_level_id and sq_level_id == target_level_id then
+                    -- Calculate Distance
+                    local squad_pos = gv:game_point()
+                    local dist = squad_pos:distance_to(target_pos)
+                    candidates[#candidates + 1] = { id = sq_id, dist = dist }
+                end
+            end
+        end
+    end
+
+    -- Sort by distance
+    table_sort(candidates, function(a, b) return a.dist < b.dist end)
+
+    -- Pick Top 2
+    for i = 1, math_min(#candidates, 2) do
+        target.hunters[candidates[i].id] = true
+    end
+end
+
+function check_artifact_hunt(brain)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("scanner")) then return false end
+    if not brain or not brain.squad then return false end
+
+    -- MODULE SHIELD: Skip for classed squads
+    if brain.squad_class then return false end
+
+    local now_tg = time_global()
+    local last_tg = hunt_check_cache[brain.id]
+    if last_tg and (now_tg - last_tg) < HUNT_CHECK_INTERVAL_MS then
+        return false
+    end
+    hunt_check_cache[brain.id] = now_tg
+
+    -- Check found artifacts
+    local global_targets = memory.get_global_loot()
+    local best_target = nil
+
+    for id, target in pairs(global_targets) do
+        -- 1. Must be ARTIFACT
+        if target.type == "ARTIFACT" then
+            -- 2. Must be valid/unclaimed
+            if not memory.get_item_claim(id) then
+                local se_obj = alife_object(id)
+                if se_obj then
+                    -- 3. Assign Hunters (if not yet assigned)
+                    assign_hunters_to_target(target)
+
+                    -- 4. Am I a chosen hunter?
+                    if target.hunters and target.hunters[brain.id] then
+                        if not best_target then best_target = target end
+                    end
+                end
+            end
+        end
+    end
+
+    if best_target then
+        local level_name = best_target.level_id and alife():level_name(best_target.level_id) or best_target.level or "unknown"
+        logger.siski_log("SCANNER", "INFO", "Squad [%s] hunting artifact [%s] (Selected as Top 2 Nearest)",
+            brain.squad:name(), best_target.section)
+
+        if best_target.id then
+            memory.claim_item(best_target.id, brain.id)
+        end
+
+        brain:add_task("MOVE", level_name, 1, {
+            is_global_hunt = true,
+            target_id = best_target.id,
+            pos_x = best_target.pos_x,
+            pos_y = best_target.pos_y,
+            pos_z = best_target.pos_z,
+            reason = "ARTIFACT_HUNT"
+        })
+        return true
+    end
+
+    return false
+end
+
+-- ==============================================================================================
+-- ROUTE PLANNING
+-- ==============================================================================================
+
+function plan_loot_route(squad, scan_results)
+    if not scan_results then return {} end
+
+    local route = {}
+
+    -- Priority 1: Corpses (LOOT)
+    for i, target in ipairs(scan_results.corpses) do
+        if #route >= MAX_ROUTE_LENGTH then break end
+        route[#route + 1] = { type = "CORPSE", id = target.id, dist = target.dist }
+    end
+
+    -- Priority 3: Items (PICKUP)
+    for i, target in ipairs(scan_results.items) do
+        if #route >= MAX_ROUTE_LENGTH then break end
+        route[#route + 1] = { type = "ITEM", id = target.id, dist = target.dist }
+    end
+
+    -- Claim items to trigger Vendetta on theft
+    claim_loot_route(squad, route)
+
+    return route
+end
+
+function claim_loot_route(squad, route)
+    if not squad or not route then return end
+
+    for _, target in ipairs(route) do
+        if target.type == "ITEM" then
+            -- Use stored ID directly, no obj access needed
+            local item_id = target.id
+            if item_id then
+                memory.claim_item(item_id, squad.id)
+            end
+        end
+    end
+end
+
+-- ==============================================================================================
+-- BRAIN INTEGRATION
+-- ==============================================================================================
+
+function check_and_add_tasks(brain)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("scanner")) then return false end
+    if not brain or not brain.squad then return false end
+
+    -- MODULE SHIELD: Skip for classed squads
+    if brain.squad_class then return false end
+
+    -- Only scan for online squads
+    local commander = get_squad_commander(brain.squad)
+    if not commander then
+        -- logger.siski_log("SCANNER", "DEBUG", "Squad [%s] scan skip: No commander (Offline?)", brain.squad:name())
+        return false
+    end
+
+    logger.siski_log("SCANNER", "DEBUG", "Squad [%s] attempting scan...", siski_ef_utils.safe_name(brain.squad))
+
+    -- Get cached scan results
+    local results = get_cached_scan(brain.squad)
+    if not results then
+        logger.siski_log("SCANNER", "DEBUG", "Squad [%s] scan failed (nil results)",
+            siski_ef_utils.safe_name(brain.squad))
+        return false
+    end
+
+    -- Check if anything found
+    local has_targets = #results.items > 0 or #results.corpses > 0
+    if not has_targets then
+        logger.siski_log("SCANNER", "DEBUG", "Squad [%s] scan empty (0 targets)", siski_ef_utils.safe_name(brain.squad))
+        return false
+    end
+
+    -- Plan route
+    local route = plan_loot_route(brain.squad, results)
+    if #route == 0 then return false end
+
+    -- Add tasks to brain queue
+    for _, target in ipairs(route) do
+        local task_type = "LOOT"
+        local priority = 1
+        local reason = "LOCAL_LOOT"
+
+        if target.type == "CORPSE" then
+            reason = "LOCAL_CORPSE"
+        elseif target.type == "ITEM" then
+            reason = "LOCAL_ITEM"
+        end
+
+        -- [FIX] Pre-validate target is still alive/valid BEFORE creating task
+        -- This prevents "cannot access class member Alive" spam later
+        local target_id = target.id
+
+        if not target_id then goto continue end
+
+        -- For KILL tasks, target MUST be alive (wounded enemy)
+        if target.type == "WOUNDED_ENEMY" then
+            local target_obj = level.object_by_id(target_id)
+            if not target_obj or not siski_ef_utils.is_alive(target_obj) then
+                logger.siski_log("SCANNER", "DEBUG", "Skipping dead/missing wounded enemy [%s]", tostring(target_id))
+                goto continue
+            end
+        end
+
+        brain:add_task(task_type, target_id, priority, {
+            loot_type = target.type,
+            obj_id = target_id,
+            reason = reason
+        })
+
+        ::continue::
+    end
+
+    logger.siski_log("SCANNER", "INFO", "Squad [%s] planned loot route: %d targets",
+        siski_ef_utils.safe_name(brain.squad), #route)
+
+    return true
+end
+
+function on_game_start()
+    if not (siski_core and siski_core.can_run and siski_core.can_run("scanner")) then return end
+    logger.siski_log("SCANNER", "INFO", "Module initialized")
+end
+
+function sweep_cache(ttl_ms)
+    if not (siski_core and siski_core.can_run and siski_core.can_run("scanner")) then return 0 end
+    local ttl = tonumber(ttl_ms) or 120000
+    local now = time_global()
+    local removed = 0
+    for squad_id, entry in pairs(scan_cache) do
+        local ts = entry and entry.timestamp or 0
+        if (now - ts) > ttl or not alife_object(squad_id) then
+            scan_cache[squad_id] = nil
+            removed = removed + 1
+        end
+    end
+    return removed
+end
+
+function get_cache_stats()
+    local n = 0
+    for _ in pairs(scan_cache) do
+        n = n + 1
+    end
+    return { scan_cache = n }
+end
