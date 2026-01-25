@@ -4,16 +4,44 @@
 
 local log_file = "siski.log"
 
+local buffers = {}
+local FLUSH_INTERVAL_MS = 500
+local MAX_BUFFER_CHARS = 16384
+
+local function flush_buffer(filename)
+    local b = buffers[filename]
+    if not b or not b.buf or b.buf == "" then return end
+
+    local f = io.open(filename, "a")
+    if f then
+        f:write(b.buf)
+        f:close()
+    end
+
+    b.buf = ""
+    b.last_flush_tg = time_global()
+end
+
 -- Internal: Write to physical file
 local function write_to_file(txt, filename)
     local target_file = filename or log_file
     local tg = time_global()
     local txt_out = string.format("[%s] %s\n", tg, txt)
-    
-    local f = io.open(target_file, "a")
-    if f then 
-        f:write(txt_out)
-        f:close() 
+
+    local b = buffers[target_file]
+    if not b then
+        b = { buf = "", last_flush_tg = tg }
+        buffers[target_file] = b
+    end
+
+    b.buf = b.buf .. txt_out
+
+    if #b.buf >= MAX_BUFFER_CHARS or (tg - (b.last_flush_tg or 0)) >= FLUSH_INTERVAL_MS then
+        local ok = pcall(flush_buffer, target_file)
+        if not ok then
+            b.buf = ""
+            b.last_flush_tg = tg
+        end
     end
 end
 

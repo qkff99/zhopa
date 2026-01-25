@@ -79,6 +79,18 @@ function safe_section(obj)
     return ok and res or nil
 end
 
+function safe_cost(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:cost() end)
+    return ok and res or nil
+end
+
+function safe_condition(obj)
+    if not obj then return nil end
+    local ok, res = pcall(function() return obj:condition() end)
+    return ok and res or nil
+end
+
 function safe_level_vertex_id(obj)
     if not obj then return nil end
     local ok, res = pcall(function() return obj:level_vertex_id() end)
@@ -89,6 +101,28 @@ function safe_game_vertex_id(obj)
     if not obj then return nil end
     local ok, res = pcall(function() return obj:game_vertex_id() end)
     return ok and res or nil
+end
+
+function safe_money(npc)
+    if not npc then return nil end
+    local ok, res = pcall(function() return npc:money() end)
+    return ok and res or nil
+end
+
+function safe_give_money(npc, amount)
+    if not npc then return false end
+    local v = tonumber(amount)
+    if not v then return false end
+    local ok = pcall(function() npc:give_money(v) end)
+    return ok == true
+end
+
+function safe_transfer_money(from_npc, amount, to_npc)
+    if not (from_npc and to_npc) then return false end
+    local v = tonumber(amount)
+    if not v then return false end
+    local ok = pcall(function() from_npc:transfer_money(v, to_npc) end)
+    return ok == true
 end
 
 function safe_best_enemy(npc)

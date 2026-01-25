@@ -1,0 +1,100 @@
+siski_vanilla_bridge = siski_vanilla_bridge or {}
+
+local function is_table(t) return type(t) == "table" end
+
+function siski_vanilla_bridge.get_utils_obj()
+    return _G.utils_obj
+end
+
+function siski_vanilla_bridge.get_state_mgr()
+    return _G.state_mgr
+end
+
+function siski_vanilla_bridge.get_xr_sound()
+    return _G.xr_sound
+end
+
+function siski_vanilla_bridge.send_to_nearest_accessible_vertex(npc, lvid, caller)
+    local uo = siski_vanilla_bridge.get_utils_obj()
+    if uo and uo.send_to_nearest_accessible_vertex then
+        local ok, res = pcall(function() return uo.send_to_nearest_accessible_vertex(npc, lvid, caller) end)
+        if ok and res then return res end
+    end
+    if npc and lvid then
+        pcall(function() npc:set_dest_level_vertex_id(lvid) end)
+        return lvid
+    end
+    return nil
+end
+
+function siski_vanilla_bridge.set_state(npc, state_name, target)
+    local sm = siski_vanilla_bridge.get_state_mgr()
+    if sm and sm.set_state then
+        local ok = pcall(function() sm.set_state(npc, state_name, nil, nil, target, { animation = true }) end)
+        return ok == true
+    end
+    return false
+end
+
+function siski_vanilla_bridge.play_sound(npc_or_id, sound, faction, point)
+    local xs = siski_vanilla_bridge.get_xr_sound()
+    if not (xs and xs.set_sound_play) then return false end
+    local id = npc_or_id
+    if type(npc_or_id) ~= "number" and npc_or_id and npc_or_id.id then
+        local ok_id, nid = pcall(function() return npc_or_id:id() end)
+        if ok_id then id = nid end
+    end
+    if type(id) ~= "number" then return false end
+    return pcall(function() return xs.set_sound_play(id, sound, faction, point) end) and true or false
+end
+
+function siski_vanilla_bridge.normalize_dir(dir)
+    if not dir then return nil end
+    if dir.normalize then
+        pcall(function() dir:normalize() end)
+        return dir
+    end
+    local len = dir.magnitude and dir:magnitude() or nil
+    if len and len > 0 then
+        dir.x = dir.x / len
+        dir.y = dir.y / len
+        dir.z = dir.z / len
+        return dir
+    end
+    return dir
+end
+
+function siski_vanilla_bridge.make_dir(from_pos, to_pos)
+    if not (from_pos and to_pos) then return nil end
+    local dir = to_pos:sub(from_pos)
+    if dir then
+        if dir.y ~= nil then dir.y = 0 end
+        return siski_vanilla_bridge.normalize_dir(dir)
+    end
+    return nil
+end
+
+function siski_vanilla_bridge.pick_meet_vertex(near_obj, away_from_pos, min_dist, max_dist)
+    if not (near_obj and away_from_pos) then return nil end
+    if not (level and level.vertex_in_direction) then return nil end
+    local base_lvid = nil
+    local ok_lv, lv = pcall(function() return near_obj:level_vertex_id() end)
+    if ok_lv then base_lvid = lv end
+    local base_pos = nil
+    local ok_pos, pos = pcall(function() return near_obj:position() end)
+    if ok_pos then base_pos = pos end
+    if not (base_lvid and base_pos) then return nil end
+
+    local dist = min_dist or 2.0
+    if max_dist and max_dist > dist then
+        dist = math.random(math.floor(dist * 10), math.floor(max_dist * 10)) / 10
+    end
+    local dir = siski_vanilla_bridge.make_dir(base_pos, away_from_pos)
+    if not dir then return nil end
+    local ok, lvid = pcall(function() return level.vertex_in_direction(base_lvid, dir, dist) end)
+    if ok and lvid then
+        return lvid
+    end
+    return nil
+end
+

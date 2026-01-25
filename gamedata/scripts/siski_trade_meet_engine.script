@@ -1,0 +1,285 @@
+siski_trade_meet_engine = siski_trade_meet_engine or {}
+
+local function normalize_dir(dir)
+    if not dir then return nil end
+    dir.y = 0
+    local sq = (dir.x or 0) * (dir.x or 0) + (dir.z or 0) * (dir.z or 0)
+    if sq < 0.0001 then
+        return nil
+    end
+    if dir.normalize then
+        pcall(function() dir:normalize() end)
+    end
+    return dir
+end
+
+local function make_dir(from_pos, to_pos)
+    if not (from_pos and to_pos) then return nil end
+    return normalize_dir(to_pos:sub(from_pos))
+end
+
+local function send_to_nearest_accessible_vertex(npc, lvid)
+    if lvid and _G.utils_obj and _G.utils_obj.send_to_nearest_accessible_vertex then
+        local ok, res = pcall(function() return _G.utils_obj.send_to_nearest_accessible_vertex(npc, lvid, "siski_trade") end)
+        if ok and res then return res end
+    end
+    if npc and lvid then
+        pcall(function() npc:set_dest_level_vertex_id(lvid) end)
+        return lvid
+    end
+    return nil
+end
+
+local function set_state(npc, state_name, target)
+    if _G.state_mgr and _G.state_mgr.set_state then
+        return pcall(function() _G.state_mgr.set_state(npc, state_name, nil, nil, target, { animation = true }) end) and true or false
+    end
+    return false
+end
+
+local function play_sound(npc, sound)
+    if not (npc and sound) then return false end
+    if not (_G.xr_sound and _G.xr_sound.set_sound_play) then return false end
+    if not (_G.sound_theme and _G.sound_theme.theme and _G.sound_theme.theme[sound]) then return false end
+    local ok_id, id = pcall(function() return npc:id() end)
+    if not ok_id then return false end
+    return pcall(function() _G.xr_sound.set_sound_play(id, sound) end) and true or false
+end
+
+local function pick_meet_vertex_lvid(npc)
+    if not (npc and npc.vertex_in_direction) then return nil end
+    local rnd1 = math.random(100)
+    local ang
+    if rnd1 < 43 then
+        ang = math.random(50, 60)
+    elseif rnd1 < 58 then
+        ang = math.random(160, 200)
+    else
+        ang = math.random(300, 310)
+    end
+    local dir = vector_rotate_y(npc:direction(), ang)
+    local ok, lvid = pcall(function() return npc:vertex_in_direction(npc:level_vertex_id(), dir, math.random(2, 4)) end)
+    if ok and lvid and lvid < 4294967295 then
+        return lvid
+    end
+    return nil
+end
+
+local function pick_meet_lvid(leader, sink, sink_static)
+    if sink_static then
+        local ok_lv, lv = pcall(function() return sink:level_vertex_id() end)
+        if ok_lv then return lv end
+        return nil
+    end
+    local lvid = pick_meet_vertex_lvid(sink)
+    if lvid then return lvid end
+    local ok_lv, lv = pcall(function() return sink:level_vertex_id() end)
+    if ok_lv then return lv end
+    return nil
+end
+
+local function ensure_params(params, now)
+    params.trade_meet_started_tg = params.trade_meet_started_tg or now
+    params.trade_meet_stage = params.trade_meet_stage or "MEETING"
+    params.trade_meet_wait_ms = params.trade_meet_wait_ms or math.random(10000, 20000)
+    params.trade_meet_wait_start_tg = params.trade_meet_wait_start_tg or 0
+    params.trade_meet_next_move_tg = params.trade_meet_next_move_tg or 0
+    params.trade_meet_next_hold_tg = params.trade_meet_next_hold_tg or 0
+    params.trade_meet_meet_lvid = params.trade_meet_meet_lvid or nil
+    params.trade_meet_last_dist = params.trade_meet_last_dist or nil
+    params.trade_meet_last_progress_tg = params.trade_meet_last_progress_tg or now
+    params.trade_meet_reroute_count = params.trade_meet_reroute_count or 0
+end
+
+function siski_trade_meet_engine.tick(leader, sink, params)
+    if not (leader and sink and params) then return "FAILED" end
+    ensure_params(params, time_global())
+
+    local now = time_global()
+    local lpos = leader:position()
+    local spos = sink:position()
+    if not (lpos and spos) then return "FAILED" end
+    local sink_static = params.trade_meet_sink_static == true
+
+    local meet_dist = 1.5
+    local safe_dist = 6
+    local timeout_ms = 60000
+
+    local dist = lpos:distance_to(spos)
+    local stage = params.trade_meet_stage
+
+    if (now - params.trade_meet_started_tg) > timeout_ms then
+        stage = "READY"
+        params.trade_meet_stage = stage
+    end
+
+    if stage == "MEETING" then
+        if not params.trade_meet_meet_lvid then
+            params.trade_meet_meet_lvid = pick_meet_lvid(leader, sink, sink_static)
+            params.trade_meet_reroute_count = params.trade_meet_reroute_count + 1
+        end
+
+        if now >= params.trade_meet_next_move_tg then
+            params.trade_meet_next_move_tg = now + 1200
+            local meet_lvid = params.trade_meet_meet_lvid
+            local meet_pos = sink_static and spos or ((meet_lvid and level.vertex_position) and level.vertex_position(meet_lvid) or spos)
+
+            local dir_l = make_dir(lpos, meet_pos)
+            local dir_s = sink_static and make_dir(spos, lpos) or make_dir(spos, meet_pos)
+
+            pcall(function()
+                leader:set_path_type(game_object.level_path)
+                send_to_nearest_accessible_vertex(leader, meet_lvid)
+                leader:set_desired_position(meet_pos)
+                if dir_l then leader:set_desired_direction(dir_l) end
+            end)
+
+            set_state(leader, "patrol", { look_object = sink })
+            if sink_static then
+                pcall(function()
+                    sink:set_desired_position(spos)
+                    if dir_s then sink:set_desired_direction(dir_s) end
+                end)
+                set_state(sink, "guard", { look_object = leader })
+            else
+                pcall(function()
+                    sink:set_path_type(game_object.level_path)
+                    send_to_nearest_accessible_vertex(sink, meet_lvid)
+                    sink:set_desired_position(meet_pos)
+                    if dir_s then sink:set_desired_direction(dir_s) end
+                end)
+                set_state(sink, "patrol", { look_object = leader })
+            end
+        end
+
+        local last_dist = params.trade_meet_last_dist
+        if last_dist then
+            local delta = last_dist - dist
+            if delta >= 0.5 then
+                params.trade_meet_last_progress_tg = now
+            end
+        else
+            params.trade_meet_last_progress_tg = now
+        end
+        params.trade_meet_last_dist = dist
+
+        if dist <= meet_dist then
+            params.trade_meet_stage = "WAITING"
+            params.trade_meet_wait_start_tg = now
+            if not params.trade_meet_hello_played then
+                params.trade_meet_hello_played = true
+                play_sound(leader, "talk_hello")
+            end
+            return "WAITING"
+        end
+
+        local stall_ms = now - (params.trade_meet_last_progress_tg or now)
+        if stall_ms > 8000 and (params.trade_meet_reroute_count or 0) < 4 then
+            params.trade_meet_meet_lvid = nil
+        end
+
+        return "MEETING"
+    end
+
+    if stage == "WAITING" then
+        if dist > safe_dist then
+            params.trade_meet_stage = "MEETING"
+            if not sink_static then
+                params.trade_meet_meet_lvid = nil
+            end
+            return "MEETING"
+        end
+
+        if now >= params.trade_meet_next_hold_tg then
+            params.trade_meet_next_hold_tg = now + 900
+
+            local dir_ls = make_dir(lpos, spos)
+            local dir_sl = make_dir(spos, lpos)
+
+            pcall(function()
+                leader:set_desired_position(lpos)
+                if dir_ls then leader:set_desired_direction(dir_ls) end
+            end)
+
+            set_state(leader, "idle", { look_object = sink })
+            pcall(function()
+                if not sink_static then
+                    sink:set_desired_position(spos)
+                end
+                if dir_sl then sink:set_desired_direction(dir_sl) end
+            end)
+            set_state(sink, sink_static and "guard" or "idle", { look_object = leader })
+        end
+
+        if (now - (params.trade_meet_wait_start_tg or now)) < (params.trade_meet_wait_ms or 12000) then
+            return "WAITING"
+        end
+
+        params.trade_meet_stage = "READY"
+        return "READY"
+    end
+
+    if stage == "READY" then
+        if dist > safe_dist then
+            params.trade_meet_stage = "MEETING"
+            if not sink_static then
+                params.trade_meet_meet_lvid = nil
+            end
+            return "MEETING"
+        end
+
+        if now >= params.trade_meet_next_hold_tg then
+            params.trade_meet_next_hold_tg = now + 900
+            local dir_ls = make_dir(lpos, spos)
+            local dir_sl = make_dir(spos, lpos)
+            pcall(function()
+                if dir_ls then leader:set_desired_direction(dir_ls) end
+            end)
+            pcall(function()
+                if dir_sl then sink:set_desired_direction(dir_sl) end
+            end)
+        end
+
+        return "READY"
+    end
+
+    return "FAILED"
+end
+
+function siski_trade_meet_engine.play_bye(leader, params)
+    if not (leader and params) then return false end
+    if params.trade_meet_bye_played then return false end
+    params.trade_meet_bye_played = true
+    return play_sound(leader, "talk_bye")
+end
+
+local function release_npc(npc, look_target)
+    if not npc then return false end
+    if _G.state_mgr then
+        if _G.state_mgr.lock then
+            pcall(function() _G.state_mgr.lock(npc, false) end)
+        end
+        if _G.state_mgr.set_state then
+            pcall(function() _G.state_mgr.set_state(npc, "idle", nil, nil, look_target, { fast_set = true, force = true }) end)
+        end
+    end
+    pcall(function()
+        npc:set_movement_type(0)
+        npc:set_detail_path_type(0)
+        npc:set_path_type(game_object.level_path)
+        npc:set_desired_position()
+        npc:set_desired_direction()
+    end)
+    return true
+end
+
+function siski_trade_meet_engine.cleanup(leader, sink, params)
+    if not (leader and sink and params) then return false end
+    local sink_static = params.trade_meet_sink_static == true
+    release_npc(leader, sink)
+    if not sink_static then
+        release_npc(sink, leader)
+    end
+    return true
+end
+

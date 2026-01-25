@@ -53,6 +53,11 @@ function on_mcm_load()
             {id = "activities_enabled", type = "check", val = 1, def = true},
             {id = "loot_gather_speed", type = "track", val = 2, min=0.5, max=5.0, step=0.1, def = 1.0},
             {id = "trade_time", type = "track", val = 2, min=30, max=300, step=10, def = 60},
+            {id = "trade_safe_radius", type = "track", val = 2, min=20, max=300, step=5, def = 80},
+            {id = "trade_valuable_cost", type = "track", val = 2, min=500, max=50000, step=500, def = 5000},
+            {id = "trade_urge_gain", type = "track", val = 2, min=0.05, max=1.0, step=0.05, def = 0.25},
+            {id = "trade_priority_max", type = "track", val = 2, min=1, max=10, step=1, def = 10},
+            {id = "trade_sell_mult", type = "track", val = 2, min=0.1, max=1.0, step=0.05, def = 0.5},
 
             -- AF HUNTERS
             {id = "af_header", type = "desc", text = "ui_mcm_siski_af_header"},

@@ -9,6 +9,7 @@ local STATE = {
     squads = {},          -- [id] = { assigned_brain=id, current_task=... }
     smarts = {},          -- [name] = { level=..., props=... }
     vendettas = {},       -- [aggressor_id] = { victim_id=... }
+    pending_trades = {},  -- [squad_id] = { tg=..., reason=... }
     item_claims = {},     -- [item_id] = squad_id (for loot theft detection)
     global_loot = {},     -- [id] = { pos, lvid, gvid, level, value, type }
     campfires = {},       -- [level_name] = { list of campfires }
@@ -30,6 +31,36 @@ local STATE = {
     next_normal_cycle_time = nil
 }
 
+local CACHE = {
+    perf = {
+        tg = 0,
+        state_ref = nil,
+        occupied_cf = {},
+        incoming_by_target = {},
+        active_counts = {},
+        campfire_target_counts = {},
+        gvid_to_level = {}
+    },
+    smarts = {
+        tg = 0,
+        smarts_ref = nil,
+        centers = {},
+        smarts_by_level = {}
+    }
+}
+
+local function map_too_big(m, max_n)
+    if not m then return false end
+    local n = 0
+    for _ in pairs(m) do
+        n = n + 1
+        if n > max_n then
+            return true
+        end
+    end
+    return false
+end
+
 function init()
     siski_logger.log_info("MEMORY", "Initializing Global Memory...")
     STATE.initialized = true
@@ -39,8 +70,48 @@ function get_state()
     return STATE
 end
 
+local function reset_cache()
+    CACHE.perf.tg = 0
+    CACHE.perf.state_ref = nil
+    CACHE.perf.occupied_cf = {}
+    CACHE.perf.incoming_by_target = {}
+    CACHE.perf.active_counts = {}
+    CACHE.perf.campfire_target_counts = {}
+    CACHE.perf.gvid_to_level = {}
+
+    CACHE.smarts.tg = 0
+    CACHE.smarts.smarts_ref = nil
+    CACHE.smarts.centers = {}
+    CACHE.smarts.smarts_by_level = {}
+end
+
+function invalidate_cache(kind)
+    if not kind then
+        reset_cache()
+        return
+    end
+    if kind == "perf" then
+        CACHE.perf.tg = 0
+        CACHE.perf.state_ref = nil
+        CACHE.perf.occupied_cf = {}
+        CACHE.perf.incoming_by_target = {}
+        CACHE.perf.active_counts = {}
+        CACHE.perf.campfire_target_counts = {}
+        CACHE.perf.gvid_to_level = {}
+        return
+    end
+    if kind == "smarts" then
+        CACHE.smarts.tg = 0
+        CACHE.smarts.smarts_ref = nil
+        CACHE.smarts.centers = {}
+        CACHE.smarts.smarts_by_level = {}
+        return
+    end
+end
+
 function update_smart_data(name, data)
     STATE.smarts[name] = data
+    invalidate_cache("smarts")
 end
 
 function update_anomaly_zone(level_name, data)
@@ -73,6 +144,7 @@ function register_squad(id, data)
     for k,v in pairs(data) do
         STATE.squads[id][k] = v
     end
+    invalidate_cache("perf")
 end
 
 function unregister_squad(id)
@@ -81,9 +153,104 @@ function unregister_squad(id)
         -- Try to get name if possible, or just ID
         siski_logger.log_info("MEMORY", "Unregistering Dead Squad [%s] (Freed Campfire/Locks)", id)
         STATE.squads[id] = nil
+        invalidate_cache("perf")
         -- Also clear any item claims? Maybe safer to leave claims separate or clear strictly.
         -- For now, squad data removal is enough to free campfires.
     end
+end
+
+function get_perf_cache(ttl_ms)
+    local ttl = tonumber(ttl_ms) or 1200
+    local now = time_global()
+    if CACHE.perf.state_ref ~= STATE or (now - (CACHE.perf.tg or 0)) > ttl then
+        CACHE.perf.tg = now
+        CACHE.perf.state_ref = STATE
+        CACHE.perf.occupied_cf = {}
+        CACHE.perf.incoming_by_target = {}
+        CACHE.perf.active_counts = {}
+        CACHE.perf.campfire_target_counts = {}
+        CACHE.perf.gvid_to_level = {}
+
+        for sid, s_data in pairs(STATE.squads or {}) do
+            local current = s_data.current_task
+            if current and current.params then
+                local cf_id = current.params.cf_id
+                if cf_id then
+                    CACHE.perf.occupied_cf[cf_id] = (CACHE.perf.occupied_cf[cf_id] or 0) + 1
+                end
+            end
+
+            local tgt = s_data.assigned_target
+            local smart_id = s_data.smart_id
+            if tgt and smart_id ~= nil then
+                local m = CACHE.perf.incoming_by_target[tgt]
+                if not m then
+                    m = {}
+                    CACHE.perf.incoming_by_target[tgt] = m
+                end
+                m[sid] = smart_id
+            end
+        end
+    end
+
+    if map_too_big(CACHE.perf.active_counts, 2000) then
+        CACHE.perf.active_counts = {}
+    end
+    if map_too_big(CACHE.perf.campfire_target_counts, 2000) then
+        CACHE.perf.campfire_target_counts = {}
+    end
+    if map_too_big(CACHE.perf.gvid_to_level, 2000) then
+        CACHE.perf.gvid_to_level = {}
+    end
+
+    return CACHE.perf
+end
+
+function get_smarts_cache(ttl_ms)
+    local ttl = tonumber(ttl_ms) or 60000
+    local now = time_global()
+    local smarts = STATE.smarts
+    if CACHE.smarts.smarts_ref ~= smarts or (now - (CACHE.smarts.tg or 0)) > ttl then
+        CACHE.smarts.tg = now
+        CACHE.smarts.smarts_ref = smarts
+        CACHE.smarts.centers = {}
+        CACHE.smarts.smarts_by_level = {}
+
+        local counts = {}
+        for _, data in pairs(smarts or {}) do
+            local lvl = data.level
+            local pos = data.position
+            if lvl and pos then
+                local c = CACHE.smarts.centers[lvl]
+                if not c then
+                    c = vector():set(0, 0, 0)
+                    CACHE.smarts.centers[lvl] = c
+                    counts[lvl] = 0
+                end
+                c.x = c.x + pos.x
+                c.y = c.y + pos.y
+                c.z = c.z + pos.z
+                counts[lvl] = counts[lvl] + 1
+
+                local list = CACHE.smarts.smarts_by_level[lvl]
+                if not list then
+                    list = {}
+                    CACHE.smarts.smarts_by_level[lvl] = list
+                end
+                list[#list + 1] = data
+            end
+        end
+
+        for lvl, c in pairs(counts) do
+            if c > 0 then
+                local v = CACHE.smarts.centers[lvl]
+                v.x = v.x / c
+                v.y = v.y / c
+                v.z = v.z / c
+            end
+        end
+    end
+    return CACHE.smarts
 end
 
 -- ==============================================================================================
@@ -237,6 +404,7 @@ function save(m_data)
     -- Clear stale item claims before saving
     STATE.item_claims = {}
     STATE.global_loot = {}
+    reset_cache()
     -- Serialize STATE to marshal table
     m_data.siski_state = STATE
 end
@@ -258,6 +426,7 @@ function load(m_data)
         STATE.campfires = {}
         STATE.level_changers = {}
         STATE.smarts = {} -- Smarts also have position data
+        reset_cache()
         
         siski_logger.log_info("MEMORY", "Loaded State (Squads: %d). Caches cleared for rescan.", table.size and table.size(STATE.squads) or 0)
     else
@@ -269,8 +438,15 @@ function dump_memory_snapshot()
     if not siski_logger then return end
     
     -- Check Debug Setting
-    if ui_mcm and ui_mcm.get then
-        if not ui_mcm.get("siski/debug_enabled") then return end
+    do
+        local enabled = nil
+        if siski_settings and siski_settings.get_config then
+            enabled = siski_settings.get_config("debug_enabled", false)
+        elseif ui_mcm and ui_mcm.get then
+            local ok, v = pcall(function() return ui_mcm.get("siski/debug_enabled") end)
+            if ok then enabled = v end
+        end
+        if enabled == false then return end
     end
     
     siski_logger.log_info("MEMORY", "=== GENERATING DASHBOARD ===")

@@ -9,6 +9,10 @@ local logger = siski_logger
 local last_debug_update = 0
 local UPDATE_INTERVAL_MS = 1000 -- 1 second update
 
+local last_desc_by_id = {}
+local last_hud_check_tg = 0
+local cached_hud_enabled = false
+
 function on_game_start()
     if not (siski_core and siski_core.can_run and siski_core.can_run("debug")) then return end
     logger.siski_log("DEBUG_HUD", "INFO", "Debug HUD Initialized (Icon: ui_inGame2_PD_Obitatel_pustoshi)")
@@ -18,7 +22,12 @@ end
 local hud_cleared = false
 function update()
     if not (siski_core and siski_core.can_run and siski_core.can_run("debug")) then return end
-    if not settings.is_debug_hud_enabled() then
+    local tg = time_global()
+    if tg > last_hud_check_tg + 300 then
+        last_hud_check_tg = tg
+        cached_hud_enabled = settings.is_debug_hud_enabled()
+    end
+    if not cached_hud_enabled then
         if not hud_cleared then
             clear()
             hud_cleared = true
@@ -26,8 +35,6 @@ function update()
         return
     end
     hud_cleared = false
-
-    local tg = time_global()
     if tg < last_debug_update + UPDATE_INTERVAL_MS then
         update_crosshair_hud() -- Crosshair HUD needs more frequent updates than map
         return
@@ -36,15 +43,21 @@ function update()
 
     local brains = siski_brain.get_all_brains()
     if not brains then return end
+    local state = siski_memory and siski_memory.get_state and siski_memory.get_state() or nil
+    local current_level = level and level.name and level.name() or nil
 
     for id, brain in pairs(brains) do
-        render_brain_info(brain)
+        local data = state and state.squads and state.squads[id] or nil
+        if not (current_level and data and data.level and data.level ~= current_level) then
+            render_brain_info(brain, data)
+        end
     end
 
     update_crosshair_hud()
 end
 
 local last_crosshair_update = 0
+local try_register_next_tg_by_id = {}
 function update_crosshair_hud()
     local tg = time_global()
     if tg < last_crosshair_update + 200 then return end
@@ -69,6 +82,11 @@ function update_crosshair_hud()
     local brain = siski_brain.get_brain(squad.id)
     if not brain then
         -- LAZY REGISTRATION: If brain missing (due to 10s throttle), try to register immediately
+        local next_tg = try_register_next_tg_by_id[squad.id] or 0
+        if tg < next_tg then
+            return
+        end
+        try_register_next_tg_by_id[squad.id] = tg + 5000
         if siski_brain.try_register_brain(squad.id, squad) then
             brain = siski_brain.get_brain(squad.id)
         else
@@ -80,9 +98,6 @@ function update_crosshair_hud()
 end
 
 function render_hud_panel(brain)
-    local squad = alife_object(brain.id)
-    if not squad then return end
-
     -- READ FROM MEMORY (same as dashboard) instead of brain object
     local state = siski_memory.get_state()
     local data = state.squads and state.squads[brain.id]
@@ -103,10 +118,15 @@ function render_hud_panel(brain)
     local dist_to_target = "N/A"
 
     if data.current_task and data.current_task.params and data.current_task.params.pos then
-        local p1 = squad.position
-        local p2 = data.current_task.params.pos
-        dist_to_target = string.format("%.1f m", p1:distance_to(p2))
+        dist_to_target = "-"
     end
+
+    local trade_urge = data.trade_urge or brain.trade_urge or 0
+    local pending_trade = (state.pending_trades and state.pending_trades[brain.id]) and "YES" or "NO"
+    local move_stuck_ms = (data.current_task and data.current_task.params and data.current_task.params.move_progress_stuck_ms) or 0
+    local m2p_stage = data.move_to_pos_stage or 0
+    local m2p_stuck_ms = data.move_to_pos_stuck_ms or 0
+    local retarget_ago = data.last_retarget_tg and string.format("%.0fs", (time_global() - data.last_retarget_tg) / 1000) or "N/A"
 
     local info = string.format(
         "--- SISKI DEBUG ---\\n" ..
@@ -115,15 +135,23 @@ function render_hud_panel(brain)
         "STATE: %s\\n" ..
         "TASK: %s\\n" ..
         "DIST: %s\\n" ..
-        "LOOT: %.1f kg\\n" ..
-        "MONEY: %d RU",
-        squad:name(),
+        "TRADE_URGE: %.2f\\n" ..
+        "PENDING_TRADE: %s\\n" ..
+        "MOVE_STUCK_MS: %d\\n" ..
+        "M2P_STAGE: %s\\n" ..
+        "M2P_STUCK_MS: %s\\n" ..
+        "RETARGET_AGO: %s",
+        tostring(brain.id),
         data.squad_class or "Standard",
         data.current_state or data.state or "IDLE",
         task_info,
         dist_to_target,
-        data.loot_weight or 0,
-        data.money or 0
+        trade_urge,
+        pending_trade,
+        move_stuck_ms,
+        tostring(m2p_stage),
+        tostring(m2p_stuck_ms),
+        retarget_ago
     )
 
     -- Display as screen message for now (simplest non-broken HUD)
@@ -140,30 +168,32 @@ function render_hud_panel(brain)
     end
 end
 
-function render_brain_info(brain)
-    -- CRITICAL SAFETY CHECK
-    -- Brain might be stale if cleanup hasn't run yet.
-    -- Always re-fetch the server object to ensure it exists.
-    local squad = alife_object(brain.id)
-    if not squad then return end
-
-    -- Ensure squad has a map spot
-    -- In Anomaly, simulation squads usually have spots. We just want to update the hint.
-    -- Or we can add a custom dedicated spot "siski_debug_spot" if we defined it in XML.
-    -- For now, let's try to update the existing spot's hint if possible, or add a generic one.
-
-    -- READ FROM MEMORY (same as dashboard) instead of brain object
+function render_brain_info(brain, data)
     local state = siski_memory.get_state()
-    local data = state.squads and state.squads[brain.id] or brain
+    data = data or (state.squads and state.squads[brain.id]) or brain
+    local squad_id = brain and brain.id or nil
+    if not squad_id then return end
+    if not (state.squads and state.squads[squad_id]) then
+        return
+    end
 
-    local desc = string.format("Name: %s\\nClass: %s\\nState: %s\\nTask: %s\\nTarget: %s\\nLoot: %.1f kg",
-        squad:name(),
+    local desc = string.format("Name: %s\\nClass: %s\\nState: %s\\nTask: %s\\nTarget: %s\\nTradeUrge: %.2f\\nPendingTrade: %s\\nMoveStuckMs: %s\\nM2PStage: %s\\nM2PStuckMs: %s",
+        tostring(squad_id),
         data.squad_class or "Standard",
         data.current_state or data.state or "IDLE",
         data.current_task and data.current_task.type or "NONE",
         data.current_task and tostring(data.current_task.target) or "N/A",
-        data.loot_weight or 0
+        (data.trade_urge or brain.trade_urge or 0),
+        (state.pending_trades and state.pending_trades[brain.id]) and "YES" or "NO",
+        tostring((data.current_task and data.current_task.params and data.current_task.params.move_progress_stuck_ms) or 0),
+        tostring(data.move_to_pos_stage or 0),
+        tostring(data.move_to_pos_stuck_ms or 0)
     )
+
+    if last_desc_by_id[brain.id] == desc then
+        return
+    end
+    last_desc_by_id[brain.id] = desc
 
     -- Check if we can set hint dynamically on existing spot
     -- level.map_change_spot_hint(id, type, hint)
@@ -171,11 +201,11 @@ function render_brain_info(brain)
     -- Let's assume standard spot type 'alife_presentation_squad_neutral' etc is hard to guess.
     -- So we stick a 'blue_location' on top for debug.
 
-    if level.map_has_object_spot(squad.id, "blue_location") == 0 then
-        level.map_add_object_spot(squad.id, "blue_location", "SISKI BRAIN")
+    if level.map_has_object_spot(squad_id, "blue_location") == 0 then
+        level.map_add_object_spot(squad_id, "blue_location", "SISKI BRAIN")
     end
 
-    level.map_change_spot_hint(squad.id, "blue_location", desc)
+    level.map_change_spot_hint(squad_id, "blue_location", desc)
 end
 
 function clear()
@@ -187,4 +217,5 @@ function clear()
             level.map_remove_object_spot(id, "blue_location")
         end
     end
+    last_desc_by_id = {}
 end

@@ -208,6 +208,22 @@
         <text>Trade Duration (sec)</text>
     </string>
 
+    <string id="ui_mcm_siski_trade_safe_radius">
+        <text>Trade Safe Radius (m)</text>
+    </string>
+    <string id="ui_mcm_siski_trade_valuable_cost">
+        <text>Valuable Item Cost Threshold (RU)</text>
+    </string>
+    <string id="ui_mcm_siski_trade_urge_gain">
+        <text>Trade Urge Gain</text>
+    </string>
+    <string id="ui_mcm_siski_trade_priority_max">
+        <text>Trade Task Max Priority</text>
+    </string>
+    <string id="ui_mcm_siski_trade_sell_mult">
+        <text>Sell Price Multiplier</text>
+    </string>
+
     <string id="ui_mcm_siski_af_header">
         <text>Artifact Hunters</text>
     </string>
@@ -227,5 +243,59 @@
     </string>
     <string id="ui_mcm_siski_squad_size_max">
         <text>Max Squad Size</text>
+    </string>
+
+    <string id="ui_siski_trade_done_report">
+        <text>Sold loot. Items: %d, value: %d.</text>
+    </string>
+
+    <string id="ui_siski_trade_recipient_generic">
+        <text>the trader</text>
+    </string>
+
+    <string id="ui_siski_trade_report_1">
+        <text>Sold some things to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_2">
+        <text>Stopped by {place}: made a deal with {recipient}.</text>
+    </string>
+    <string id="ui_siski_trade_report_3">
+        <text>Cleared some space: traded with {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_4">
+        <text>Quiet trade with {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_5">
+        <text>Got rid of extra gear to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_6">
+        <text>Lightened the load at {place}. {recipient} helped.</text>
+    </string>
+    <string id="ui_siski_trade_report_7">
+        <text>Traded with {recipient} at {place}. Moving on.</text>
+    </string>
+    <string id="ui_siski_trade_report_8">
+        <text>Offloaded some loot to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_9">
+        <text>Sorted the stash and sold part of it to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_10">
+        <text>Made a quick deal with {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_11">
+        <text>Stopped for supplies and traded with {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_12">
+        <text>Dropped some cargo to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_13">
+        <text>Handed over some trophies to {recipient} at {place}.</text>
+    </string>
+    <string id="ui_siski_trade_report_14">
+        <text>Talked business with {recipient} at {place}. No fuss.</text>
+    </string>
+    <string id="ui_siski_trade_report_15">
+        <text>Quick stop at {place}: {recipient} took the extras.</text>
     </string>
 </string_table>

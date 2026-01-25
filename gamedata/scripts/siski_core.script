@@ -32,6 +32,29 @@ local pending_release_order = {}
 local pending_transfers = {}
 local pending_transfer_order = {}
 
+local function safe_traceback(err)
+    if debug and debug.traceback then
+        return debug.traceback(tostring(err), 2)
+    end
+    return tostring(err)
+end
+
+local function safe_run(tag, fn, ...)
+    local args = { n = select('#', ...), ... }
+    local function thunk()
+        local unpack_fn = (table and table.unpack) or unpack
+        return fn(unpack_fn(args, 1, args.n))
+    end
+    local ok, res = xpcall(thunk, safe_traceback)
+    if not ok then
+        if siski_logger and siski_logger.siski_log then
+            siski_logger.siski_log("CORE", "*", "Unhandled error in %s: %s", tostring(tag), tostring(res))
+        end
+        return nil
+    end
+    return res
+end
+
 local function schedule_safe_ops()
     if safe_ops_scheduled then return end
     safe_ops_scheduled = true
@@ -65,7 +88,10 @@ local function schedule_safe_ops()
                 local src = level.object_by_id(payload.from_id)
                 local dst = level.object_by_id(payload.to_id)
                 if itm and src and dst then
-                    src:transfer_item(itm, dst)
+                    local ok_p, parent = pcall(function() return itm:parent() end)
+                    if ok_p and parent and siski_ef_utils.safe_id(parent) == payload.from_id then
+                        pcall(function() src:transfer_item(itm, dst) end)
+                    end
                 end
                 if siski_memory and siski_memory.clear_item_claim then
                     pcall(function() siski_memory.clear_item_claim(payload.item_id) end)
@@ -158,6 +184,12 @@ function on_game_start()
     RegisterScriptCallback("save_state", save_state)
     RegisterScriptCallback("load_state", load_state)
     RegisterScriptCallback("on_key_press", on_key_press)
+    if siski_inventory and siski_inventory.on_npc_item_take then
+        RegisterScriptCallback("npc_on_item_take", siski_inventory.on_npc_item_take)
+    end
+    if siski_trading and siski_trading.on_npc_net_spawn then
+        RegisterScriptCallback("npc_on_net_spawn", siski_trading.on_npc_net_spawn)
+    end
 
     -- 3.5 Initialize Patches
     if can_run("patches") and siski_patches and siski_patches.on_game_start then
@@ -311,9 +343,15 @@ function on_update()
     end
 
     -- Global Updates (Throttled)
-    if can_run("brain") and siski_brain then siski_brain.update_brains() end
-    if can_run("debug") and siski_debug then siski_debug.update() end
-    if can_run("scanner") and siski_scanner then siski_scanner.update_artifact_scan() end
+    if can_run("brain") and siski_brain and siski_brain.update_brains then
+        safe_run("siski_brain.update_brains", siski_brain.update_brains)
+    end
+    if can_run("debug") and siski_debug and siski_debug.update then
+        safe_run("siski_debug.update", siski_debug.update)
+    end
+    if can_run("scanner") and siski_scanner and siski_scanner.update_artifact_scan then
+        safe_run("siski_scanner.update_artifact_scan", siski_scanner.update_artifact_scan)
+    end
 end
 
 function save_state(m_data)
@@ -333,7 +371,7 @@ function on_squad_death(squad, npc, killer_npc, killer_squad)
         local killer_comm = killer_squad.player_id
 
         if my_comm ~= killer_comm then
-            siski_vendetta.register_feud(squad.id, killer_squad.id)
+            safe_run("siski_vendetta.register_feud", siski_vendetta.register_feud, squad.id, killer_squad.id)
         else
             siski_logger.log_warn("CORE", "Friendly Fire detected between [%s] (%s) and [%s] (%s). Vendetta suppressed.",
                 squad:name(), my_comm, killer_squad:name(), killer_comm)
@@ -343,15 +381,28 @@ end
 
 function on_key_press(key)
     -- DEBUG: MANUAL DUMP
-    local debug_mode = ui_mcm.get("siski/debug_enabled")
-    local bind_key = ui_mcm.get("siski/debug_dump_key") or DIK_keys.DIK_DELETE
+    local debug_mode = false
+    if siski_settings and siski_settings.get_config then
+        debug_mode = siski_settings.get_config("debug_enabled", false) and true or false
+    elseif ui_mcm and ui_mcm.get then
+        local ok, v = pcall(function() return ui_mcm.get("siski/debug_enabled") end)
+        debug_mode = ok and v == true or false
+    end
+
+    local bind_key = DIK_keys.DIK_DELETE
+    if siski_settings and siski_settings.get_config then
+        bind_key = siski_settings.get_config("debug_dump_key", DIK_keys.DIK_DELETE) or DIK_keys.DIK_DELETE
+    elseif ui_mcm and ui_mcm.get then
+        local ok, v = pcall(function() return ui_mcm.get("siski/debug_dump_key") end)
+        bind_key = (ok and v) or DIK_keys.DIK_DELETE
+    end
 
     -- siski_logger.log_info("CORE", "Key Pressed: %s | Bind: %s | Debug: %s", key, bind_key, tostring(debug_mode))
 
     if key == bind_key then
         if debug_mode then
-            siski_memory.dump_memory_snapshot()
-            siski_logger.send_news(db.actor, "Memory Dumped to File", "ui_inGame2_D_Sisshik")
+            safe_run("siski_memory.dump_memory_snapshot", siski_memory.dump_memory_snapshot)
+            safe_run("siski_logger.send_news", siski_logger.send_news, db.actor, "Memory Dumped to File", "ui_inGame2_D_Sisshik")
         else
             siski_logger.log_warn("CORE", "Dump Key Pressed, but Debug Mode is OFF in MCM!")
         end

@@ -498,13 +498,18 @@ function get_smart_by_name(smart_name)
     if not smart_name then return nil end
     local state = siski_memory.get_state()
     local smarts = state and state.smarts or {}
-    for name, data in pairs(smarts) do
-        if name == smart_name then
-            local obj = alife():object(data.id)
-            return obj
-        end
+    local data = smarts[smart_name]
+    if data and data.id then
+        return alife():object(data.id)
     end
     return nil
+end
+
+function get_smart_data_by_name(smart_name)
+    if not smart_name then return nil end
+    local state = siski_memory.get_state()
+    local smarts = state and state.smarts or {}
+    return smarts[smart_name]
 end
 
 ------------------------------------------------------------------------------------------------

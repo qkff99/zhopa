@@ -1,0 +1,118 @@
+siski_notify = siski_notify or {}
+
+local last_by_key = {}
+
+local function now_ms()
+    return time_global()
+end
+
+local function can_emit(key, cooldown_ms)
+    if not key then return true end
+    local cd = tonumber(cooldown_ms) or 0
+    if cd <= 0 then return true end
+    local now = now_ms()
+    local last = last_by_key[key] or 0
+    if (now - last) < cd then
+        return false
+    end
+    last_by_key[key] = now
+    return true
+end
+
+local function safe_icon_from_npc(npc)
+    if not npc then return nil end
+    local ok, ico = pcall(function() return npc:character_icon() end)
+    if ok and ico and ico ~= "" then
+        return ico
+    end
+    return nil
+end
+
+local function safe_name_from_npc(npc)
+    if not npc then return nil end
+    local ok, name = pcall(function() return npc:character_name() end)
+    if ok and name and name ~= "" then
+        return name
+    end
+    ok, name = pcall(function() return npc:name() end)
+    if ok and name and name ~= "" then
+        return name
+    end
+    return nil
+end
+
+local function default_tip_caption()
+    if game and game.translate_string then
+        return game.translate_string("st_tip")
+    end
+    return "PDA"
+end
+
+function siski_notify.game_news(caption, text, texture, delay_ms, show_ms)
+    if not (db and db.actor and db.actor.alive and db.actor:alive()) then return false end
+    caption = caption or default_tip_caption()
+    text = text or ""
+    texture = texture or "ui_iconsTotal_grouping"
+    delay_ms = tonumber(delay_ms) or 0
+    show_ms = tonumber(show_ms) or 7000
+    return pcall(function()
+        db.actor:give_game_news(caption, text, texture, delay_ms, show_ms)
+    end) and true or false
+end
+
+function siski_notify.talk_message(caption, text, icon, style)
+    if not (db and db.actor and db.actor.alive and db.actor:alive()) then return false end
+    if not (db.actor.is_talking and db.actor:is_talking()) then
+        return false
+    end
+    caption = caption or default_tip_caption()
+    text = text or ""
+    icon = icon or "ui_iconsTotal_grouping"
+    style = style or "iconed_answer_item"
+    return pcall(function()
+        db.actor:give_talk_message2(caption, text, icon, style)
+    end) and true or false
+end
+
+function siski_notify.npc_report(npc, msg, opts)
+    if not (db and db.actor and db.actor.alive and db.actor:alive()) then return false end
+    opts = opts or {}
+    local cooldown_ms = opts.cooldown_ms or 5000
+    local key = opts.key
+    if not key and npc then
+        local ok, id = pcall(function() return npc:id() end)
+        if ok and id then
+            key = "npc:" .. tostring(id) .. ":" .. tostring(msg)
+        end
+    end
+    if not can_emit(key, cooldown_ms) then
+        return false
+    end
+
+    local sender_name = safe_name_from_npc(npc)
+    local caption = opts.caption or sender_name or default_tip_caption()
+
+    local texture = opts.texture or safe_icon_from_npc(npc) or "ui_iconsTotal_grouping"
+    local delay_ms = opts.delay_ms or 0
+    local show_ms = opts.show_ms or 7000
+    local text = "%c[default]" .. tostring(msg or "")
+
+    if _G.xr_sound and _G.xr_sound.set_sound_play then
+        pcall(function() _G.xr_sound.set_sound_play(AC_ID, opts.sound or "pda_tips") end)
+    end
+
+    if db.actor.is_talking and db.actor:is_talking() then
+        return siski_notify.talk_message(caption, tostring(msg or ""), texture, "iconed_answer_item")
+    end
+    return siski_notify.game_news(caption, text, texture, delay_ms, show_ms)
+end
+
+function siski_notify.squad_report(squad, npc, msg, opts)
+    opts = opts or {}
+    local squad_id = squad and (type(squad) == "number" and squad or pcall(function() return squad:id() end) and squad:id()) or nil
+    if squad_id then
+        opts.key = opts.key or ("squad:" .. tostring(squad_id) .. ":" .. tostring(opts.tag or msg))
+    end
+    return siski_notify.npc_report(npc, msg, opts)
+end
+

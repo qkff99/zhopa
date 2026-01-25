@@ -5,6 +5,10 @@
 
 local logger = siski_logger
 local settings = siski_settings
+local TRADE_PRIORITY_MAX = 10
+local TRADE_RETRY_MS = 15000
+local TRADE_URGE_GAIN_BASE = 0.25
+local TRADE_VALUABLE_COST = 5000
 
 -- ==============================================================================================
 -- WEIGHT TRACKING
@@ -42,21 +46,28 @@ local function is_equipped(npc, item)
     if not npc or not item then return false end
     
     -- Check if item is active weapon
-    local active_item = npc:active_item()
-    if active_item and siski_ef_utils.safe_id(active_item) == siski_ef_utils.safe_id(item) then
+    local ok_ai, active_item = pcall(function() return npc:active_item() end)
+    if ok_ai and active_item and siski_ef_utils.safe_id(active_item) == siski_ef_utils.safe_id(item) then
         return true
     end
     
     -- Check if item is equipped outfit
-    local outfit = npc:item_in_slot(7) -- Outfit slot
-    if outfit and siski_ef_utils.safe_id(outfit) == siski_ef_utils.safe_id(item) then
+    local ok_o, outfit = pcall(function() return npc:item_in_slot(7) end)
+    if ok_o and outfit and siski_ef_utils.safe_id(outfit) == siski_ef_utils.safe_id(item) then
         return true
     end
     
     -- Check if item is equipped helmet
-    local helmet = npc:item_in_slot(12) -- Helmet slot
-    if helmet and siski_ef_utils.safe_id(helmet) == siski_ef_utils.safe_id(item) then
+    local ok_h, helmet = pcall(function() return npc:item_in_slot(12) end)
+    if ok_h and helmet and siski_ef_utils.safe_id(helmet) == siski_ef_utils.safe_id(item) then
         return true
+    end
+
+    for slot = 1, 6 do
+        local ok_s, slot_item = pcall(function() return npc:item_in_slot(slot) end)
+        if ok_s and slot_item and siski_ef_utils.safe_id(slot_item) == siski_ef_utils.safe_id(item) then
+            return true
+        end
     end
     
     return false
@@ -83,11 +94,63 @@ function get_sellable_items(npc)
     if not npc then return {} end
     
     local items = {}
+    local keep_ids = {}
+    local first_weapon = nil
+
+    do
+        local ok_ai, active_item = pcall(function() return npc:active_item() end)
+        if ok_ai and active_item then
+            local aid = siski_ef_utils.safe_id(active_item)
+            if aid then
+                keep_ids[aid] = true
+            end
+        end
+        for _, slot in ipairs({ 1, 2, 3, 4, 5, 6, 7, 12 }) do
+            local ok_s, slot_item = pcall(function() return npc:item_in_slot(slot) end)
+            if ok_s and slot_item then
+                local sid = siski_ef_utils.safe_id(slot_item)
+                if sid then
+                    keep_ids[sid] = true
+                end
+            end
+        end
+    end
+
+    npc:iterate_inventory(function(owner, item)
+        if not item then return end
+        local section = item:section()
+        if section and string.find(section, "wpn_") then
+            if not first_weapon then
+                first_weapon = item
+            end
+        end
+    end)
+
+    local weapon_kept = false
+    npc:iterate_inventory(function(owner, item)
+        if weapon_kept or (not item) then return end
+        local section = item:section()
+        if section and string.find(section, "wpn_") then
+            local iid = siski_ef_utils.safe_id(item)
+            if iid and keep_ids[iid] then
+                weapon_kept = true
+            end
+        end
+    end)
+
+    if first_weapon and not weapon_kept then
+        local wid = siski_ef_utils.safe_id(first_weapon)
+        if wid then
+            keep_ids[wid] = true
+        end
+    end
     
     npc:iterate_inventory(function(owner, item)
         if not item then return end
         
         -- Skip equipped items
+        local iid = siski_ef_utils.safe_id(item)
+        if iid and keep_ids[iid] then return end
         if is_equipped(npc, item) then return end
         
         -- Skip essential items
@@ -106,6 +169,35 @@ function get_sellable_items(npc)
     end)
     
     return items
+end
+
+local function get_squad_sellable_summary(squad)
+    if not squad then
+        return { count = 0, weight = 0, value = 0 }
+    end
+
+    local total_count = 0
+    local total_weight = 0
+    local total_value = 0
+
+    for k in squad:squad_members() do
+        local npc = db.storage[k.id] and db.storage[k.id].object
+        if siski_ef_utils.is_alive(npc) then
+            local sellable = get_sellable_items(npc)
+            for _, item in ipairs(sellable) do
+                total_count = total_count + 1
+                local ok_w, w = pcall(function() return item:weight() end)
+                if ok_w and w then
+                    total_weight = total_weight + w
+                end
+                local cost = siski_ef_utils.safe_cost(item) or 0
+                local cond = siski_ef_utils.safe_condition(item) or 1.0
+                total_value = total_value + (cost * (cond or 1.0))
+            end
+        end
+    end
+
+    return { count = total_count, weight = total_weight, value = total_value }
 end
 
 -- ==============================================================================================
@@ -141,7 +233,38 @@ function check_and_add_trade_task(brain)
     -- MODULE SHIELD: Skip for classed squads
     if brain.squad_class then return false end
     
-    if not should_trade(brain.squad) then
+    local tg = time_global()
+    if tg < (brain.trade_retry_tg or 0) then
+        return false
+    end
+
+    local act = settings.get_activities_settings()
+    local urge_gain = (act and act.trade_urge_gain) or TRADE_URGE_GAIN_BASE
+    local prio_max = (act and act.trade_priority_max) or TRADE_PRIORITY_MAX
+
+    local total_weight = get_total_weight(brain.squad)
+    local threshold = get_weight_threshold()
+    local sellable = get_squad_sellable_summary(brain.squad)
+
+    brain.trade_urge = brain.trade_urge or 0.0
+
+    if sellable.count <= 0 then
+        brain.trade_urge = 0.0
+        brain.trade_retry_tg = tg + (TRADE_RETRY_MS * 4)
+        return false
+    end
+
+    if threshold > 0 and sellable.weight >= threshold then
+        brain.trade_urge = 1.0
+    else
+        local ratio = (threshold > 0) and (sellable.weight / threshold) or 0
+        if ratio > 0 then
+            local gain = math.min(1.0, ratio) * urge_gain
+            brain.trade_urge = math.min(1.0, brain.trade_urge + gain)
+        end
+    end
+
+    if brain.trade_urge < 1.0 then
         return false
     end
     
@@ -150,18 +273,93 @@ function check_and_add_trade_task(brain)
     if not trading then return false end
     
     local trader_smart = trading.find_nearest_trader_smart(brain.squad, brain.faction)
-    if not trader_smart then return false end
+    if not trader_smart then
+        brain.trade_retry_tg = tg + TRADE_RETRY_MS
+        return false
+    end
     
     -- Add trade task
-    brain:add_task("TRADE", trader_smart:name(), 2, {
-        reason = "inventory_full",
-        weight = get_total_weight(brain.squad)
+    brain.trade_urge = 0.0
+    brain.last_trader_smart_id = trader_smart.id
+    brain.last_trader_smart_name = trader_smart:name()
+    brain:add_task("TRADE", trader_smart:name(), prio_max, {
+        reason = "trade_urge_max",
+        weight = total_weight,
+        sellable_weight = sellable.weight,
+        sellable_count = sellable.count
     })
     
-    logger.siski_log("INVENTORY", "INFO", "Squad [%s] needs to trade (%.1f kg)", 
-        brain.squad:name(), get_total_weight(brain.squad))
+    logger.siski_log("INVENTORY", "INFO", "Squad [%s] needs to trade (sellable: %d, %.1f kg)", brain.squad:name(), sellable.count, sellable.weight)
     
     return true
+end
+
+local function get_npc_squad(npc)
+    local id = siski_ef_utils.safe_id(npc)
+    if not id then return nil end
+
+    local se_obj = alife_object(id)
+    if se_obj and se_obj.group_id and se_obj.group_id ~= 65535 then
+        return alife_object(se_obj.group_id)
+    end
+
+    if _G.get_object_squad then
+        local ok, res = pcall(function() return _G.get_object_squad(npc) end)
+        if ok then return res end
+    end
+
+    return nil
+end
+
+function on_npc_item_take(npc, item)
+    if not (npc and item) then return end
+
+    local cost = siski_ef_utils.safe_cost(item) or 0
+    if cost <= 0 then return end
+    local cond = siski_ef_utils.safe_condition(item) or 1.0
+    local value = cost * (cond or 1.0)
+    local act = settings.get_activities_settings()
+    local threshold = (act and act.trade_valuable_cost) or TRADE_VALUABLE_COST
+    if value < threshold then return end
+
+    local squad = get_npc_squad(npc)
+    if not squad then return end
+    if not siski_brain then return end
+
+    local brain = siski_brain.get_brain(squad.id)
+    if not brain and siski_brain.try_register_brain then
+        pcall(function() siski_brain.try_register_brain(squad.id, squad) end)
+        brain = siski_brain.get_brain(squad.id)
+    end
+    if not brain then return end
+
+    if brain.current_task and brain.current_task.type == "TRADE" then return end
+    if brain.queue then
+        for _, t in ipairs(brain.queue) do
+            if t and t.type == "TRADE" then
+                return
+            end
+        end
+    end
+
+    brain.trade_retry_tg = 0
+
+    local trading = siski_trading
+    local trader_smart = trading and trading.find_nearest_trader_smart(squad, brain.faction)
+    if not trader_smart then
+        brain.trade_urge = 1.0
+        return
+    end
+
+    brain.trade_urge = 0.0
+    local prio_max = (act and act.trade_priority_max) or TRADE_PRIORITY_MAX
+    brain.last_trader_smart_id = trader_smart.id
+    brain.last_trader_smart_name = trader_smart:name()
+    brain:add_task("TRADE", trader_smart:name(), prio_max, {
+        reason = "valuable_item",
+        item = siski_ef_utils.safe_section(item),
+        value = value
+    })
 end
 
 -- ==============================================================================================

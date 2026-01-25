@@ -104,6 +104,49 @@ local function is_squad_on_actor_level(sq)
     return sq_lvl == level.name()
 end
 
+local function resolve_smart_id_by_name(smart_name)
+    if not smart_name then return nil end
+    if SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[smart_name] then
+        return SIMBOARD.smarts_by_names[smart_name].id
+    end
+    if SIMBOARD and SIMBOARD.get_smart_by_name then
+        local ok, sm = pcall(function() return SIMBOARD:get_smart_by_name(smart_name) end)
+        if ok and sm and sm.id then
+            return sm.id
+        end
+    end
+    local data = intel and intel.get_smart_data_by_name and intel.get_smart_data_by_name(smart_name)
+    return data and data.id or nil
+end
+
+local function shallow_copy(t)
+    local res = {}
+    if t then
+        for k, v in pairs(t) do
+            res[k] = v
+        end
+    end
+    return res
+end
+
+local function get_nearest_level_changer(level_name, pos)
+    if not (level_name and pos and intel and intel.get_level_changers) then return nil end
+    local list = intel.get_level_changers(level_name)
+    if not list then return nil end
+    local best = nil
+    local best_dist = math.huge
+    for _, lc in ipairs(list) do
+        if lc and lc.position and pos.distance_to then
+            local d = pos:distance_to(lc.position)
+            if d < best_dist then
+                best_dist = d
+                best = lc
+            end
+        end
+    end
+    return best
+end
+
 -- [CRASH PREVENTION] Safely force NPC out of dangerous schemes (Smart Cover, Kamp, etc.)
 -- [CRASH PREVENTION] Safely force NPC out of dangerous schemes (Smart Cover, Kamp, etc.)
 local function safely_reset_npc_logic(npc)
@@ -116,6 +159,8 @@ local function safely_reset_npc_logic(npc)
     pcall(function()
         npc:set_movement_type(0)    -- move_type_stand
         npc:set_detail_path_type(0) -- detail_path_type_smooth
+        npc:set_desired_position()
+        npc:set_desired_direction()
     end)
 
     -- 1. ENGINE: Explicitly disable smart cover usage
@@ -213,8 +258,11 @@ function SquadBrain:__init(squad, restore_data)
         self.current_task = restore_data.current_task
         self.state = restore_data.current_state or restore_data.state or "IDLE" -- Support both field names
         self.last_update = restore_data.last_update or 0
-        self.loot_weight = restore_data.loot_weight or 0.0
-        self.money = restore_data.money or 0
+        self.trade_urge = restore_data.trade_urge or 0.0
+        self.trade_retry_tg = restore_data.trade_retry_tg or 0
+        self.last_trader_smart_id = restore_data.last_trader_smart_id
+        self.last_trader_smart_name = restore_data.last_trader_smart_name
+        self.last_trade_game_time = restore_data.last_trade_game_time
         self.squad_class = restore_data.squad_class
         self.spawned_by_siski = restore_data.spawned_by_siski == true
         -- Cooldown tracking
@@ -233,8 +281,11 @@ function SquadBrain:__init(squad, restore_data)
         self.current_task = nil
         self.state = "IDLE"
         self.last_update = 0
-        self.loot_weight = 0.0
-        self.money = 0
+        self.trade_urge = 0.0
+        self.trade_retry_tg = 0
+        self.last_trader_smart_id = nil
+        self.last_trader_smart_name = nil
+        self.last_trade_game_time = nil
         self.is_responding_to_sos = false
         self.last_action_time = game.get_game_time()
 
@@ -534,17 +585,23 @@ function SquadBrain:update()
             self:log("DEBUG", "TRACE: Squad [%s] COMPLETED task [%s]", self.squad:name(), self.current_task.type)
             -- Special Completion Logic
             if self.current_task.type == "TRADE" then
-                -- Try Real Trading first (for AF Hunters etc)
-                local traded_value = 0
-                if trading and self.squad.smart_id then
-                    local smart = alife_object(self.squad.smart_id)
-                    traded_value = trading.perform_trade(self.squad, smart)
+                local params = self.current_task.params or {}
+                if not params.trade_vanilla then
+                    if not params.trade_meet_done then
+                        if self.squad.online then
+                            if trading and self.squad.smart_id then
+                                local smart = alife_object(self.squad.smart_id)
+                                trading.perform_trade(self.squad, smart)
+                            end
+                        else
+                            local state = siski_memory and siski_memory.get_state and siski_memory.get_state()
+                            if state and state.pending_trades then
+                                state.pending_trades[self.id] = { tg = time_global(), reason = params.reason }
+                            end
+                        end
+                    end
                 end
-
-                -- Fallback to Activities (Virtual Eco) if no real items sold but task checks out
-                if traded_value == 0 then
-                    activities.perform_trade(self)
-                end
+                self.last_trade_game_time = game.get_game_time()
             end
 
             -- Track last base/anomaly for cooldown (if STAY task with base_name or anomaly_name)
@@ -569,6 +626,18 @@ function SquadBrain:update()
             -- ON ARRIVAL: Clear engine target to allow jobs (kamp, etc.) to trigger
             self.squad.scripted_target = nil
 
+            if self.squad.online then
+                for k in self.squad:squad_members() do
+                    local npc = db.storage[k.id] and db.storage[k.id].object
+                    if npc then
+                        pcall(function()
+                            npc:set_desired_position()
+                            npc:set_desired_direction()
+                        end)
+                    end
+                end
+            end
+
             -- ON ARRIVAL: Create STAY task to perform smart activity
             local last_task_type = self.current_task.type
             local params = self.current_task.params or {}
@@ -578,6 +647,26 @@ function SquadBrain:update()
             if self.squad_class then
                 self.current_task = nil
                 self.state = "IDLE"
+            elseif last_task_type == "TRADE" then
+                local sold = params.trade_last_items_sold or params.trade_meet_items_sold or 0
+                local trade_time_ms = (settings.get_activities_settings().trade_time_sec or 10) * 1000
+                if self.squad.online then
+                    for k in self.squad:squad_members() do
+                        local npc = db.storage[k.id] and db.storage[k.id].object
+                        if npc then
+                            safely_reset_npc_logic(npc)
+                        end
+                    end
+                end
+                if sold <= 0 then
+                    self.trade_urge = 0.0
+                    self.trade_retry_tg = time_global() + math.max(60000, trade_time_ms)
+                    self.current_task = nil
+                else
+                    self.trade_urge = 0.0
+                    self.trade_retry_tg = time_global() + trade_time_ms
+                    self.current_task = nil
+                end
             elseif (current_smart or params.reason == "CAMPFIRE_WILD" or params.reason == "CAMPFIRE_SMART") and last_task_type ~= "STAY" then
                 -- Check for custom stay_duration from BASE_DEFENSE or similar
                 local custom_stay_duration = params.stay_duration -- in game minutes
@@ -687,9 +776,28 @@ function SquadBrain:sync_to_memory()
     state.squads[self.id].current_task = self.current_task
     state.squads[self.id].current_state = self.state -- Reporter expects 'current_state'
     state.squads[self.id].assigned_target = self.squad.scripted_target
+    state.squads[self.id].smart_id = self.squad.smart_id
+    state.squads[self.id].faction = self.faction
+    do
+        local gvid = self.squad.m_game_vertex_id
+        if self._lvl_name and self._lvl_gvid == gvid then
+            state.squads[self.id].level = self._lvl_name
+        else
+            local ok_gv, gv = pcall(function() return game_graph():vertex(gvid) end)
+            if ok_gv and gv then
+                local lvl_id = gv:level_id()
+                self._lvl_gvid = gvid
+                self._lvl_name = alife():level_name(lvl_id)
+                state.squads[self.id].level = self._lvl_name
+            end
+        end
+    end
     state.squads[self.id].last_update = self.last_update
-    state.squads[self.id].loot_weight = self.loot_weight
-    state.squads[self.id].money = self.money
+    state.squads[self.id].trade_urge = self.trade_urge
+    state.squads[self.id].trade_retry_tg = self.trade_retry_tg
+    state.squads[self.id].last_trader_smart_id = self.last_trader_smart_id
+    state.squads[self.id].last_trader_smart_name = self.last_trader_smart_name
+    state.squads[self.id].last_trade_game_time = self.last_trade_game_time
     state.squads[self.id].squad_class = self.squad_class
     state.squads[self.id].spawned_by_siski = self.spawned_by_siski and true or false
 
@@ -701,6 +809,16 @@ function SquadBrain:sync_to_memory()
     state.squads[self.id].campfire_history = self.campfire_history
     state.squads[self.id].is_responding_to_sos = self.is_responding_to_sos
     state.squads[self.id].last_action_time = self.last_action_time
+    state.squads[self.id].last_retarget_tg = self.last_retarget_tg
+    state.squads[self.id].move_stuck_next_tg = self.move_stuck_next_tg
+
+    if self.move_to_pos_target then
+        state.squads[self.id].move_to_pos_stage = self.move_to_pos_target.degrade_stage or 0
+        state.squads[self.id].move_to_pos_stuck_ms = self.move_to_pos_target.velocity_stuck_timer or 0
+    else
+        state.squads[self.id].move_to_pos_stage = nil
+        state.squads[self.id].move_to_pos_stuck_ms = nil
+    end
 
     -- Extended Data for Reporter
     state.squads[self.id].active_section = self.active_section
@@ -726,16 +844,27 @@ function SquadBrain:think()
 
 
     -- 2. Inventory Check - Need to Trade? (Priority 2)
-    if inventory and inventory.check_and_add_trade_task(self) then
-        return -- Inventory manager added a trade task
+    local tg = time_global()
+    if inventory then
+        if (not self.next_inventory_check_tg) or tg >= self.next_inventory_check_tg then
+            self.next_inventory_check_tg = tg + (self.squad.online and 5000 or 15000)
+            if inventory.check_and_add_trade_task(self) then
+                return
+            end
+        end
     end
 
     -- 2.1 Scanner Check - Loot/Corpses available? (Priority 2+ - Opportunistic)
     -- Moved UP (was Priority 1) to prevent Campfire Patrol from starvation.
     -- If there is loot nearby (30m), grab it before doing strategic moves.
-    if scanner and scanner.check_and_add_tasks(self) then
-        logger.siski_log("BRAIN", "INFO", "Squad [%s] priority winner: SCANNER (LOOT)", self.squad:name())
-        return -- Scanner added loot tasks
+    if scanner then
+        if (not self.next_scanner_check_tg) or tg >= self.next_scanner_check_tg then
+            self.next_scanner_check_tg = tg + (self.squad.online and 2000 or 10000)
+            if scanner.check_and_add_tasks(self) then
+                logger.siski_log("BRAIN", "INFO", "Squad [%s] priority winner: SCANNER (LOOT)", self.squad:name())
+                return
+            end
+        end
     end
 
     -- 2.5 Strategic Base Defense (Priority 2 - High)
@@ -851,6 +980,20 @@ function SquadBrain:execute_task(task)
     end
 
     if task.type == "MOVE" or task.type == "TRADE" or task.type == "KILL" or task.type == "DIRECTOR_ORDER" or task.type == "VENDETTA" then
+        if task.type == "TRADE" and task.params and task.params.trade_wait_start_tg then
+            local commander_id = self.squad:commander_id()
+            local st = commander_id and db.storage[commander_id]
+            local trade_time_ms = task.params.trade_time_ms or ((settings.get_activities_settings().trade_time_sec or 10) * 1000)
+            if task.params.trade_vanilla and st and st.has_items_to_sell == false then
+                return "COMPLETED"
+            end
+            if time_global() - task.params.trade_wait_start_tg >= trade_time_ms then
+                return "COMPLETED"
+            end
+            self.state = "TRADING"
+            return
+        end
+
         -- Check if squad is already en route to a different target
         -- Only set new target if squad has arrived at current destination
         local current_smart = self.squad.smart_id and alife_object(self.squad.smart_id)
@@ -895,29 +1038,66 @@ function SquadBrain:execute_task(task)
             new_target_name = task.target
         end
 
+        local smart_data = intel and intel.get_smart_data_by_name and intel.get_smart_data_by_name(new_target_name)
+        if smart_data and smart_data.level and self.squad and self.squad.position and self.squad.m_game_vertex_id then
+            local gv = game_graph():vertex(self.squad.m_game_vertex_id)
+            local cur_level = gv and alife():level_name(gv:level_id()) or nil
+            if cur_level and smart_data.level ~= cur_level then
+                local lc = get_nearest_level_changer(cur_level, self.squad.position)
+                if lc and lc.position and lc.lvid and lc.gvid then
+                    local final_task = {
+                        type = task.type,
+                        target = new_target_name,
+                        priority = task.priority or 0,
+                        params = shallow_copy(task.params)
+                    }
+                    task.type = "MOVE_TO_POS"
+                    task.target = "Level Changer"
+                    task.params = {
+                        reason = "CROSS_LEVEL_STEP",
+                        pos_x = lc.position.x,
+                        pos_y = lc.position.y,
+                        pos_z = lc.position.z,
+                        lvid = lc.lvid,
+                        gvid = lc.gvid,
+                        arrive_dist = 15,
+                        cross_level_final_task = final_task
+                    }
+                    return self:execute_task(task)
+                end
+            end
+        end
+
         -- Only set scripted_target if:
         -- 1. We have a valid new target
         -- 2. Squad is not already moving to this target
         if new_target_name and (not self.squad.scripted_target or self.squad.scripted_target ~= new_target_name) then
-            -- Determine if we should allow immediate retargeting (AF Hunters need this)
-            local allow_retarget = (self.squad_class == "af_hunter")
+            local params = task.params or {}
+            local reason = params.reason
+            local urgent = (task.type == "KILL" or task.type == "VENDETTA" or (task.type == "DIRECTOR_ORDER" and reason == "SOS") or reason == "valuable_item")
+            local prio = task.priority or 0
+            local now = time_global()
+            local cd_ms = urgent and 5000 or (self.squad.online and 45000 or 90000)
+            local allow_retarget = (self.squad_class == "af_hunter") or urgent
+            if not allow_retarget then
+                local min_prio = self.squad.online and 2 or 3
+                if prio >= min_prio then
+                    allow_retarget = true
+                end
+            end
+            if self.last_retarget_tg and (now - self.last_retarget_tg) < cd_ms and (self.squad_class ~= "af_hunter") then
+                allow_retarget = false
+            end
 
             -- Check if squad has arrived OR if we force retarget
             if allow_retarget or not self.squad.scripted_target or current_target_name == self.squad.scripted_target then
                 self.squad.scripted_target = new_target_name
                 self.expected_target = new_target_name
+                self.last_retarget_tg = now
 
-                -- ROBUST BINDING: Assign if target is a valid smart
-                if SIMBOARD and SIMBOARD.assign_squad_to_smart and SIMBOARD.smarts_by_names then
-                    local target_smart = SIMBOARD.smarts_by_names[new_target_name]
-                    if target_smart then
-                        SIMBOARD:assign_squad_to_smart(self.squad, target_smart.id)
-                    end
-                elseif SIMBOARD and SIMBOARD.assign_squad_to_smart and SIMBOARD.get_smart_by_name then
-                    local target_smart = SIMBOARD:get_smart_by_name(new_target_name)
-                    if target_smart then
-                        SIMBOARD:assign_squad_to_smart(self.squad, target_smart.id)
-                    end
+                local target_smart_id = resolve_smart_id_by_name(new_target_name)
+                if SIMBOARD and SIMBOARD.assign_squad_to_smart and target_smart_id then
+                    SIMBOARD:assign_squad_to_smart(self.squad, target_smart_id)
                 end
 
                 self:log("DEBUG", "Squad [%s] new target [%s] (Retarget: %s)", self.squad:name(), new_target_name,
@@ -975,7 +1155,34 @@ function SquadBrain:execute_task(task)
             if target_smart and target_smart.am_i_reached then
                 local ok_reached, reached = pcall(function() return target_smart:am_i_reached(self.squad) end)
                 if ok_reached and reached then
-                    -- Actually there! Same smart AND same level AND within distance.
+                    if task.type == "TRADE" then
+                        task.params = task.params or {}
+                        local params = task.params
+                        local trade_time_ms = (settings.get_activities_settings().trade_time_sec or 10) * 1000
+                        params.trade_time_ms = trade_time_ms
+
+                        if not params.trade_wait_start_tg then
+                            params.trade_wait_start_tg = time_global()
+                            local trading_mod = siski_trading
+                            local ok_prep = trading_mod and trading_mod.prepare_vanilla_trade and trading_mod.prepare_vanilla_trade(self.squad, target_smart)
+                            params.trade_vanilla = ok_prep and true or false
+
+                            self.squad.scripted_target = nil
+                            self.expected_target = nil
+                            if SIMBOARD and SIMBOARD.squads then
+                                local sim_squad = SIMBOARD.squads[self.squad.id]
+                                if sim_squad and type(sim_squad) == "table" then
+                                    sim_squad.siski_target_pos = nil
+                                    sim_squad.siski_target_lvid = nil
+                                    sim_squad.siski_target_gvid = nil
+                                end
+                            end
+                        end
+
+                        self.state = "TRADING"
+                        return
+                    end
+
                     self:log("INFO",
                         "Squad [%s] already at target [%s] (am_i_reached). Marking COMPLETED for arrival logic.",
                         self.squad:name(), new_target_name)
@@ -1006,6 +1213,29 @@ function SquadBrain:execute_task(task)
         local params = task.params or {}
 
         if params.pos_x and params.pos_y and params.pos_z then
+            local dist_vec = vector():set(params.pos_x, params.pos_y, params.pos_z)
+            if not self.squad.online and intel and intel.get_nearest_smart and params.gvid then
+                local ok_v, vert = pcall(function() return game_graph():vertex(params.gvid) end)
+                if ok_v and vert then
+                    local lvl_name = alife():level_name(vert:level_id())
+                    if lvl_name then
+                        local near_smart = intel.get_nearest_smart(lvl_name, dist_vec)
+                        if near_smart then
+                            task.type = "MOVE"
+                            task.target = near_smart:name()
+                            task.params = task.params or {}
+                            task.params.reason = task.params.reason or "MOVE_TO_POS_OFFLINE_SMART"
+                            task.params.pos_x = params.pos_x
+                            task.params.pos_y = params.pos_y
+                            task.params.pos_z = params.pos_z
+                            task.params.lvid = params.lvid
+                            task.params.gvid = params.gvid
+                            return self:execute_task(task)
+                        end
+                    end
+                end
+            end
+
             -- Store target position in brain for distance checking
             self.move_to_pos_target = {
                 x = params.pos_x,
@@ -1022,8 +1252,6 @@ function SquadBrain:execute_task(task)
             -- Force clear engine target so script can drive
             self.squad.scripted_target = nil
             self.expected_target = nil
-
-            local dist_vec = vector():set(params.pos_x, params.pos_y, params.pos_z)
 
             -- Use SIMBOARD to guide squad towards position (If supported by engine/addon)
             if SIMBOARD and SIMBOARD.squads then
@@ -1188,25 +1416,167 @@ function SquadBrain:check_task_status()
         -- We trust the engine to detect arrival based on arrive_dist (default 50m)
         local target_smart = nil
         if SIMBOARD and SIMBOARD.get_smart_by_name then
-            target_smart = SIMBOARD:get_smart_by_name(self.current_task.target)
+            local ok_sm, sm = pcall(function() return SIMBOARD:get_smart_by_name(self.current_task.target) end)
+            if ok_sm then target_smart = sm end
+        end
+        if not target_smart and SIMBOARD and SIMBOARD.smarts_by_names then
+            target_smart = SIMBOARD.smarts_by_names[self.current_task.target]
         end
 
         if target_smart and target_smart.am_i_reached then
             local ok_reached, reached = pcall(function() return target_smart:am_i_reached(self.squad) end)
             if ok_reached and reached then
-                logger.siski_log("BRAIN", "INFO", "Squad [%s] arrived at [%s] (am_i_reached). Task COMPLETED.",
-                    self.squad:name(), target_smart:name() or "unknown")
+                if self.current_task.type == "TRADE" then
+                    local params = self.current_task.params or {}
+                    self.current_task.params = params
+                    if params.trade_vanilla then
+                        return "COMPLETED"
+                    end
+                    if not self.squad.online then
+                        return "COMPLETED"
+                    end
+                    local smart = self.squad.smart_id and self.squad.smart_id ~= 65535 and alife_object(self.squad.smart_id) or nil
+                    if smart and trading and trading.perform_trade_meet then
+                        local st = trading.perform_trade_meet(self.squad, smart, params)
+                        if st == "DONE" then
+                            params.trade_meet_done = true
+                            return "COMPLETED"
+                        end
+                        if st == "NO_SINK" then
+                            return "COMPLETED"
+                        end
+                        if st == "FAILED" then
+                            return "COMPLETED"
+                        end
+                        return "RUNNING"
+                    end
+                    return "COMPLETED"
+                else
+                    logger.siski_log("BRAIN", "INFO", "Squad [%s] arrived at [%s] (am_i_reached). Task COMPLETED.",
+                        self.squad:name(), target_smart:name() or "unknown")
+                    return "COMPLETED"
+                end
+            end
+        end
+
+        if self.current_task.type ~= "TRADE" then
+            local target_smart_id = resolve_smart_id_by_name(self.current_task.target)
+            if target_smart_id and self.squad and self.squad.smart_id and self.squad.smart_id == target_smart_id then
                 return "COMPLETED"
+            end
+            if self.squad and self.squad.smart_id and self.squad.smart_id ~= 65535 then
+                local cur_sm = alife_object(self.squad.smart_id)
+                if cur_sm and cur_sm:name() == self.current_task.target then
+                    return "COMPLETED"
+                end
             end
         end
 
         -- Fallback: If no smart object (rare), manual check
-        if not target_smart then
-            -- Simple distance check if smart object is missing for some reason
-            local smart_obj = alife_object(self.squad.smart_id)
-            if smart_obj and smart_obj:name() == self.current_task.target then
-                local dist = self.squad.position:distance_to(smart_obj.position)
-                if dist < 50 then return "COMPLETED" end
+        local smart_obj = intel and intel.get_smart_by_name and intel.get_smart_by_name(self.current_task.target)
+        if smart_obj and smart_obj.position and self.squad.position then
+            local dist = self.squad.position:distance_to(smart_obj.position)
+            if dist < 50 then
+                if self.current_task.type == "TRADE" then
+                    local params = self.current_task.params or {}
+                    self.current_task.params = params
+                    if params.trade_vanilla then
+                        return "COMPLETED"
+                    end
+                    if not self.squad.online then
+                        return "COMPLETED"
+                    end
+                    local smart = self.squad.smart_id and self.squad.smart_id ~= 65535 and alife_object(self.squad.smart_id) or nil
+                    if smart and trading and trading.perform_trade_meet then
+                        local st = trading.perform_trade_meet(self.squad, smart, params)
+                        if st == "DONE" then
+                            params.trade_meet_done = true
+                            return "COMPLETED"
+                        end
+                        if st == "NO_SINK" then
+                            return "COMPLETED"
+                        end
+                        if st == "FAILED" then
+                            return "COMPLETED"
+                        end
+                        return "RUNNING"
+                    end
+                    return "COMPLETED"
+                end
+                return "COMPLETED"
+            end
+
+            if self.current_task.type == "MOVE" then
+                local params = self.current_task.params or {}
+                self.current_task.params = params
+
+                local now = time_global()
+                local last_tg = params.move_progress_last_tg
+                local last_dist = params.move_progress_last_dist
+                if not last_tg or not last_dist then
+                    params.move_progress_last_tg = now
+                    params.move_progress_last_dist = dist
+                    params.move_progress_stuck_ms = 0
+                else
+                    local progress_check_ms = self.squad.online and 7000 or 15000
+                    if (now - last_tg) > progress_check_ms then
+                    local delta = last_dist - dist
+                    local min_progress = self.squad.online and 2.0 or 0.5
+                    if delta < min_progress then
+                        params.move_progress_stuck_ms = (params.move_progress_stuck_ms or 0) + (now - last_tg)
+                    else
+                        params.move_progress_stuck_ms = 0
+                    end
+                    params.move_progress_last_tg = now
+                    params.move_progress_last_dist = dist
+                    end
+                end
+
+                local stuck_ms = params.move_progress_stuck_ms or 0
+                local rebind_after_ms = self.squad.online and 20000 or 45000
+                local rebind_cd_ms = self.squad.online and 20000 or 45000
+                if stuck_ms > rebind_after_ms then
+                    local last_reassign = params.move_progress_last_reassign_tg or 0
+                    if (now - last_reassign) > rebind_cd_ms then
+                        params.move_progress_last_reassign_tg = now
+                        local target_smart_id = resolve_smart_id_by_name(self.current_task.target)
+                        if SIMBOARD and SIMBOARD.assign_squad_to_smart and target_smart_id then
+                            pcall(function() SIMBOARD:assign_squad_to_smart(self.squad, target_smart_id) end)
+                        end
+                    end
+                end
+
+                local fallback_after_ms = self.squad.online and 60000 or 180000
+                if stuck_ms > fallback_after_ms then
+                    if not self.move_stuck_next_tg or now >= self.move_stuck_next_tg then
+                        self.move_stuck_next_tg = now + (self.squad.online and 30000 or 60000)
+                        self.squad.scripted_target = nil
+                        self.expected_target = nil
+
+                        local p = smart_obj.position
+                        local lvid = smart_obj.m_level_vertex_id
+                        local gvid = smart_obj.m_game_vertex_id
+                        if p and lvid and gvid then
+                            table_insert(self.queue, 1, {
+                                type = "MOVE_TO_POS",
+                                target = "Smart Fallback",
+                                priority = self.current_task.priority or 0,
+                                params = {
+                                    reason = "MOVE_STUCK_FALLBACK",
+                                    from_target = self.current_task.target,
+                                    pos_x = p.x,
+                                    pos_y = p.y,
+                                    pos_z = p.z,
+                                    lvid = lvid,
+                                    gvid = gvid,
+                                    arrive_dist = 30
+                                },
+                                created_at = game.get_game_time()
+                            })
+                            return "FAILED"
+                        end
+                    end
+                end
             end
         end
 
@@ -1214,6 +1584,25 @@ function SquadBrain:check_task_status()
     elseif self.current_task.type == "MOVE_TO_POS" then
         -- Check if arrived at position (distance-based)
         if self.move_to_pos_target then
+            local params = self.current_task.params or {}
+            local reason = params.reason
+            local from_target = params.from_target
+            if (reason == "MOVE_STUCK_FALLBACK" or reason == "MOVE_TO_POS_STUCK_SMART") and from_target and self.squad and self.squad.smart_id then
+                local sid = resolve_smart_id_by_name(from_target)
+                if sid and self.squad.smart_id == sid then
+                    if SIMBOARD and SIMBOARD.squads then
+                        local sim_squad = SIMBOARD.squads[self.squad.id]
+                        if sim_squad and type(sim_squad) == "table" then
+                            sim_squad.siski_target_pos = nil
+                            sim_squad.siski_target_lvid = nil
+                            sim_squad.siski_target_gvid = nil
+                        end
+                    end
+                    self.move_to_pos_target = nil
+                    return "COMPLETED"
+                end
+            end
+
             local target_pos = vector():set(
                 self.move_to_pos_target.x,
                 self.move_to_pos_target.y,
@@ -1225,6 +1614,13 @@ function SquadBrain:check_task_status()
 
             -- Check if arrived at position (distance-based)
             if dist <= arrive_dist then
+                local params = self.current_task.params or {}
+                local final_task = params.cross_level_final_task
+                if type(final_task) == "table" and final_task.type and final_task.target then
+                    final_task.created_at = final_task.created_at or game.get_game_time()
+                    table_insert(self.queue, 1, final_task)
+                end
+
                 -- Arrived! Clear SIMBOARD override
                 if SIMBOARD and SIMBOARD.squads then
                     local sim_squad = SIMBOARD.squads[self.squad.id]
@@ -1264,8 +1660,70 @@ function SquadBrain:check_task_status()
                         self.move_to_pos_target.last_pos = vector():set(squad_pos.x, squad_pos.y, squad_pos.z)
                     end
 
+                    local stuck_timer = self.move_to_pos_target.velocity_stuck_timer or 0
+                    local stage = self.move_to_pos_target.degrade_stage or 0
+
+                    local stage1_ms = self.squad.online and 20000 or 40000
+                    local stage2_ms = self.squad.online and 40000 or 80000
+                    local force_ms = self.squad.online and 90000 or 180000
+
+                    if stuck_timer >= stage1_ms and stage < 1 then
+                        self.move_to_pos_target.degrade_stage = 1
+                        if SIMBOARD and SIMBOARD.squads then
+                            local sim_squad = SIMBOARD.squads[self.squad.id]
+                            if sim_squad and type(sim_squad) == "table" then
+                                sim_squad.siski_target_pos = target_pos
+                                sim_squad.siski_target_lvid = self.move_to_pos_target.lvid
+                                sim_squad.siski_target_gvid = self.move_to_pos_target.gvid
+                            end
+                        end
+                        if self.squad.online then
+                            local commander_id = self.squad:commander_id()
+                            local npc = commander_id and db.storage[commander_id] and db.storage[commander_id].object
+                            if npc then
+                                pcall(function()
+                                    npc:set_dest_level_vertex_id(self.move_to_pos_target.lvid)
+                                    npc:set_dest_game_vertex_id(self.move_to_pos_target.gvid)
+                                    npc:set_desired_position(target_pos)
+                                end)
+                            end
+                        end
+                    end
+
+                    if stuck_timer >= stage2_ms and stage < 2 and intel and intel.get_nearest_smart and self.move_to_pos_target.gvid then
+                        local ok_v, vert = pcall(function() return game_graph():vertex(self.move_to_pos_target.gvid) end)
+                        if ok_v and vert then
+                            local lvl_name = alife():level_name(vert:level_id())
+                            if lvl_name then
+                                local near_smart = intel.get_nearest_smart(lvl_name, target_pos)
+                                if near_smart then
+                                    table_insert(self.queue, 1, {
+                                        type = "MOVE",
+                                        target = near_smart:name(),
+                                        priority = self.current_task.priority or 0,
+                                        params = { reason = "MOVE_TO_POS_STUCK_SMART", from_target = self.current_task.target },
+                                        created_at = game.get_game_time()
+                                    })
+
+                                    if SIMBOARD and SIMBOARD.squads then
+                                        local sim_squad = SIMBOARD.squads[self.squad.id]
+                                        if sim_squad and type(sim_squad) == "table" then
+                                            sim_squad.siski_target_pos = nil
+                                            sim_squad.siski_target_lvid = nil
+                                            sim_squad.siski_target_gvid = nil
+                                        end
+                                    end
+
+                                    self.move_to_pos_target = nil
+                                    return "FAILED"
+                                end
+                            end
+                        end
+                        self.move_to_pos_target.degrade_stage = 2
+                    end
+
                     -- Force complete after 120 seconds of no movement
-                    if self.move_to_pos_target.velocity_stuck_timer > 120000 then
+                    if self.move_to_pos_target.velocity_stuck_timer > force_ms then
                         logger.siski_log("BRAIN", "WARN",
                             "Squad [%s] VELOCITY STALL (Dist: %.1fm, Stalled: %ds). Forcing arrival.",
                             self.squad:name(), dist, self.move_to_pos_target.velocity_stuck_timer / 1000)
@@ -1434,7 +1892,13 @@ function update_brains()
                     if ok_level and is_on_level then online = true end
 
                     brain.is_online = online
-                    local ok, err = pcall(function() brain:update() end)
+                    local function tb(e)
+                        if debug and debug.traceback then
+                            return debug.traceback(tostring(e), 2)
+                        end
+                        return tostring(e)
+                    end
+                    local ok, err = xpcall(function() brain:update() end, tb)
                     if not ok then
                         local now = time_global()
                         if not last_brain_update_error_at[id] or (now - last_brain_update_error_at[id]) > 5000 then

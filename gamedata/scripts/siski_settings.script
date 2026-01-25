@@ -82,13 +82,28 @@ end
 
 function load_activities()
     if t_activities then return t_activities end
-    t_activities = { enabled=true, max_loot_weight=50, gather_speed=1, trade_time_sec=60 }
+    t_activities = {
+        enabled = true,
+        max_loot_weight = 50,
+        gather_speed = 1,
+        trade_time_sec = 60,
+        trade_safe_radius = 80,
+        trade_valuable_cost = 5000,
+        trade_urge_gain = 0.25,
+        trade_priority_max = 10,
+        trade_sell_mult = 0.5
+    }
     
     if ini and ini:section_exist("activities") then
         t_activities.enabled = ini:r_bool("activities", "enabled")
         t_activities.max_loot_weight = ini:r_float("activities", "max_loot_weight") or 50
         t_activities.gather_speed = ini:r_float("activities", "gather_speed") or 1
         t_activities.trade_time_sec = ini:r_float("activities", "trade_time_sec") or 60
+        t_activities.trade_safe_radius = ini:r_float("activities", "trade_safe_radius") or t_activities.trade_safe_radius
+        t_activities.trade_valuable_cost = ini:r_float("activities", "trade_valuable_cost") or t_activities.trade_valuable_cost
+        t_activities.trade_urge_gain = ini:r_float("activities", "trade_urge_gain") or t_activities.trade_urge_gain
+        t_activities.trade_priority_max = ini:r_float("activities", "trade_priority_max") or t_activities.trade_priority_max
+        t_activities.trade_sell_mult = ini:r_float("activities", "trade_sell_mult") or t_activities.trade_sell_mult
     end
     return t_activities
 end
@@ -193,6 +208,11 @@ function get_activities_settings()
         res.max_loot_weight = ui_mcm.get("siski/max_loot_weight") or t.max_loot_weight
         res.gather_speed = ui_mcm.get("siski/loot_gather_speed") or t.gather_speed
         res.trade_time_sec = ui_mcm.get("siski/trade_time") or t.trade_time_sec
+        res.trade_safe_radius = ui_mcm.get("siski/trade_safe_radius") or t.trade_safe_radius
+        res.trade_valuable_cost = ui_mcm.get("siski/trade_valuable_cost") or t.trade_valuable_cost
+        res.trade_urge_gain = ui_mcm.get("siski/trade_urge_gain") or t.trade_urge_gain
+        res.trade_priority_max = ui_mcm.get("siski/trade_priority_max") or t.trade_priority_max
+        res.trade_sell_mult = ui_mcm.get("siski/trade_sell_mult") or t.trade_sell_mult
         
         return res
     end
@@ -451,10 +471,25 @@ end
 -- MCM INTEGRATION
 -- ==============================================================================================
 
+local mcm_cache = {}
+local MCM_CACHE_TTL_MS = 500
+
 function get_config(key, default)
     if ui_mcm then
-        local val = ui_mcm.get("siski/"..key)
-        if val ~= nil then return val end
+        local now = time_global()
+        local c = mcm_cache[key]
+        if c and (now - (c.tg or 0)) < MCM_CACHE_TTL_MS then
+            if c.val ~= nil then
+                return c.val
+            end
+            return default
+        end
+
+        local val = ui_mcm.get("siski/" .. key)
+        mcm_cache[key] = { tg = now, val = val }
+        if val ~= nil then
+            return val
+        end
     end
     return default
 end

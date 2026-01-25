@@ -22,9 +22,9 @@ local ELITE_RANK_THRESHOLD = 3000
 -- Optimization State
 local current_global_index = 1
 local is_scanning_global = false
-local SCAN_BLOCK_SIZE = 50 -- Objects per update
+local SCAN_BLOCK_SIZE = 100 -- Objects per update
 local last_artifact_scan_step_tg = 0
-local ARTIFACT_SCAN_STEP_INTERVAL_MS = 100
+local ARTIFACT_SCAN_STEP_INTERVAL_MS = 200
 local hunt_check_cache = {}
 local HUNT_CHECK_INTERVAL_MS = 5000
 local GLOBAL_LOOT_MAX = 512

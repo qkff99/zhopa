@@ -125,9 +125,22 @@ function generate_dashboard(state, current_level)
             if data.combat_state then
                 details = details .. ' <span class="tag tag-combat">COMBAT</span>'
             end
+
+            local trade_urge = data.trade_urge or 0
+            local pending_trade = (state.pending_trades and state.pending_trades[id]) and "PENDING" or ""
+            local move_stuck_ms = ""
+            if ct and type(ct) == "table" and ct.params and ct.params.move_progress_stuck_ms then
+                move_stuck_ms = tostring(ct.params.move_progress_stuck_ms)
+            end
+            local move_to_pos_stage = data.move_to_pos_stage ~= nil and tostring(data.move_to_pos_stage) or ""
+            local move_to_pos_stuck_ms = data.move_to_pos_stuck_ms ~= nil and tostring(data.move_to_pos_stuck_ms) or ""
+            local retarget_ago = ""
+            if data.last_retarget_tg then
+                retarget_ago = string.format("%.0fs", (time_global() - data.last_retarget_tg) / 1000)
+            end
             
             table.insert(squad_rows, {
-                cells = {id, name, f_badge, s_level, task_type, task_reason, task_target, data.current_state or "Idle", details},
+                cells = {id, name, f_badge, s_level, task_type, task_reason, task_target, data.current_state or "Idle", string.format("%.2f", trade_urge), pending_trade, move_stuck_ms, move_to_pos_stage, move_to_pos_stuck_ms, retarget_ago, details},
                 level = s_level,
                 faction = faction
             })
@@ -412,7 +425,7 @@ function generate_dashboard(state, current_level)
     
     <!-- TAB: SQUADS -->
     <div id="tab-squads" class="tab-content active">
-        ]] .. build_section_table("Active Brains", {"ID", "Name", "Faction", "Level", "Task", "Reason", "Target", "State", "Details"}, squad_rows, "tbl_squads") .. [[
+        ]] .. build_section_table("Active Brains", {"ID", "Name", "Faction", "Level", "Task", "Reason", "Target", "State", "TradeUrge", "PendingTrade", "MoveStuckMs", "M2PStage", "M2PStuckMs", "RetargetAgo", "Details"}, squad_rows, "tbl_squads") .. [[
     </div>
     
     <!-- TAB: WORLD -->
