@@ -1,0 +1,6 @@
+local n = script_name()
+local root = getFS():update_path("$game_scripts$", "")
+local f, err = loadfile(root .. n .. ".script.ljbc")
+if not f then error(err) end
+if setfenv then setfenv(f, getfenv(1)) end
+return f()
