@@ -161,13 +161,9 @@ function Bus:_publish(event, payload)
     end
 
     payload = payload or {}
-    local snapshot = {}
-    for i = 1, #list do
-        snapshot[i] = list[i]
-    end
     local delivered = 0
-    for i = 1, #snapshot do
-        local sub = snapshot[i]
+    for i = 1, #list do
+        local sub = list[i]
         local fn = sub and sub.fn or nil
         if type(fn) ~= "function" then
             delivered = delivered + 1
@@ -567,7 +563,12 @@ local function get_offlevel_squad_update_skip_count()
 end
 
 local function publish_bus_event(name, ...)
-    if not (zhopa.bus and zhopa.bus.publish) then
+    local bus = zhopa.bus
+    local publish = bus and bus.publish or nil
+    if not publish then
+        return
+    end
+    if bus.count and bus.count(name) <= 0 then
         return
     end
     local argc = select("#", ...)
@@ -575,7 +576,7 @@ local function publish_bus_event(name, ...)
     for i = 1, argc do
         args[i] = select(i, ...)
     end
-    safe_call("zhopa.bus.publish(" .. tostring(name) .. ")", zhopa.bus.publish, name, {
+    return publish(name, {
         event = name,
         argc = argc,
         args = args,
@@ -602,15 +603,15 @@ local function update_memory_snapshot(squad, source)
         return nil
     end
     if zhopa.memory.upsert_snapshot then
-        local ok_upsert, entry = safe_call("zhopa.memory.upsert_snapshot(" .. tostring(source or "callback") .. ")", zhopa.memory.upsert_snapshot, squad, source or "callback")
+        local ok_upsert, entry = safe_call("memory.upsert_snapshot", zhopa.memory.upsert_snapshot, squad, source or "callback")
         if ok_upsert then
             return entry
         end
     end
     if zhopa.memory.update_squad_snapshot_verified then
-        safe_call("zhopa.memory.update_squad_snapshot_verified(" .. tostring(source or "callback") .. ")", zhopa.memory.update_squad_snapshot_verified, squad, sid)
+        safe_call("memory.update_squad_snapshot_verified", zhopa.memory.update_squad_snapshot_verified, squad, sid)
     elseif zhopa.memory.update_squad_snapshot then
-        safe_call("zhopa.memory.update_squad_snapshot(" .. tostring(source or "callback") .. ")", zhopa.memory.update_squad_snapshot, squad)
+        safe_call("memory.update_squad_snapshot", zhopa.memory.update_squad_snapshot, squad)
     end
     return zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
 end
@@ -618,7 +619,7 @@ end
 local function dispatch_direct_squad_fsm(squad, source)
     if squad and zhopa.memory and zhopa.memory.is_protected_squad then
         local ok_protected, protected = safe_call(
-            "zhopa.memory.is_protected_squad(" .. tostring(source or "callback") .. ")",
+            "memory.is_protected_squad",
             zhopa.memory.is_protected_squad,
             squad
         )
@@ -632,7 +633,7 @@ local function dispatch_direct_squad_fsm(squad, source)
     end
     if can_run("story_events") and zhopa.story_events and zhopa.story_events.update_squad_tasks then
         local ok_story, handled = safe_call(
-            "zhopa.story_events.update_squad_tasks(" .. tostring(source or "callback") .. ")",
+            "story_events.update_squad_tasks",
             zhopa.story_events.update_squad_tasks,
             squad,
             PREVALIDATED_CTX
@@ -643,7 +644,7 @@ local function dispatch_direct_squad_fsm(squad, source)
     end
     if can_run("smart_tasks") and zhopa.smart_tasks and zhopa.smart_tasks.update_squad_tasks then
         local ok_smart, handled = safe_call(
-            "zhopa.smart_tasks.update_squad_tasks(" .. tostring(source or "callback") .. ")",
+            "smart_tasks.update_squad_tasks",
             zhopa.smart_tasks.update_squad_tasks,
             squad,
             PREVALIDATED_CTX
@@ -654,17 +655,17 @@ local function dispatch_direct_squad_fsm(squad, source)
     end
     if entry.npc_kind == "mutant" then
         if zhopa.mutants and zhopa.mutants.update_squad_tasks then
-            safe_call("zhopa.mutants.update_squad_tasks(" .. tostring(source or "callback") .. ")", zhopa.mutants.update_squad_tasks, squad, PREVALIDATED_CTX)
+            safe_call("mutants.update_squad_tasks", zhopa.mutants.update_squad_tasks, squad, PREVALIDATED_CTX)
             return true
         end
         if zhopa.tasks and zhopa.tasks.update_squad_tasks then
-            safe_call("zhopa.tasks.update_squad_tasks(" .. tostring(source or "callback") .. ")", zhopa.tasks.update_squad_tasks, squad, PREVALIDATED_CTX)
+            safe_call("tasks.update_squad_tasks", zhopa.tasks.update_squad_tasks, squad, PREVALIDATED_CTX)
             return true
         end
         return false
     end
     if zhopa.tasks and zhopa.tasks.update_squad_tasks then
-        safe_call("zhopa.tasks.update_squad_tasks(" .. tostring(source or "callback") .. ")", zhopa.tasks.update_squad_tasks, squad, PREVALIDATED_CTX)
+        safe_call("tasks.update_squad_tasks", zhopa.tasks.update_squad_tasks, squad, PREVALIDATED_CTX)
         return true
     end
     return false
@@ -5567,10 +5568,14 @@ local function tg()
 end
 
 local function publish_memory_event(name, payload)
-    if not (zhopa.bus and zhopa.bus.publish and type(name) == "string" and name ~= "") then
+    local bus = zhopa.bus
+    if not (bus and bus.publish and type(name) == "string" and name ~= "") then
         return
     end
-    zhopa.bus.publish(name, payload or { event = name })
+    if bus.count and bus.count(name) <= 0 then
+        return
+    end
+    bus.publish(name, payload or { event = name })
 end
 
 local function now_level_name_by_gvid(gvid)
@@ -13085,6 +13090,7 @@ local RUNTIME = {
     trade_target_cache = {},
     cap_index_by_level = {},
     filtered_cap_bucket_cache = {},
+    cap_bucket_bundle_cache = {},
     artefact_pool = false,
     stats = {},
     build_prep = {
@@ -13119,6 +13125,7 @@ local RUNTIME = {
             logic_index_ttl_ms = 1000,
             trade_taken_ttl_ms = 500,
             trade_arrived_timeout_ms = 300000,
+            safe_bucket_ttl_ms = 500,
         },
     },
 }
@@ -14096,6 +14103,7 @@ function tasks._reset_build_prep_runtime()
     }
     RUNTIME.cap_index_by_level = {}
     RUNTIME.filtered_cap_bucket_cache = {}
+    RUNTIME.cap_bucket_bundle_cache = {}
 end
 
 function tasks._get_known_levels()
@@ -14200,8 +14208,45 @@ local function ensure_capability_index(level_name)
     return idx
 end
 
-local function filtered_cap_bucket_cache_key(bucket, community, section_name)
-    return tostring(bucket or "-") .. "|" .. tostring(community or "-") .. "|" .. tostring(section_name or "-")
+local function cap_cache_key_part(value)
+    return value ~= nil and value or false
+end
+
+local function get_cap_context_cache(root, level_name, bucket, community, section_name, create)
+    if type(root) ~= "table" then
+        return nil, nil
+    end
+
+    local by_level = root[level_name]
+    if type(by_level) ~= "table" then
+        if create ~= true then
+            return nil, nil
+        end
+        by_level = {}
+        root[level_name] = by_level
+    end
+
+    local by_bucket = by_level[bucket]
+    if type(by_bucket) ~= "table" then
+        if create ~= true then
+            return nil, nil
+        end
+        by_bucket = {}
+        by_level[bucket] = by_bucket
+    end
+
+    local community_key = cap_cache_key_part(community)
+    local by_community = by_bucket[community_key]
+    if type(by_community) ~= "table" then
+        if create ~= true then
+            return nil, nil
+        end
+        by_community = {}
+        by_bucket[community_key] = by_community
+    end
+
+    local section_key = cap_cache_key_part(section_name)
+    return by_community, section_key
 end
 
 function tasks._ensure_build_prep(now)
@@ -14333,12 +14378,13 @@ function tasks._get_smart_bucket_bundle(cur_level, community, section_name, sear
     for i = 1, (levels and #levels or 0) do
         local level_name = levels[i]
         local level_smarts = (level_name == cur_level) and current_level_smarts or get_smarts_for_level(level_name, community, section_name)
+        local cap_bundle = tasks._get_cap_bucket_bundle and tasks._get_cap_bucket_bundle(level_name, community, section_name, now) or nil
         smarts_by_level[level_name] = level_smarts or {}
-        safe_by_level[level_name] = (tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "safe", community, section_name)) or level_smarts or {}
-        base_by_level[level_name] = tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "base", community, section_name) or {}
-        kamp_by_level[level_name] = tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "kamp", community, section_name) or {}
-        anomaly_by_level[level_name] = tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "anomaly", community, section_name) or {}
-        trade_by_level[level_name] = RUNTIME.collect_trade_candidate_smarts(level_name, community, section_name) or {}
+        safe_by_level[level_name] = (cap_bundle and cap_bundle.safe) or (tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "safe", community, section_name, now)) or level_smarts or {}
+        base_by_level[level_name] = (cap_bundle and cap_bundle.base) or (tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "base", community, section_name, now)) or {}
+        kamp_by_level[level_name] = (cap_bundle and cap_bundle.kamp) or (tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "kamp", community, section_name, now)) or {}
+        anomaly_by_level[level_name] = (cap_bundle and cap_bundle.anomaly) or (tasks._get_cap_bucket and tasks._get_cap_bucket(level_name, "anomaly", community, section_name, now)) or {}
+        trade_by_level[level_name] = RUNTIME.collect_trade_candidate_smarts(level_name, community, section_name, cap_bundle, now) or {}
     end
 
     cached = {
@@ -15423,7 +15469,61 @@ end
 
 tasks._is_roam_smart_allowed = is_roam_smart_allowed
 
-local function get_cap_bucket(level_name, bucket, community, section_name)
+local function filter_cap_bucket(level_name, bucket, arr, smart_rev, community, section_name, now)
+    if type(arr) ~= "table" then
+        return nil
+    end
+    if bucket ~= "safe" and not community and not section_name then
+        return arr
+    end
+
+    local is_safe = bucket == "safe"
+    local cache_by_section, section_key = get_cap_context_cache(
+        RUNTIME.filtered_cap_bucket_cache,
+        level_name,
+        bucket,
+        community,
+        section_name,
+        true
+    )
+    local cached = cache_by_section and cache_by_section[section_key] or nil
+    local ttl_ms = is_safe and community and (tonumber(RUNTIME.hotpath_cfg and RUNTIME.hotpath_cfg.builders and RUNTIME.hotpath_cfg.builders.safe_bucket_ttl_ms) or 500) or nil
+    local now_tg = nil
+    if ttl_ms then
+        now_tg = tonumber(now) or tg()
+    end
+    if type(cached) == "table"
+        and tonumber(cached.smart_rev) == smart_rev
+        and type(cached.items) == "table"
+        and (not ttl_ms or now_tg <= ((tonumber(cached.tg) or 0) + ttl_ms))
+    then
+        return cached.items
+    end
+
+    local filtered = {}
+    for i = 1, #arr do
+        local name = arr[i]
+        if name and (not smart_is_blacklisted_for_level(level_name, name, community, section_name)) then
+            local allowed = true
+            if is_safe and community then
+                allowed = smart_is_safe_for_faction(name, community, level_name) == true
+            end
+            if allowed then
+                filtered[#filtered + 1] = name
+            end
+        end
+    end
+    if cache_by_section then
+        cache_by_section[section_key] = {
+            smart_rev = smart_rev,
+            tg = now_tg or tonumber(now) or 0,
+            items = filtered,
+        }
+    end
+    return filtered
+end
+
+local function get_cap_bucket(level_name, bucket, community, section_name, now)
     if type(level_name) ~= "string" or level_name == "" then
         return nil
     end
@@ -15435,54 +15535,58 @@ local function get_cap_bucket(level_name, bucket, community, section_name)
     if type(arr) ~= "table" then
         return nil
     end
-    if bucket ~= "safe" and not community and not section_name then
-        return arr
-    end
-    if bucket ~= "safe" then
-        local board_index = zhopa.board_index
-        local smart_revs = board_index and board_index.RUNTIME and board_index.RUNTIME.smart_revision_by_level or nil
-        local smart_rev = tonumber(smart_revs and smart_revs[level_name]) or 0
-        local cache_by_level = RUNTIME.filtered_cap_bucket_cache[level_name]
-        if type(cache_by_level) ~= "table" then
-            cache_by_level = {}
-            RUNTIME.filtered_cap_bucket_cache[level_name] = cache_by_level
-        end
-        local cache_key = filtered_cap_bucket_cache_key(bucket, community, section_name)
-        local cached = cache_by_level[cache_key]
-        if type(cached) == "table" and tonumber(cached.smart_rev) == smart_rev and type(cached.items) == "table" then
-            return cached.items
-        end
-
-        local filtered = {}
-        for i = 1, #arr do
-            local name = arr[i]
-            if name and (not smart_is_blacklisted_for_level(level_name, name, community, section_name)) then
-                filtered[#filtered + 1] = name
-            end
-        end
-        cache_by_level[cache_key] = {
-            smart_rev = smart_rev,
-            items = filtered,
-        }
-        return filtered
-    end
-    local filtered = {}
-    for i = 1, #arr do
-        local name = arr[i]
-        if name and (not smart_is_blacklisted_for_level(level_name, name, community, section_name)) then
-            local allowed = true
-            if bucket == "safe" and community then
-                allowed = smart_is_safe_for_faction(name, community, level_name) == true
-            end
-            if allowed then
-                filtered[#filtered + 1] = name
-            end
-        end
-    end
-    return filtered
+    return filter_cap_bucket(level_name, bucket, arr, tonumber(idx._smart_rev) or 0, community, section_name, now)
 end
 
 tasks._get_cap_bucket = get_cap_bucket
+
+local function get_cap_bucket_bundle(level_name, community, section_name, now)
+    if type(level_name) ~= "string" or level_name == "" then
+        return nil
+    end
+    local idx = ensure_capability_index(level_name)
+    if type(idx) ~= "table" then
+        return nil
+    end
+
+    local smart_rev = tonumber(idx._smart_rev) or 0
+    local ttl_ms = community and (tonumber(RUNTIME.hotpath_cfg and RUNTIME.hotpath_cfg.builders and RUNTIME.hotpath_cfg.builders.safe_bucket_ttl_ms) or 500) or nil
+    local now_tg = ttl_ms and (tonumber(now) or tg()) or nil
+    local cache_by_section, section_key = get_cap_context_cache(
+        RUNTIME.cap_bucket_bundle_cache,
+        level_name,
+        "bundle",
+        community,
+        section_name,
+        true
+    )
+    local cached = cache_by_section and cache_by_section[section_key] or nil
+    if type(cached) == "table"
+        and tonumber(cached.smart_rev) == smart_rev
+        and type(cached.safe) == "table"
+        and (not ttl_ms or now_tg <= ((tonumber(cached.tg) or 0) + ttl_ms))
+    then
+        return cached
+    end
+
+    local bundle = {
+        smart_rev = smart_rev,
+        tg = now_tg or tonumber(now) or 0,
+        safe = filter_cap_bucket(level_name, "safe", idx.safe, smart_rev, community, section_name, now),
+        base = filter_cap_bucket(level_name, "base", idx.base, smart_rev, community, section_name, now),
+        kamp = filter_cap_bucket(level_name, "kamp", idx.kamp, smart_rev, community, section_name, now),
+        anomaly = filter_cap_bucket(level_name, "anomaly", idx.anomaly, smart_rev, community, section_name, now),
+        trade_slot = filter_cap_bucket(level_name, "trade_slot", idx.trade_slot, smart_rev, community, section_name, now),
+        trader = filter_cap_bucket(level_name, "trader", idx.trader, smart_rev, community, section_name, now),
+        tech_slot = filter_cap_bucket(level_name, "tech_slot", idx.tech_slot, smart_rev, community, section_name, now),
+    }
+    if cache_by_section then
+        cache_by_section[section_key] = bundle
+    end
+    return bundle
+end
+
+tasks._get_cap_bucket_bundle = get_cap_bucket_bundle
 
 local function pick_base_camping_target_smart(level_name, community, section_name, ctx)
     if not level_name then return nil end
@@ -17168,7 +17272,7 @@ local function set_cached_trade_target(se_squad, cur_level, community, section_n
     }
 end
 
-RUNTIME.collect_trade_candidate_smarts = function(level_name, community, section_name)
+RUNTIME.collect_trade_candidate_smarts = function(level_name, community, section_name, cap_bundle, now)
     if not level_name then
         return {}
     end
@@ -17191,7 +17295,7 @@ RUNTIME.collect_trade_candidate_smarts = function(level_name, community, section
 
     local smarts = nil
     do
-        local cap_slots = get_cap_bucket(level_name, "trade_slot", community, section_name) or {}
+        local cap_slots = (cap_bundle and cap_bundle.trade_slot) or get_cap_bucket(level_name, "trade_slot", community, section_name, now) or {}
         if #cap_slots > 0 then
             local seen = {}
             smarts = {}
@@ -17411,7 +17515,6 @@ local function pick_trade_target_smart(se_squad, cur_level, community, section_n
 
     local trade_candidate_smarts_by_level = ctx_get_trade_candidate_smarts_by_level(ctx)
     local search_levels = (ctx and ctx.search_levels) or RUNTIME.build_trade_search_levels(cur_level, community, section_name)
-    local current_smarts = (trade_candidate_smarts_by_level and trade_candidate_smarts_by_level[cur_level]) or RUNTIME.collect_trade_candidate_smarts(cur_level, community, section_name)
     if #search_levels <= 0 then
         return nil
     end
@@ -28517,15 +28620,32 @@ function DebugHud:__init()
     self.RUNTIME = {
         shown = {},
         disabled_cleared = false,
+        enabled_cached = nil,
         enabled_prev = false,
         owned_spots_by_id = {},
         spot_conflict_log_next_tg = 0,
     }
 end
 
-function DebugHud:_is_enabled()
+function DebugHud:_read_enabled()
     if not (zhopa.config and zhopa.config.get) then return false end
     return zhopa.config.get("debug_hud_enabled", false) == true
+end
+
+function DebugHud:_refresh_enabled_cache()
+    local enabled = self:_read_enabled() == true
+    if self.RUNTIME then
+        self.RUNTIME.enabled_cached = enabled
+    end
+    return enabled
+end
+
+function DebugHud:_is_enabled()
+    local rt = self.RUNTIME
+    if rt and rt.enabled_cached ~= nil then
+        return rt.enabled_cached == true
+    end
+    return self:_refresh_enabled_cache() == true
 end
 
 function DebugHud:_remove_spot(id)
@@ -28734,13 +28854,13 @@ function DebugHud:_clear_all()
 end
 
 function DebugHud:_on_load_state()
-    if not self:_is_enabled() then return end
+    if not self:_refresh_enabled_cache() then return end
     self.RUNTIME.disabled_cleared = false
     self:_clear_all()
 end
 
 function DebugHud:_on_save_state()
-    if not self:_is_enabled() then return end
+    if not self:_refresh_enabled_cache() then return end
     if zhopa.log and zhopa.log.info then
         zhopa.log.info("HUD", "debug_hud pre-save cleanup")
     end
@@ -28807,7 +28927,7 @@ function DebugHud:_refresh_all_from_memory(reason)
 end
 
 function DebugHud:_on_option_change()
-    local enabled = self:_is_enabled()
+    local enabled = self:_refresh_enabled_cache()
     if not enabled then
         self:_clear_all()
         self.RUNTIME.disabled_cleared = true
@@ -28835,43 +28955,65 @@ local function bus_args(payload)
     return type(payload.args) == "table" and payload.args or {}
 end
 
+local function hud_hot_enabled()
+    return inst.RUNTIME and inst.RUNTIME.enabled_cached == true
+end
+
 if zhopa and zhopa.bus and zhopa.bus.subscribe then
     zhopa.bus.subscribe("actor_on_first_update", "zhopa_debug_hud", function()
-        inst.RUNTIME.enabled_prev = inst:_is_enabled() == true
+        inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
         inst:_refresh_all_from_memory("first_update")
     end)
     zhopa.bus.subscribe("load_state", "zhopa_debug_hud", function()
-        inst.RUNTIME.enabled_prev = inst:_is_enabled() == true
+        inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
         inst:_refresh_all_from_memory("load_state")
     end)
     zhopa.bus.subscribe("on_option_change", "zhopa_debug_hud", function()
         inst:_on_option_change()
     end)
     zhopa.bus.subscribe("memory_task_changed", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local squad_id = payload and payload.squad_id or nil
         inst:_refresh_spot_for_id(squad_id, nil)
     end)
     zhopa.bus.subscribe("squad_on_first_update", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local args = bus_args(payload)
         local squad = args[1]
         inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
     end)
     zhopa.bus.subscribe("squad_on_update", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local args = bus_args(payload)
         local squad = args[1]
         inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
     end)
     zhopa.bus.subscribe("squad_on_after_level_change", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local args = bus_args(payload)
         local squad = args[1]
         inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
     end)
     zhopa.bus.subscribe("squad_on_npc_death", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local args = bus_args(payload)
         local squad = args[1]
         inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
     end)
     zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_debug_hud", function(payload)
+        if not hud_hot_enabled() then
+            return
+        end
         local args = bus_args(payload)
         local se_obj = args[1]
         inst:_remove_spot(se_obj and se_obj.id or nil)
