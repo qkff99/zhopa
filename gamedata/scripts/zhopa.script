@@ -1272,6 +1272,9 @@ function Core:_on_task_current_changed(payload)
 end
 
 function Core:_on_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
+    if self:_is_enabled() ~= true then
+        return
+    end
     route_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
 end
 
@@ -16349,8 +16352,8 @@ local function get_offline_artefact_pool()
                 cnt = ok_cnt and tonumber(cnt) or 0
                 if cnt > 0 then
                     for idx = 0, cnt - 1 do
-                        local ok_line, key = pcall(function() return ini:r_line("buy_sell", idx) end)
-                        if ok_line and type(key) == "string" and key ~= "" and string.sub(key, 1, 1) ~= ";" and string.sub(key, 1, 3) == "af_" then
+                        local ok_line, result, key = pcall(function() return ini:r_line("buy_sell", idx) end)
+                        if ok_line and result == true and type(key) == "string" and key ~= "" and string.sub(key, 1, 1) ~= ";" and string.sub(key, 1, 3) == "af_" then
                             out[#out + 1] = key
                         end
                     end
@@ -24214,8 +24217,14 @@ function ServiceFiller:_pin_service_squad(board, smart_name, smart, owner_alias,
         and se_squad.scripted_target == smart_name
         and tonumber(se_squad.assigned_target_id) == smart_id
         and tonumber(se_squad.smart_id) == smart_id
+        and se_squad.current_target_id == nil
         and se_squad.current_action == 0
+        and se_squad.task_target_id == nil
+        and se_squad.stay_time == nil
+        and se_squad.arrive_time == nil
+        and se_squad.__lock == nil
         and se_squad.registered_with_warfare == false
+        and se_squad.checked_with_warfare == nil
         and se_squad.rush_to_target == false
     then
         return false
@@ -25378,9 +25387,14 @@ local is_protected_corpse
 local mark_nearby_corpses_protected
 local run_loot_service
 local schedule_loot_service
+local loot_timer_ready = false
+
+local function can_schedule_loot_timer()
+    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function" and type(_G.CreateTimeEvent) == "function"
+end
 
 local function loot_timers_available()
-    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function"
+    return loot_timer_ready == true
 end
 
 local function on_loot_service_timer()
@@ -25390,12 +25404,16 @@ local function on_loot_service_timer()
 end
 
 schedule_loot_service = function(delay_ms)
-    if not loot_timers_available() then
+    if not can_schedule_loot_timer() then
+        loot_timer_ready = false
         return false
     end
     local delay = tonumber(delay_ms) or 0
     if delay < 0 then delay = 0 end
-    return zhopa.timers.schedule(LOOT_TIMER_NS, LOOT_SERVICE_TIMER, delay, on_loot_service_timer)
+    loot_timer_ready = zhopa.timers.schedule(LOOT_TIMER_NS, LOOT_SERVICE_TIMER, delay, on_loot_service_timer) == true
+        and zhopa.timers.has
+        and zhopa.timers.has(LOOT_TIMER_NS, LOOT_SERVICE_TIMER) == true
+    return loot_timer_ready == true
 end
 
 local function apply_actor_loot_distance_override(enabled)
@@ -26594,7 +26612,7 @@ function inst.on_option_change()
 end
 
 function inst.needs_npc_update()
-    if loot_timers_available() then
+    if loot_timers_available() == true then
         return false
     end
     return inst.RUNTIME.rioc_patch_applied ~= true or has_quest_corpse_work() or has_pending_events()
@@ -26664,9 +26682,14 @@ local LOOT_PATCH_TIMER_NS = "zhopa_loot_patch"
 local LOOT_PATCH_RETRY_TIMER = "retry"
 
 local maybe_retry_apply
+local loot_patch_timer_ready = false
+
+local function can_schedule_loot_patch_timer()
+    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function" and type(_G.CreateTimeEvent) == "function"
+end
 
 local function loot_patch_timers_available()
-    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function"
+    return loot_patch_timer_ready == true
 end
 
 local function on_loot_patch_retry_timer()
@@ -26676,12 +26699,16 @@ local function on_loot_patch_retry_timer()
 end
 
 local function schedule_loot_patch_retry(delay_ms)
-    if not loot_patch_timers_available() then
+    if not can_schedule_loot_patch_timer() then
+        loot_patch_timer_ready = false
         return false
     end
     local delay = tonumber(delay_ms) or PATCH_RETRY_COOLDOWN_MS
     if delay < 0 then delay = 0 end
-    return zhopa.timers.schedule(LOOT_PATCH_TIMER_NS, LOOT_PATCH_RETRY_TIMER, delay, on_loot_patch_retry_timer)
+    loot_patch_timer_ready = zhopa.timers.schedule(LOOT_PATCH_TIMER_NS, LOOT_PATCH_RETRY_TIMER, delay, on_loot_patch_retry_timer) == true
+        and zhopa.timers.has
+        and zhopa.timers.has(LOOT_PATCH_TIMER_NS, LOOT_PATCH_RETRY_TIMER) == true
+    return loot_patch_timer_ready == true
 end
 
 local function cfg(key, def)
@@ -27241,7 +27268,7 @@ function LootPatch.on_npc_update()
 end
 
 function LootPatch.needs_npc_update()
-    if loot_patch_timers_available() then
+    if loot_patch_timers_available() == true then
         return false
     end
     local loot_items_enabled = cfg("loot_items_enabled", false) == true
@@ -30006,6 +30033,12 @@ local function on_npc_update(npc)
 end
 
 function inst.on_axr_service_result(npc, smart, kind, status, reason)
+    if zhopa and zhopa.core and zhopa.core.is_enabled then
+        local ok_enabled, enabled = pcall(zhopa.core.is_enabled)
+        if ok_enabled and enabled ~= true then
+            return false
+        end
+    end
     arm_completed_watch(npc, smart, kind, status, reason)
     arm_post_tech_unknown_watch(npc, smart, kind, status, reason)
 end
