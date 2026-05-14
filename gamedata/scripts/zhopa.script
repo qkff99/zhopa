@@ -286,7 +286,17 @@ local function now_level_name_by_gvid(gvid)
     return nil
 end
 
+local ACTOR_LEVEL_CACHE_MS = 500
+local actor_level_cache_value = nil
+local actor_level_cache_tg = -1
+
 local function current_actor_level_name()
+    local now = (time_global and time_global()) or 0
+    if actor_level_cache_tg >= 0 and now <= (actor_level_cache_tg + ACTOR_LEVEL_CACHE_MS) then
+        return actor_level_cache_value
+    end
+    actor_level_cache_tg = now
+    actor_level_cache_value = nil
     if not alife then
         return nil
     end
@@ -299,6 +309,7 @@ local function current_actor_level_name()
         return now_level_name_by_gvid(tonumber(actor.m_game_vertex_id) or 0)
     end)
     if ok and type(res) == "string" and res ~= "" then
+        actor_level_cache_value = res
         return res
     end
     return nil
@@ -374,6 +385,71 @@ local function call_module_method(switch_name, module_name, method_name, tag, ..
     return true
 end
 
+local function call_module_method_fast(switch_name, module_name, method_name, tag, ...)
+    if switch_name and can_run(switch_name) ~= true then
+        return false
+    end
+    local module = zhopa and zhopa[module_name] or nil
+    local fn = module and module[method_name] or nil
+    if type(fn) ~= "function" then
+        return false
+    end
+    local ok, err = pcall(fn, ...)
+    if not ok and zhopa and zhopa.log and zhopa.log.error then
+        zhopa.log.error("CORE", "%s failed: %s", tostring(tag or (tostring(module_name) .. "." .. tostring(method_name))), tostring(err))
+    end
+    return ok == true
+end
+
+local function read_object_name(obj)
+    if not obj then
+        return nil
+    end
+    local raw_name = obj.name
+    if type(raw_name) == "string" and raw_name ~= "" then
+        return raw_name
+    end
+    local ok_name, res_name = pcall(function()
+        return obj:name()
+    end)
+    if ok_name and type(res_name) == "string" and res_name ~= "" then
+        return res_name
+    end
+    return nil
+end
+
+local function build_smart_update_ctx(smart)
+    local smart_name = read_object_name(smart)
+    local level_name = now_level_name_by_gvid(tonumber(smart and smart.m_game_vertex_id) or 0)
+    if (type(level_name) ~= "string" or level_name == "") and smart_name and zhopa.board_index and zhopa.board_index.get_smart_level then
+        level_name = zhopa.board_index.get_smart_level(smart_name)
+    end
+    local actor_level = current_actor_level_name()
+    return {
+        name = smart_name,
+        id = tonumber(smart and smart.id) or nil,
+        level_name = level_name,
+        is_on_actor_level = (level_name ~= nil and actor_level ~= nil and level_name == actor_level),
+        disabled = smart and smart.disabled == true or false,
+    }
+end
+
+local function wants_smart_update(module_name, smart, ctx)
+    local module = zhopa and zhopa[module_name] or nil
+    local wants = module and module.wants_smart_update or nil
+    if type(wants) ~= "function" then
+        return true
+    end
+    local ok, res = pcall(wants, smart, ctx)
+    if ok then
+        return res == true
+    end
+    if zhopa and zhopa.log and zhopa.log.error then
+        zhopa.log.error("CORE", "%s.wants_smart_update failed: %s", tostring(module_name), tostring(res))
+    end
+    return true
+end
+
 local function dispatch_direct_squad_fsm(squad, source, entry)
     if squad and zhopa.memory and zhopa.memory.is_protected_squad then
         local ok_protected, protected = safe_call(
@@ -439,11 +515,11 @@ local function route_squad_first_update(squad, entry)
     end
 end
 
-local function route_squad_update(squad, entry)
-    call_module_method("board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad)
-    call_module_method("mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry)
+local function route_squad_update(squad, entry, changed)
+    call_module_method_fast("board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad, entry, changed)
+    call_module_method_fast("mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry, changed)
     if debug_hud_enabled and debug_hud_enabled() then
-        call_module_method("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad)
+        call_module_method_fast("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad, entry, changed)
     end
 end
 
@@ -578,14 +654,27 @@ local function route_server_entity_unregister(se_obj, type_name)
     end
 end
 
-local function route_smart_terrain_update(smart)
-    call_module_method("board_index", "board_index", "on_smart_terrain_update", "board_index.on_smart_terrain_update", smart)
-    call_module_method("smart_tasks", "smart_tasks", "on_smart_terrain_update", "smart_tasks.on_smart_terrain_update", smart)
-    call_module_method("mutants", "mutants", "on_smart_terrain_update", "mutants.on_smart_terrain_update", smart)
-    call_module_method("base_filler", "base_filler", "on_smart_terrain_update", "base_filler.on_smart_terrain_update", smart)
-    call_module_method("dynamic_bases", "dynamic_bases", "on_smart_terrain_update", "dynamic_bases.on_smart_terrain_update", smart)
-    call_module_method("service_filler", "service_filler", "on_smart_terrain_update", "service_filler.on_smart_terrain_update", smart)
-    call_module_method(nil, "smart_service_slot_doctor", "on_smart_terrain_update", "smart_service_slot_doctor.on_smart_terrain_update", smart)
+local function route_smart_terrain_update(smart, ctx)
+    ctx = ctx or build_smart_update_ctx(smart)
+    call_module_method_fast("board_index", "board_index", "on_smart_terrain_update", "board_index.on_smart_terrain_update", smart, ctx)
+    if wants_smart_update("smart_tasks", smart, ctx) then
+        call_module_method_fast("smart_tasks", "smart_tasks", "on_smart_terrain_update", "smart_tasks.on_smart_terrain_update", smart, ctx)
+    end
+    if wants_smart_update("mutants", smart, ctx) then
+        call_module_method_fast("mutants", "mutants", "on_smart_terrain_update", "mutants.on_smart_terrain_update", smart, ctx)
+    end
+    if wants_smart_update("base_filler", smart, ctx) then
+        call_module_method_fast("base_filler", "base_filler", "on_smart_terrain_update", "base_filler.on_smart_terrain_update", smart, ctx)
+    end
+    if wants_smart_update("dynamic_bases", smart, ctx) then
+        call_module_method_fast("dynamic_bases", "dynamic_bases", "on_smart_terrain_update", "dynamic_bases.on_smart_terrain_update", smart, ctx)
+    end
+    if wants_smart_update("service_filler", smart, ctx) then
+        call_module_method_fast("service_filler", "service_filler", "on_smart_terrain_update", "service_filler.on_smart_terrain_update", smart, ctx)
+    end
+    if wants_smart_update("smart_service_slot_doctor", smart, ctx) then
+        call_module_method_fast(nil, "smart_service_slot_doctor", "on_smart_terrain_update", "smart_service_slot_doctor.on_smart_terrain_update", smart, ctx)
+    end
 end
 
 local function route_npc_update(npc)
@@ -612,6 +701,7 @@ end
 
 local function route_task_current_changed(payload)
     call_module_method("smart_tasks", "smart_tasks", "on_task_current_changed", "smart_tasks.on_task_current_changed", payload)
+    call_module_method("tasks", "tasks", "on_task_current_changed", "tasks.on_task_current_changed", payload)
     if debug_hud_enabled and debug_hud_enabled() then
         call_module_method("debug_hud", "debug_hud", "on_task_current_changed", "debug_hud.on_task_current_changed", payload)
     end
@@ -989,7 +1079,7 @@ function Core:_on_squad_update(squad)
             dispatch_direct_squad_fsm(squad, "squad_on_update", entry)
         end
     end
-    route_squad_update(squad, entry)
+    route_squad_update(squad, entry, changed)
 end
 
 function Core:_on_squad_enter_smart(squad, smart)
@@ -1055,7 +1145,7 @@ function Core:_on_smart_terrain_update(smart)
     if self:_is_enabled() ~= true then
         return
     end
-    route_smart_terrain_update(smart)
+    route_smart_terrain_update(smart, build_smart_update_ctx(smart))
 end
 
 function Core:_on_npc_update(npc)
@@ -3915,9 +4005,22 @@ function BoardIndex:_on_squad_first_update(squad)
     self:_upsert_squad_from_object(squad and squad.id or nil, squad, "squad_on_first_update")
 end
 
-function BoardIndex:_on_squad_update(squad)
-    local sid = tonumber(squad and squad.id) or nil
-    local level_name = now_level_name_by_gvid(tonumber(squad and squad.m_game_vertex_id) or 0)
+function BoardIndex:_on_squad_update(squad, entry, changed)
+    local sid = tonumber(squad and squad.id) or tonumber(type(entry) == "table" and entry.squad_id or nil) or nil
+    if changed ~= true and type(entry) == "table" then
+        local dirty = entry.dirty
+        if type(dirty) == "table"
+            and dirty.level ~= true
+            and dirty.smart ~= true
+            and dirty.identity ~= true
+        then
+            return
+        end
+    end
+    local level_name = type(entry) == "table" and entry.level or nil
+    if not is_level_name(level_name) then
+        level_name = now_level_name_by_gvid(tonumber(squad and squad.m_game_vertex_id) or 0)
+    end
     if sid and level_name and self.RUNTIME.squad_level_by_id[sid] == level_name then
         return
     end
@@ -5496,15 +5599,6 @@ function Memory:_resolve_entry_anchor_smart(e)
                 return smart_name, resolve_smart_level_name(smart_name, e.level)
             end
         end
-        local board = get_board()
-        local by_name = board and board.smarts_by_names or nil
-        if by_name then
-            for smart_name, sm in pairs(by_name) do
-                if sm and tonumber(sm.id) == smart_id then
-                    return smart_name, resolve_smart_level_name(smart_name, e.level)
-                end
-            end
-        end
     end
 
     local current = e.tasks and e.tasks.current or nil
@@ -6808,6 +6902,8 @@ local SECTION_ZOMBIED_ADVANCED = "zombied_sim_squad_advanced"
 local SECTION_ZOMBIED_VETERAN = "zombied_sim_squad_veteran"
 
 local PREVALIDATED_CTX = { prevalidated = true }
+local PSI_RECONCILE_LEVEL_BUDGET = 1
+local PSI_RECONCILE_CONTINUE_MS = 250
 
 local MEMBER_POOL_BY_SECTION = {
     [SECTION_ZOMBIED_NOVICE] = {
@@ -6831,6 +6927,9 @@ local RUNTIME = {
     psi_levels = nil,
     immune_factions = nil,
     processing_by_sid = {},
+    psi_reconcile_levels = nil,
+    psi_reconcile_cursor = 1,
+    psi_reconcile_source = nil,
 }
 
 local function tg()
@@ -7605,14 +7704,55 @@ local function reconcile_level_once(level_name, source)
     return converted
 end
 
-local function reconcile_all_levels(source)
+local function build_psi_reconcile_levels()
+    local levels = {}
+    for level_name in pairs(get_psi_levels()) do
+        levels[#levels + 1] = level_name
+    end
+    return levels
+end
+
+local function reconcile_all_levels(source, continuation)
     if not feature_enabled_now() then
+        RUNTIME.psi_reconcile_levels = nil
+        RUNTIME.psi_reconcile_cursor = 1
         return 0
     end
-    local converted = 0
-    for level_name in pairs(get_psi_levels()) do
-        converted = converted + reconcile_level_once(level_name, source or "reconcile_all")
+    if continuation ~= true or type(RUNTIME.psi_reconcile_levels) ~= "table" then
+        RUNTIME.psi_reconcile_levels = build_psi_reconcile_levels()
+        RUNTIME.psi_reconcile_cursor = 1
+        RUNTIME.psi_reconcile_source = tostring(source or "reconcile_all")
     end
+
+    local converted = 0
+    local levels = RUNTIME.psi_reconcile_levels or {}
+    local processed = 0
+    while processed < PSI_RECONCILE_LEVEL_BUDGET and (tonumber(RUNTIME.psi_reconcile_cursor) or 1) <= #levels do
+        local idx = tonumber(RUNTIME.psi_reconcile_cursor) or 1
+        local level_name = levels[idx]
+        RUNTIME.psi_reconcile_cursor = idx + 1
+        converted = converted + reconcile_level_once(level_name, source or "reconcile_all")
+        processed = processed + 1
+    end
+
+    if (tonumber(RUNTIME.psi_reconcile_cursor) or 1) <= #levels then
+        if zhopa.timers and zhopa.timers.schedule then
+            zhopa.timers.schedule("story_psy_watchdog", "psi_reconcile", PSI_RECONCILE_CONTINUE_MS, function()
+                reconcile_all_levels(RUNTIME.psi_reconcile_source or source, true)
+            end)
+            return converted
+        end
+        while (tonumber(RUNTIME.psi_reconcile_cursor) or 1) <= #levels do
+            local idx = tonumber(RUNTIME.psi_reconcile_cursor) or 1
+            local level_name = levels[idx]
+            RUNTIME.psi_reconcile_cursor = idx + 1
+            converted = converted + reconcile_level_once(level_name, source or "reconcile_all")
+        end
+    end
+
+    RUNTIME.psi_reconcile_levels = nil
+    RUNTIME.psi_reconcile_cursor = 1
+    RUNTIME.psi_reconcile_source = nil
     return converted
 end
 
@@ -11583,8 +11723,16 @@ local function on_option_change()
     reactivate_runtime("option_change")
 end
 
-local function on_smart_terrain_update(smart)
-    local smart_name = safe_object_name(smart)
+local function wants_smart_update(_, ctx)
+    local smart_name = type(ctx) == "table" and ctx.name or nil
+    if type(smart_name) ~= "string" or smart_name == "" then
+        return false
+    end
+    return get_tasktype_for_smart(smart_name) ~= nil or RUNTIME.claims_by_smart[smart_name] ~= nil
+end
+
+local function on_smart_terrain_update(smart, ctx)
+    local smart_name = type(ctx) == "table" and ctx.name or safe_object_name(smart)
     if smart_name and (get_tasktype_for_smart(smart_name) or RUNTIME.claims_by_smart[smart_name]) then
         mark_smart_dirty(smart_name)
         process_dirty_smarts(1, { smart_name })
@@ -11612,6 +11760,7 @@ smart_tasks.on_actor_first_update = on_actor_first_update
 smart_tasks.on_load_state = on_load_state
 smart_tasks.on_option_change = on_option_change
 smart_tasks.on_task_current_changed = on_task_current_changed
+smart_tasks.wants_smart_update = wants_smart_update
 smart_tasks.on_smart_terrain_update = on_smart_terrain_update
 smart_tasks.on_server_entity_unregister = on_server_entity_unregister
 smart_tasks.on_squad_enter_smart = on_squad_enter_smart
@@ -12445,10 +12594,13 @@ local RUNTIME = {
     cap_bucket_bundle_cache = {},
     artefact_pool = false,
     stats = {},
+    task_index_by_sid = {},
+    task_index_dirty = true,
     build_prep = {
         last_prepare_tg = 0,
         sim_cycles_seen = 0,
         ctx_by_key = {},
+        ctx_by_sid = {},
         level_search_cache = {},
         smart_bucket_cache = {},
         populate_anchor_cache = {},
@@ -13390,6 +13542,7 @@ function tasks._reset_build_prep_runtime()
     bp.last_prepare_exec_tg = 0
     bp.sim_cycles_seen = 0
     bp.ctx_by_key = {}
+    bp.ctx_by_sid = {}
     bp.level_search_cache = {}
     bp.smart_bucket_cache = {}
     bp.populate_anchor_cache = {}
@@ -13408,6 +13561,8 @@ function tasks._reset_build_prep_runtime()
     RUNTIME.cap_index_by_level = {}
     RUNTIME.filtered_cap_bucket_cache = {}
     RUNTIME.cap_bucket_bundle_cache = {}
+    RUNTIME.task_index_by_sid = {}
+    RUNTIME.task_index_dirty = true
 end
 
 local function ensure_capability_index(level_name)
@@ -13527,6 +13682,8 @@ function tasks._ensure_build_prep(now)
     local bp = RUNTIME.build_prep
     bp.last_prepare_tg = now
     bp.sim_cycles_seen = tonumber(bp.sim_cycles_seen) or 0
+    if type(bp.ctx_by_sid) ~= "table" then bp.ctx_by_sid = {} end
+    if type(bp.ctx_by_key) ~= "table" then bp.ctx_by_key = {} end
     return bp
 end
 
@@ -13577,16 +13734,11 @@ end
 
 function tasks._invalidate_build_context(entry, reason)
     local sid = tonumber(entry and entry.squad_id) or entry and entry.squad_id or nil
-    local ctx_by_key = RUNTIME.build_prep and RUNTIME.build_prep.ctx_by_key or nil
-    if not (sid and type(ctx_by_key) == "table") then
+    local ctx_by_sid = RUNTIME.build_prep and RUNTIME.build_prep.ctx_by_sid or nil
+    if not (sid and type(ctx_by_sid) == "table") then
         return
     end
-    local prefix = tostring(sid) .. "|"
-    for key in pairs(ctx_by_key) do
-        if string.sub(tostring(key), 1, #prefix) == prefix then
-            ctx_by_key[key] = nil
-        end
-    end
+    ctx_by_sid[tostring(sid)] = nil
 end
 
 function tasks._get_level_search_bundle(cur_level, community, section_name, now)
@@ -13899,6 +14051,32 @@ ctx_get_populate_candidate_bundle = function(ctx)
     return cached
 end
 
+function tasks._rebuild_task_index_from_memory()
+    local memory = zhopa.memory
+    local state = memory and memory.get_state and memory.get_state() or nil
+    local squads = state and state.squads or nil
+    local out = {}
+    if type(squads) == "table" then
+        for sid, entry in pairs(squads) do
+            local id = tonumber(type(entry) == "table" and entry.squad_id or nil) or tonumber(sid) or nil
+            local current = type(entry) == "table" and entry.tasks and entry.tasks.current or nil
+            if id and type(current) == "table" then
+                out[id] = entry
+            end
+        end
+    end
+    RUNTIME.task_index_by_sid = out
+    RUNTIME.task_index_dirty = false
+    return out
+end
+
+function tasks._get_task_index_entries()
+    if RUNTIME.task_index_dirty == true or type(RUNTIME.task_index_by_sid) ~= "table" then
+        return tasks._rebuild_task_index_from_memory()
+    end
+    return RUNTIME.task_index_by_sid
+end
+
 function tasks._get_logic_index(now, purpose)
     now = tonumber(now) or tg()
     local bp = tasks._ensure_build_prep(now)
@@ -14002,8 +14180,7 @@ function tasks._get_logic_index(now, purpose)
     end
 
     if smart_task_control_populate_enabled() then
-        local state = memory and memory.get_state and memory.get_state() or nil
-        local squads = state and state.squads or nil
+        local squads = tasks._get_task_index_entries()
         if type(squads) == "table" then
             for _, entry in pairs(squads) do
                 if type(entry) == "table" and entry.npc_kind == "stalker" then
@@ -14020,8 +14197,7 @@ function tasks._get_logic_index(now, purpose)
                                 level_name = zhopa.board_index.get_smart_level(smart_name)
                             end
                             if (type(level_name) ~= "string" or level_name == "") then
-                                local sm = get_smart_by_name(smart_name)
-                                level_name = sm and sm.m_game_vertex_id and now_level_name_by_gvid(sm.m_game_vertex_id) or entry.level
+                                level_name = entry.level
                             end
                             add_populate_anchor(community, level_name, smart_name, 10)
                         end
@@ -14070,7 +14246,12 @@ function tasks._prepare_reactive_context(se_squad, entry, now, mode)
     now = tonumber(now) or tg()
     local bp = tasks._ensure_build_prep(now)
     local mode_name = type(mode) == "string" and mode or "normal"
-    local key = tasks._get_build_context_cache_key(entry, mode_name)
+    local sid_key = tostring(tonumber(entry and entry.squad_id) or entry and entry.squad_id or "-")
+    local by_mode = bp.ctx_by_sid[sid_key]
+    if type(by_mode) ~= "table" then
+        by_mode = {}
+        bp.ctx_by_sid[sid_key] = by_mode
+    end
     local ttl_ms = tasks._get_build_ctx_ttl_ms()
 
     local cur_level = resolve_entry_level(entry, se_squad) or entry.level
@@ -14081,8 +14262,10 @@ function tasks._prepare_reactive_context(se_squad, entry, now, mode)
     local dirty_ctx = type(dirty) == "table" and (dirty.task == true or dirty.community == true or dirty.identity == true or dirty.smart == true)
     if dirty_ctx then
         tasks._invalidate_build_context(entry, "dirty")
+        by_mode = {}
+        bp.ctx_by_sid[sid_key] = by_mode
     end
-    local cached = bp.ctx_by_key[key]
+    local cached = by_mode[mode_name]
     if type(cached) == "table"
         and now <= ((tonumber(cached._cache_tg) or 0) + ttl_ms)
         and cached.cur_level == cur_level
@@ -14148,7 +14331,7 @@ function tasks._prepare_reactive_context(se_squad, entry, now, mode)
         logic_index = nil,
         distance_by_smart = {},
     }
-    bp.ctx_by_key[key] = ctx
+    by_mode[mode_name] = ctx
     return ctx
 end
 
@@ -14204,16 +14387,6 @@ RUNTIME.resolve_entry_anchor_smart = function(entry)
             local smart_name = zhopa.board_index.get_smart_name_by_id(smart_id)
             if type(smart_name) == "string" and smart_name ~= "" then
                 return smart_name, RUNTIME.resolve_smart_level_name(smart_name, entry.level)
-            end
-        end
-        local board = get_board()
-        local by_name = board and board.smarts_by_names or nil
-        if by_name then
-            for smart_name, sm in pairs(by_name) do
-                if sm and tonumber(sm.id) == smart_id then
-                    local lvl = sm.m_game_vertex_id and now_level_name_by_gvid(sm.m_game_vertex_id) or entry.level
-                    return smart_name, lvl
-                end
             end
         end
     end
@@ -17627,8 +17800,40 @@ function tasks.on_load_state()
     RUNTIME.task_warn_once = {}
 end
 
+function tasks.on_task_current_changed(payload)
+    local sid = tonumber(type(payload) == "table" and payload.squad_id or nil) or nil
+    if not sid then
+        RUNTIME.task_index_dirty = true
+        return
+    end
+    if RUNTIME.task_index_dirty == true then
+        tasks._rebuild_task_index_from_memory()
+    end
+    RUNTIME.task_index_by_sid = type(RUNTIME.task_index_by_sid) == "table" and RUNTIME.task_index_by_sid or {}
+    local entry = zhopa.memory and zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
+    local current = type(payload) == "table" and payload.current_task or nil
+    if type(current) ~= "table" and type(entry) == "table" then
+        current = entry.tasks and entry.tasks.current or nil
+    end
+    if type(current) == "table" and type(entry) == "table" then
+        RUNTIME.task_index_by_sid[sid] = entry
+    else
+        RUNTIME.task_index_by_sid[sid] = nil
+    end
+    RUNTIME.task_index_dirty = false
+    local bp = tasks._ensure_build_prep(tg())
+    bp.logic_index_cache = nil
+    if type(entry) == "table" then
+        tasks._invalidate_build_context(entry, "task_current_changed")
+    end
+end
+
 function tasks.on_server_entity_unregister(se_obj, type_name)
     if type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id then
+        local sid = tonumber(se_obj.id) or nil
+        if sid and type(RUNTIME.task_index_by_sid) == "table" then
+            RUNTIME.task_index_by_sid[sid] = nil
+        end
         cancel_task_state_timer(se_obj.id)
     end
 end
@@ -19840,8 +20045,12 @@ inst.on_server_entity_unregister = function(se_obj, type_name)
         inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
     end
 end
-inst.on_smart_terrain_update = function(smart)
-    inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(smart))
+inst.wants_smart_update = function(_, ctx)
+    return type(ctx) == "table" and type(ctx.level_name) == "string" and ctx.level_name ~= ""
+end
+inst.on_smart_terrain_update = function(smart, ctx)
+    local level_name = type(ctx) == "table" and ctx.level_name or resolve_smart_level_from_obj(smart)
+    inst:_invalidate_hunt_level_smarts_cache(level_name)
 end
 inst.on_squad_first_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "first_update", entry) end
 inst.on_squad_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "update", entry) end
@@ -20321,6 +20530,13 @@ function BaseFiller:__init()
         target_level_by_name = {},
         dirty_targets_by_level = {},
         dirty_force_spawn_by_level = {},
+        dirty_queue_by_level = {},
+        dirty_queue_head_by_level = {},
+        dirty_queue_tail_by_level = {},
+        dirty_level_queue = {},
+        dirty_level_set = {},
+        dirty_level_head = 1,
+        dirty_level_tail = 0,
         smart_to_sid = {},
         sid_to_smart = {},
         cleaned_sids = {},
@@ -20799,6 +21015,9 @@ function BaseFiller:_set_level_targets(level_name, list)
         self.RUNTIME.target_set_by_level[level_name] = nil
         self.RUNTIME.dirty_targets_by_level[level_name] = nil
         self.RUNTIME.dirty_force_spawn_by_level[level_name] = nil
+        if self.RUNTIME.dirty_queue_by_level then self.RUNTIME.dirty_queue_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_head_by_level then self.RUNTIME.dirty_queue_head_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_tail_by_level then self.RUNTIME.dirty_queue_tail_by_level[level_name] = nil end
     end
 
     self:_refresh_target_stats()
@@ -20825,20 +21044,17 @@ function BaseFiller:_sync_targets_from_index()
 end
 
 function BaseFiller:_mark_all_index_targets_dirty(force_spawn, reason)
-    local dirty = {}
+    self:_reset_dirty_runtime()
     for level_name, list in pairs(self.RUNTIME.targets_by_level or {}) do
         if #list > 0 then
-            local bucket = dirty[level_name] or {}
-            dirty[level_name] = bucket
             for i = 1, #list do
-                bucket[list[i]] = true
+                self:_push_dirty_target(level_name, list[i])
             end
             if force_spawn == true then
                 self.RUNTIME.dirty_force_spawn_by_level[level_name] = true
             end
         end
     end
-    self.RUNTIME.dirty_targets_by_level = dirty
 end
 
 function BaseFiller:_drop_target(smart_name)
@@ -20873,6 +21089,9 @@ function BaseFiller:_drop_target(smart_name)
         self.RUNTIME.target_set_by_level[level_name] = nil
         self.RUNTIME.dirty_targets_by_level[level_name] = nil
         self.RUNTIME.dirty_force_spawn_by_level[level_name] = nil
+        if self.RUNTIME.dirty_queue_by_level then self.RUNTIME.dirty_queue_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_head_by_level then self.RUNTIME.dirty_queue_head_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_tail_by_level then self.RUNTIME.dirty_queue_tail_by_level[level_name] = nil end
     end
 
     self.RUNTIME.target_level_by_name[smart_name] = nil
@@ -20950,6 +21169,92 @@ function BaseFiller:_is_target_smart(smart_name)
         and self.RUNTIME.target_set_by_level[level_name][smart_name] == true
 end
 
+function BaseFiller:_reset_dirty_runtime()
+    self.RUNTIME.dirty_targets_by_level = {}
+    self.RUNTIME.dirty_force_spawn_by_level = {}
+    self.RUNTIME.dirty_queue_by_level = {}
+    self.RUNTIME.dirty_queue_head_by_level = {}
+    self.RUNTIME.dirty_queue_tail_by_level = {}
+    self.RUNTIME.dirty_level_queue = {}
+    self.RUNTIME.dirty_level_set = {}
+    self.RUNTIME.dirty_level_head = 1
+    self.RUNTIME.dirty_level_tail = 0
+end
+
+function BaseFiller:_mark_level_dirty(level_name)
+    if type(level_name) ~= "string" or level_name == "" then
+        return false
+    end
+    self.RUNTIME.dirty_level_set = type(self.RUNTIME.dirty_level_set) == "table" and self.RUNTIME.dirty_level_set or {}
+    if self.RUNTIME.dirty_level_set[level_name] == true then
+        return true
+    end
+    self.RUNTIME.dirty_level_queue = type(self.RUNTIME.dirty_level_queue) == "table" and self.RUNTIME.dirty_level_queue or {}
+    local tail = (tonumber(self.RUNTIME.dirty_level_tail) or 0) + 1
+    self.RUNTIME.dirty_level_tail = tail
+    self.RUNTIME.dirty_level_queue[tail] = level_name
+    self.RUNTIME.dirty_level_set[level_name] = true
+    return true
+end
+
+function BaseFiller:_push_dirty_target(level_name, smart_name)
+    if type(level_name) ~= "string" or level_name == "" or type(smart_name) ~= "string" or smart_name == "" then
+        return false
+    end
+    self.RUNTIME.dirty_targets_by_level = type(self.RUNTIME.dirty_targets_by_level) == "table" and self.RUNTIME.dirty_targets_by_level or {}
+    local dirty = self.RUNTIME.dirty_targets_by_level[level_name]
+    if type(dirty) ~= "table" then
+        dirty = {}
+        self.RUNTIME.dirty_targets_by_level[level_name] = dirty
+    end
+    if dirty[smart_name] == true then
+        return self:_mark_level_dirty(level_name)
+    end
+    dirty[smart_name] = true
+    self.RUNTIME.dirty_queue_by_level = type(self.RUNTIME.dirty_queue_by_level) == "table" and self.RUNTIME.dirty_queue_by_level or {}
+    local queue = self.RUNTIME.dirty_queue_by_level[level_name]
+    if type(queue) ~= "table" then
+        queue = {}
+        self.RUNTIME.dirty_queue_by_level[level_name] = queue
+    end
+    local tail_by_level = self.RUNTIME.dirty_queue_tail_by_level
+    if type(tail_by_level) ~= "table" then
+        tail_by_level = {}
+        self.RUNTIME.dirty_queue_tail_by_level = tail_by_level
+    end
+    local tail = (tonumber(tail_by_level[level_name]) or 0) + 1
+    tail_by_level[level_name] = tail
+    queue[tail] = smart_name
+    return self:_mark_level_dirty(level_name)
+end
+
+function BaseFiller:_pop_dirty_level()
+    local queue = type(self.RUNTIME.dirty_level_queue) == "table" and self.RUNTIME.dirty_level_queue or {}
+    local head = tonumber(self.RUNTIME.dirty_level_head) or 1
+    local tail = tonumber(self.RUNTIME.dirty_level_tail) or 0
+    while head <= tail do
+        local level_name = queue[head]
+        queue[head] = nil
+        head = head + 1
+        self.RUNTIME.dirty_level_head = head
+        if type(level_name) == "string" and level_name ~= "" then
+            if self.RUNTIME.dirty_level_set then
+                self.RUNTIME.dirty_level_set[level_name] = nil
+            end
+            if type(self.RUNTIME.dirty_targets_by_level) == "table"
+                and type(self.RUNTIME.dirty_targets_by_level[level_name]) == "table"
+            then
+                return level_name
+            end
+        end
+    end
+    self.RUNTIME.dirty_level_queue = {}
+    self.RUNTIME.dirty_level_set = {}
+    self.RUNTIME.dirty_level_head = 1
+    self.RUNTIME.dirty_level_tail = 0
+    return nil
+end
+
 function BaseFiller:_resolve_target_smart_name_from_squad(se_squad)
     if not se_squad then
         return nil
@@ -20982,17 +21287,32 @@ function BaseFiller:_consume_dirty_targets(level_name)
     if type(dirty) ~= "table" then
         return out
     end
-    for smart_name in pairs(dirty) do
+    local queue = type(self.RUNTIME.dirty_queue_by_level) == "table" and self.RUNTIME.dirty_queue_by_level[level_name] or {}
+    local head_by_level = self.RUNTIME.dirty_queue_head_by_level
+    if type(head_by_level) ~= "table" then
+        head_by_level = {}
+        self.RUNTIME.dirty_queue_head_by_level = head_by_level
+    end
+    local tail_by_level = self.RUNTIME.dirty_queue_tail_by_level or {}
+    local head = tonumber(head_by_level[level_name]) or 1
+    local tail = tonumber(tail_by_level[level_name]) or 0
+    while head <= tail do
+        local smart_name = queue[head]
+        queue[head] = nil
+        head = head + 1
+        head_by_level[level_name] = head
         if self:_is_target_smart(smart_name) then
             out[#out + 1] = smart_name
         end
-        dirty[smart_name] = nil
-    end
-    if table_sort then
-        table_sort(out)
+        if type(smart_name) == "string" then
+            dirty[smart_name] = nil
+        end
     end
     if next(dirty) == nil then
         self.RUNTIME.dirty_targets_by_level[level_name] = nil
+        if self.RUNTIME.dirty_queue_by_level then self.RUNTIME.dirty_queue_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_head_by_level then self.RUNTIME.dirty_queue_head_by_level[level_name] = nil end
+        if self.RUNTIME.dirty_queue_tail_by_level then self.RUNTIME.dirty_queue_tail_by_level[level_name] = nil end
     end
     return out
 end
@@ -21002,13 +21322,7 @@ function BaseFiller:_mark_target_dirty(smart_name, force_spawn, reason)
     if type(level_name) ~= "string" or level_name == "" or self:_is_target_smart(smart_name) ~= true then
         return false
     end
-    self.RUNTIME.dirty_targets_by_level = type(self.RUNTIME.dirty_targets_by_level) == "table" and self.RUNTIME.dirty_targets_by_level or {}
-    local dirty = self.RUNTIME.dirty_targets_by_level[level_name]
-    if type(dirty) ~= "table" then
-        dirty = {}
-        self.RUNTIME.dirty_targets_by_level[level_name] = dirty
-    end
-    dirty[smart_name] = true
+    self:_push_dirty_target(level_name, smart_name)
     if force_spawn == true then
         self.RUNTIME.dirty_force_spawn_by_level[level_name] = true
     end
@@ -21415,18 +21729,11 @@ function BaseFiller:_run_dirty_reconcile(reason)
         repeat
             self.RUNTIME.reconcile_pending = false
 
-            local levels = {}
-            for level_name in pairs(self.RUNTIME.dirty_targets_by_level or {}) do
-                if type(level_name) == "string" and level_name ~= "" then
-                    levels[#levels + 1] = level_name
+            while true do
+                local level_name = self:_pop_dirty_level()
+                if not level_name then
+                    break
                 end
-            end
-            if table_sort then
-                table_sort(levels)
-            end
-
-            for i = 1, #levels do
-                local level_name = levels[i]
                 local targets = self:_consume_dirty_targets(level_name)
                 if #targets > 0 then
                     local force_spawn = self.RUNTIME.dirty_force_spawn_by_level[level_name] == true
@@ -21476,8 +21783,7 @@ function BaseFiller:_reactivate_runtime(reason)
     self.RUNTIME.targets_by_level = {}
     self.RUNTIME.target_set_by_level = {}
     self.RUNTIME.target_level_by_name = {}
-    self.RUNTIME.dirty_targets_by_level = {}
-    self.RUNTIME.dirty_force_spawn_by_level = {}
+    self:_reset_dirty_runtime()
     self.RUNTIME.smart_to_sid = {}
     self.RUNTIME.sid_to_smart = {}
     self.RUNTIME.cleaned_sids = {}
@@ -21554,8 +21860,7 @@ function BaseFiller:_load_state(m_data)
     self.RUNTIME.targets_by_level = {}
     self.RUNTIME.target_set_by_level = {}
     self.RUNTIME.target_level_by_name = {}
-    self.RUNTIME.dirty_targets_by_level = {}
-    self.RUNTIME.dirty_force_spawn_by_level = {}
+    self:_reset_dirty_runtime()
     self.RUNTIME.smart_to_sid = {}
     self.RUNTIME.sid_to_smart = {}
     self.RUNTIME.cleaned_sids = {}
@@ -21605,7 +21910,21 @@ inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
 inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
-inst.on_smart_terrain_update = function(smart) return inst:_mark_dirty_from_smart(smart, false, "smart_update") end
+inst.wants_smart_update = function(smart, ctx)
+    if inst:_is_enabled() ~= true then
+        return false
+    end
+    local smart_name = type(ctx) == "table" and ctx.name or object_name(smart)
+    if type(smart_name) ~= "string" or smart_name == "" then
+        return false
+    end
+    if inst:_is_target_smart(smart_name) then
+        return true
+    end
+    local level_name = type(ctx) == "table" and ctx.level_name or nil
+    return inst:_smart_is_config_target(smart_name, level_name)
+end
+inst.on_smart_terrain_update = function(smart, ctx) return inst:_mark_dirty_from_smart(smart, false, "smart_update") end
 inst.on_server_entity_unregister = function(se_obj)
     local smart_name = object_name(se_obj)
     if inst:_is_target_smart(smart_name) then
@@ -22037,6 +22356,9 @@ function DynamicBases:__init()
         targets = {},
         target_set = {},
         dirty_targets = {},
+        dirty_queue = {},
+        dirty_queue_head = 1,
+        dirty_queue_tail = 0,
         original_by_name = {},
         applied_signature_by_name = {},
         owner_by_name = {},
@@ -22415,16 +22737,27 @@ end
 function DynamicBases:_consume_dirty_targets()
     local out = {}
     local dirty = type(self.RUNTIME.dirty_targets) == "table" and self.RUNTIME.dirty_targets or {}
-    for smart_name in pairs(dirty) do
+    local queue = type(self.RUNTIME.dirty_queue) == "table" and self.RUNTIME.dirty_queue or {}
+    local head = tonumber(self.RUNTIME.dirty_queue_head) or 1
+    local tail = tonumber(self.RUNTIME.dirty_queue_tail) or 0
+    while head <= tail do
+        local smart_name = queue[head]
+        queue[head] = nil
+        head = head + 1
+        self.RUNTIME.dirty_queue_head = head
         if self:_is_target_smart(smart_name) then
             out[#out + 1] = smart_name
         end
-        dirty[smart_name] = nil
-    end
-    if table_sort then
-        table_sort(out)
+        if type(smart_name) == "string" then
+            dirty[smart_name] = nil
+        end
     end
     self.RUNTIME.dirty_targets = dirty
+    if next(dirty) == nil then
+        self.RUNTIME.dirty_queue = {}
+        self.RUNTIME.dirty_queue_head = 1
+        self.RUNTIME.dirty_queue_tail = 0
+    end
     return out
 end
 
@@ -22433,6 +22766,12 @@ function DynamicBases:_mark_target_dirty(smart_name, reason)
         return false
     end
     self.RUNTIME.dirty_targets = type(self.RUNTIME.dirty_targets) == "table" and self.RUNTIME.dirty_targets or {}
+    if self.RUNTIME.dirty_targets[smart_name] ~= true then
+        local tail = (tonumber(self.RUNTIME.dirty_queue_tail) or 0) + 1
+        self.RUNTIME.dirty_queue_tail = tail
+        self.RUNTIME.dirty_queue = type(self.RUNTIME.dirty_queue) == "table" and self.RUNTIME.dirty_queue or {}
+        self.RUNTIME.dirty_queue[tail] = smart_name
+    end
     self.RUNTIME.dirty_targets[smart_name] = true
     return self:_run_dirty_reconcile(reason or "dirty")
 end
@@ -22550,8 +22889,17 @@ function DynamicBases:_reactivate_runtime(reason)
     self.RUNTIME.active_enabled = true
     self:_sync_targets_from_index()
     self.RUNTIME.dirty_targets = {}
+    self.RUNTIME.dirty_queue = {}
+    self.RUNTIME.dirty_queue_head = 1
+    self.RUNTIME.dirty_queue_tail = 0
     for i = 1, #(self.RUNTIME.targets or {}) do
-        self.RUNTIME.dirty_targets[self.RUNTIME.targets[i]] = true
+        local smart_name = self.RUNTIME.targets[i]
+        if self:_is_target_smart(smart_name) then
+            local tail = (tonumber(self.RUNTIME.dirty_queue_tail) or 0) + 1
+            self.RUNTIME.dirty_queue_tail = tail
+            self.RUNTIME.dirty_queue[tail] = smart_name
+            self.RUNTIME.dirty_targets[smart_name] = true
+        end
     end
     self:_run_dirty_reconcile(reason or "reactivate")
 end
@@ -22578,6 +22926,9 @@ function DynamicBases:_load_state(m_data)
     self.RUNTIME.targets = {}
     self.RUNTIME.target_set = {}
     self.RUNTIME.dirty_targets = {}
+    self.RUNTIME.dirty_queue = {}
+    self.RUNTIME.dirty_queue_head = 1
+    self.RUNTIME.dirty_queue_tail = 0
     self.RUNTIME.original_by_name = clone_original_by_name(type(loaded) == "table" and loaded.original_by_name or nil)
     self.RUNTIME.applied_signature_by_name = {}
     self.RUNTIME.owner_by_name = {}
@@ -22606,7 +22957,17 @@ inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
 inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
-inst.on_smart_terrain_update = function(smart)
+inst.wants_smart_update = function(smart, ctx)
+    if inst:_is_enabled() ~= true then
+        return false
+    end
+    local smart_name = type(ctx) == "table" and ctx.name or object_name(smart)
+    if type(smart_name) ~= "string" or smart_name == "" then
+        return false
+    end
+    return inst:_is_target_smart(smart_name) or is_base_respawn_smart(smart)
+end
+inst.on_smart_terrain_update = function(smart, ctx)
     local smart_name, keep = inst:_upsert_target_from_smart(smart, "smart_update")
     if keep and smart_name then
         return inst:_mark_target_dirty(smart_name, "smart_update")
@@ -23263,6 +23624,10 @@ function ServiceFiller:__init()
         targets = {},
         target_set = {},
         dirty_targets = {},
+        dirty_queue = {},
+        dirty_queue_head = 1,
+        dirty_queue_tail = 0,
+        applied_signature_by_smart = {},
         skip_retry_tg_by_smart = {},
         pending_spawn_by_smart_role = {},
         warfare_ignore_installed = false,
@@ -24060,6 +24425,7 @@ function ServiceFiller:_sync_targets_from_index()
             self.RUNTIME.dirty_targets[smart_name] = nil
             self.RUNTIME.skip_retry_tg_by_smart[smart_name] = nil
             self.RUNTIME.pending_spawn_by_smart_role[smart_name] = nil
+            self.RUNTIME.applied_signature_by_smart[smart_name] = nil
         end
     end
 
@@ -24086,6 +24452,7 @@ function ServiceFiller:_remove_target(smart_name)
     end
     self.RUNTIME.skip_retry_tg_by_smart[smart_name] = nil
     self.RUNTIME.pending_spawn_by_smart_role[smart_name] = nil
+    self.RUNTIME.applied_signature_by_smart[smart_name] = nil
     self:_refresh_target_stats()
     return true
 end
@@ -24162,16 +24529,27 @@ end
 function ServiceFiller:_consume_dirty_targets()
     local out = {}
     local dirty = type(self.RUNTIME.dirty_targets) == "table" and self.RUNTIME.dirty_targets or {}
-    for smart_name in pairs(dirty) do
+    local queue = type(self.RUNTIME.dirty_queue) == "table" and self.RUNTIME.dirty_queue or {}
+    local head = tonumber(self.RUNTIME.dirty_queue_head) or 1
+    local tail = tonumber(self.RUNTIME.dirty_queue_tail) or 0
+    while head <= tail do
+        local smart_name = queue[head]
+        queue[head] = nil
+        head = head + 1
+        self.RUNTIME.dirty_queue_head = head
         if self:_is_target_smart(smart_name) then
             out[#out + 1] = smart_name
         end
-        dirty[smart_name] = nil
-    end
-    if table_sort then
-        table_sort(out)
+        if type(smart_name) == "string" then
+            dirty[smart_name] = nil
+        end
     end
     self.RUNTIME.dirty_targets = dirty
+    if next(dirty) == nil then
+        self.RUNTIME.dirty_queue = {}
+        self.RUNTIME.dirty_queue_head = 1
+        self.RUNTIME.dirty_queue_tail = 0
+    end
     return out
 end
 
@@ -24180,16 +24558,48 @@ function ServiceFiller:_mark_target_dirty(smart_name, reason)
         return false
     end
     self.RUNTIME.dirty_targets = type(self.RUNTIME.dirty_targets) == "table" and self.RUNTIME.dirty_targets or {}
+    if self.RUNTIME.dirty_targets[smart_name] ~= true then
+        local tail = (tonumber(self.RUNTIME.dirty_queue_tail) or 0) + 1
+        self.RUNTIME.dirty_queue_tail = tail
+        self.RUNTIME.dirty_queue = type(self.RUNTIME.dirty_queue) == "table" and self.RUNTIME.dirty_queue or {}
+        self.RUNTIME.dirty_queue[tail] = smart_name
+    end
     self.RUNTIME.dirty_targets[smart_name] = true
     return self:_run_dirty_reconcile(reason or "dirty")
 end
 
 function ServiceFiller:_mark_all_index_targets_dirty(reason)
     self.RUNTIME.dirty_targets = {}
+    self.RUNTIME.dirty_queue = {}
+    self.RUNTIME.dirty_queue_head = 1
+    self.RUNTIME.dirty_queue_tail = 0
     for i = 1, #(self.RUNTIME.targets or {}) do
-        self.RUNTIME.dirty_targets[self.RUNTIME.targets[i]] = true
+        local smart_name = self.RUNTIME.targets[i]
+        if self:_is_target_smart(smart_name) then
+            local tail = (tonumber(self.RUNTIME.dirty_queue_tail) or 0) + 1
+            self.RUNTIME.dirty_queue_tail = tail
+            self.RUNTIME.dirty_queue[tail] = smart_name
+            self.RUNTIME.dirty_targets[smart_name] = true
+        end
     end
     return true
+end
+
+function ServiceFiller:_has_pending_spawn_for_smart(smart_name)
+    local pending = type(self.RUNTIME.pending_spawn_by_smart_role) == "table"
+        and self.RUNTIME.pending_spawn_by_smart_role[smart_name]
+        or nil
+    return type(pending) == "table" and next(pending) ~= nil
+end
+
+function ServiceFiller:_build_process_signature(smart_name, owner_alias, factions_sig, occupied, allowed_roles_count, existing_count, stalker_count)
+    return tostring(smart_name or "-")
+        .. "|" .. tostring(owner_alias or "-")
+        .. "|" .. tostring(factions_sig or "-")
+        .. "|" .. tostring(occupied == true)
+        .. "|" .. tostring(tonumber(allowed_roles_count) or 0)
+        .. "|" .. tostring(tonumber(existing_count) or 0)
+        .. "|" .. tostring(tonumber(stalker_count) or 0)
 end
 
 function ServiceFiller:_process_smart(board, smart_name)
@@ -24206,6 +24616,23 @@ function ServiceFiller:_process_smart(board, smart_name)
     local occupied = self:_smart_has_non_service_population(smart, live_scan)
     local allowed_roles_count = count_keys(allowed_roles)
     local existing_count = count_keys(existing)
+    local signature = self:_build_process_signature(
+        smart_name,
+        owner_alias,
+        factions_sig,
+        occupied,
+        allowed_roles_count,
+        existing_count,
+        stalker_count
+    )
+    local due = self:_is_due(smart_name)
+    if self.RUNTIME.applied_signature_by_smart[smart_name] == signature
+        and due ~= true
+        and self:_has_pending_spawn_for_smart(smart_name) ~= true
+    then
+        return
+    end
+    self.RUNTIME.applied_signature_by_smart[smart_name] = signature
 
     if owner_alias then
         for role, holder in pairs(existing) do
@@ -24219,7 +24646,7 @@ function ServiceFiller:_process_smart(board, smart_name)
         end
     end
 
-    if not self:_is_due(smart_name) then
+    if not due then
         return
     end
 
@@ -24406,6 +24833,10 @@ function ServiceFiller:_load_state(m_data)
     self.RUNTIME.targets = {}
     self.RUNTIME.target_set = {}
     self.RUNTIME.dirty_targets = {}
+    self.RUNTIME.dirty_queue = {}
+    self.RUNTIME.dirty_queue_head = 1
+    self.RUNTIME.dirty_queue_tail = 0
+    self.RUNTIME.applied_signature_by_smart = {}
     self.RUNTIME.skip_retry_tg_by_smart = {}
     self.RUNTIME.pending_spawn_by_smart_role = {}
     self.RUNTIME.warfare_ignore_installed = false
@@ -24425,7 +24856,17 @@ inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
 inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
-inst.on_smart_terrain_update = function(smart) return inst:_mark_dirty_from_smart(smart, "smart_update") end
+inst.wants_smart_update = function(smart, ctx)
+    if inst:_is_enabled() ~= true then
+        return false
+    end
+    local smart_name = type(ctx) == "table" and ctx.name or object_name(smart)
+    if type(smart_name) ~= "string" or smart_name == "" then
+        return false
+    end
+    return inst:_is_target_smart(smart_name) or inst:_should_target_smart(smart_name, smart)
+end
+inst.on_smart_terrain_update = function(smart, ctx) return inst:_mark_dirty_from_smart(smart, "smart_update") end
 inst.on_server_entity_unregister = function(se_obj, type_name)
     local smart_name = object_name(se_obj)
     if inst:_is_target_smart(smart_name) then
@@ -24658,12 +25099,14 @@ local inst = {
         corpse_index = {},
         corpse_queue = {},
         corpse_head = 1,
+        corpse_tail = 0,
         corpse_size = 0,
         item_events = {},
         item_ids = {},
         item_index = {},
         item_queue = {},
         item_head = 1,
+        item_tail = 0,
         item_size = 0,
         last_cleanup_tg = 0,
         last_surge_seen_tg = 0,
@@ -25433,6 +25876,7 @@ local function clear_store(kind)
     inst.RUNTIME[kind .. "_index"] = {}
     inst.RUNTIME[kind .. "_queue"] = {}
     inst.RUNTIME[kind .. "_head"] = 1
+    inst.RUNTIME[kind .. "_tail"] = 0
     inst.RUNTIME[kind .. "_size"] = 0
 end
 
@@ -25486,32 +25930,44 @@ local function add_event_id(kind, id, now)
     end
 
     events[id] = now
-    queue[#queue + 1] = { id = id, tg = now }
+    local tail_key = kind .. "_tail"
+    local tail = (tonumber(inst.RUNTIME[tail_key]) or 0) + 1
+    inst.RUNTIME[tail_key] = tail
+    queue[tail] = { id = id, tg = now }
+end
+
+local function queue_tail_key(kind)
+    return tostring(kind or "") .. "_tail"
 end
 
 local function compact_queue(kind)
     local queue_key = kind .. "_queue"
     local head_key = kind .. "_head"
+    local tail_key = queue_tail_key(kind)
     local queue = inst.RUNTIME[queue_key]
     local head = tonumber(inst.RUNTIME[head_key]) or 1
+    local tail = tonumber(inst.RUNTIME[tail_key]) or 0
     if head <= 1 then return end
-    if head < 256 and head <= (#queue / 2) then return end
+    if head < 256 and head <= (tail / 2) then return end
 
     local compacted = {}
-    for i = head, #queue do
+    for i = head, tail do
         compacted[#compacted + 1] = queue[i]
     end
     inst.RUNTIME[queue_key] = compacted
     inst.RUNTIME[head_key] = 1
+    inst.RUNTIME[tail_key] = #compacted
 end
 
 local function peek_head_entry(kind)
     local queue_key = kind .. "_queue"
     local head_key = kind .. "_head"
+    local tail_key = queue_tail_key(kind)
     local queue = inst.RUNTIME[queue_key]
     local head = tonumber(inst.RUNTIME[head_key]) or 1
+    local tail = tonumber(inst.RUNTIME[tail_key]) or 0
 
-    while head <= #queue do
+    while head <= tail do
         local entry = queue[head]
         if entry and type(entry.id) == "number" and type(entry.tg) == "number" then
             inst.RUNTIME[head_key] = head
@@ -26132,8 +26588,17 @@ local function patch_xr_gather_items()
         local corpse_ids = loot.get_corpse_event_ids and loot.get_corpse_event_ids() or nil
         local corpse_pool_n = corpse_ids and #corpse_ids or 0
         if corpse_pool_n > 0 and corpse_sqr > 0 then
-            for idx = corpse_pool_n, 1, -1 do
+            local corpse_scan_budget = math.max(16, max_memory * 2)
+            if corpse_scan_budget > corpse_pool_n then
+                corpse_scan_budget = corpse_pool_n
+            end
+            local idx = tonumber(self.st.__zhopa_corpse_pool_cursor) or corpse_pool_n
+            for _ = 1, corpse_scan_budget do
+                if idx < 1 then
+                    idx = corpse_pool_n
+                end
                 local corpse_id = corpse_ids[idx]
+                idx = idx - 1
                 local corpse = corpse_id and db and db.storage and db.storage[corpse_id] and db.storage[corpse_id].object
                 if corpse and corpse:alive() ~= true and not is_protected_corpse(corpse, corpse_id) then
                     if npc:position():distance_to_sqr(corpse:position()) < corpse_sqr then
@@ -26142,6 +26607,7 @@ local function patch_xr_gather_items()
                     end
                 end
             end
+            self.st.__zhopa_corpse_pool_cursor = idx
         end
 
         if size == 0 then
@@ -27510,10 +27976,15 @@ local RUNTIME = {
     smart_rule_cache = {},
     smart_seen = {},
     by_npc = {},
+    by_smart = {},
     completed_watch_by_npc = {},
+    completed_watch_by_smart = {},
     progress_by_npc = {},
+    progress_by_smart = {},
     post_tech_watch_by_npc = {},
+    post_tech_watch_by_smart = {},
     ingress_by_npc = {},
+    ingress_by_smart = {},
 }
 
 local function now()
@@ -27528,10 +27999,81 @@ local function reset_runtime()
     RUNTIME.smart_rule_cache = {}
     RUNTIME.smart_seen = {}
     RUNTIME.by_npc = {}
+    RUNTIME.by_smart = {}
     RUNTIME.completed_watch_by_npc = {}
+    RUNTIME.completed_watch_by_smart = {}
     RUNTIME.progress_by_npc = {}
+    RUNTIME.progress_by_smart = {}
     RUNTIME.post_tech_watch_by_npc = {}
+    RUNTIME.post_tech_watch_by_smart = {}
     RUNTIME.ingress_by_npc = {}
+    RUNTIME.ingress_by_smart = {}
+end
+
+local function set_smart_bucket_entry(bucket_name, smart_id, npc_id, enabled)
+    smart_id = tonumber(smart_id) or nil
+    npc_id = tonumber(npc_id) or nil
+    if not (smart_id and npc_id) then
+        return false
+    end
+    local by_smart = RUNTIME[bucket_name]
+    if type(by_smart) ~= "table" then
+        by_smart = {}
+        RUNTIME[bucket_name] = by_smart
+    end
+    local bucket = by_smart[smart_id]
+    if enabled == true then
+        if type(bucket) ~= "table" then
+            bucket = {}
+            by_smart[smart_id] = bucket
+        end
+        bucket[npc_id] = true
+        return true
+    end
+    if type(bucket) == "table" then
+        bucket[npc_id] = nil
+        if next(bucket) == nil then
+            by_smart[smart_id] = nil
+        end
+    end
+    return true
+end
+
+local function set_indexed_runtime_state(map_name, bucket_name, npc_id, state)
+    npc_id = tonumber(npc_id) or nil
+    if not npc_id then
+        return false
+    end
+    local map = RUNTIME[map_name]
+    if type(map) ~= "table" then
+        map = {}
+        RUNTIME[map_name] = map
+    end
+    local prev = map[npc_id]
+    if prev and prev.smart_id ~= (state and state.smart_id) then
+        set_smart_bucket_entry(bucket_name, prev.smart_id, npc_id, false)
+    end
+    if type(state) == "table" then
+        map[npc_id] = state
+        set_smart_bucket_entry(bucket_name, state.smart_id, npc_id, true)
+    else
+        map[npc_id] = nil
+    end
+    return true
+end
+
+local function clear_indexed_runtime_state(map_name, bucket_name, npc_id)
+    npc_id = tonumber(npc_id) or nil
+    if not npc_id then
+        return false
+    end
+    local map = RUNTIME[map_name]
+    local prev = type(map) == "table" and map[npc_id] or nil
+    if prev then
+        set_smart_bucket_entry(bucket_name, prev.smart_id, npc_id, false)
+        map[npc_id] = nil
+    end
+    return true
 end
 
 local function mark_runtime_ready()
@@ -27945,11 +28487,11 @@ end
 local function clear_runtime_state_for_npc(npc_id)
     npc_id = tonumber(npc_id) or nil
     if npc_id then
-        RUNTIME.by_npc[npc_id] = nil
-        RUNTIME.completed_watch_by_npc[npc_id] = nil
-        RUNTIME.progress_by_npc[npc_id] = nil
-        RUNTIME.post_tech_watch_by_npc[npc_id] = nil
-        RUNTIME.ingress_by_npc[npc_id] = nil
+        clear_indexed_runtime_state("by_npc", "by_smart", npc_id)
+        clear_indexed_runtime_state("completed_watch_by_npc", "completed_watch_by_smart", npc_id)
+        clear_indexed_runtime_state("progress_by_npc", "progress_by_smart", npc_id)
+        clear_indexed_runtime_state("post_tech_watch_by_npc", "post_tech_watch_by_smart", npc_id)
+        clear_indexed_runtime_state("ingress_by_npc", "ingress_by_smart", npc_id)
     end
 end
 
@@ -27961,29 +28503,25 @@ local function clear_runtime_state_for_smart(smart_id)
     RUNTIME.smart_next_scan_tg[smart_id] = nil
     RUNTIME.non_service_next_scan_tg[smart_id] = nil
     RUNTIME.smart_rule_cache[smart_id] = nil
-    for npc_id, state in pairs(RUNTIME.by_npc) do
-        if state.smart_id == smart_id then
-            RUNTIME.by_npc[npc_id] = nil
-        end
-    end
-    for npc_id, watch in pairs(RUNTIME.completed_watch_by_npc) do
-        if watch.smart_id == smart_id then
-            RUNTIME.completed_watch_by_npc[npc_id] = nil
-        end
-    end
-    for npc_id, state in pairs(RUNTIME.progress_by_npc) do
-        if state.smart_id == smart_id then
-            RUNTIME.progress_by_npc[npc_id] = nil
-        end
-    end
-    for npc_id, watch in pairs(RUNTIME.post_tech_watch_by_npc) do
-        if watch.smart_id == smart_id then
-            RUNTIME.post_tech_watch_by_npc[npc_id] = nil
-        end
-    end
-    for npc_id, state in pairs(RUNTIME.ingress_by_npc) do
-        if state.smart_id == smart_id then
-            RUNTIME.ingress_by_npc[npc_id] = nil
+    local buckets = {
+        { map = "by_npc", bucket = "by_smart" },
+        { map = "completed_watch_by_npc", bucket = "completed_watch_by_smart" },
+        { map = "progress_by_npc", bucket = "progress_by_smart" },
+        { map = "post_tech_watch_by_npc", bucket = "post_tech_watch_by_smart" },
+        { map = "ingress_by_npc", bucket = "ingress_by_smart" },
+    }
+    for i = 1, #buckets do
+        local spec = buckets[i]
+        local by_smart = RUNTIME[spec.bucket]
+        local bucket = type(by_smart) == "table" and by_smart[smart_id] or nil
+        if type(bucket) == "table" then
+            local ids = {}
+            for npc_id in pairs(bucket) do
+                ids[#ids + 1] = npc_id
+            end
+            for j = 1, #ids do
+                clear_indexed_runtime_state(spec.map, spec.bucket, ids[j])
+            end
         end
     end
 end
@@ -28219,7 +28757,7 @@ local function refresh_progress_tracking(snapshot)
                     or state.active_section ~= entry.active_section
                     or state.slot_section ~= tostring(entry.job_section or "-")
                 then
-                    RUNTIME.progress_by_npc[npc_id] = {
+                    set_indexed_runtime_state("progress_by_npc", "progress_by_smart", npc_id, {
                         smart_id = snapshot.smart_id,
                         rule_name = rule.name,
                         active_section = entry.active_section,
@@ -28229,7 +28767,7 @@ local function refresh_progress_tracking(snapshot)
                         last_seen_tg = tg,
                         first_seen_tg = tg,
                         last_intent = rule.has_intent(entry.st) == true,
-                    }
+                    })
                 else
                     state.last_seen_tg = tg
                     state.last_intent = rule.has_intent(entry.st) == true
@@ -28242,10 +28780,17 @@ local function refresh_progress_tracking(snapshot)
         end
     end
 
-    for npc_id, state in pairs(RUNTIME.progress_by_npc) do
-        if state.smart_id == snapshot.smart_id and active_service_ids[npc_id] ~= true then
+    local progress_bucket = RUNTIME.progress_by_smart and RUNTIME.progress_by_smart[snapshot.smart_id] or nil
+    local progress_ids = {}
+    for npc_id in pairs(progress_bucket or {}) do
+        progress_ids[#progress_ids + 1] = npc_id
+    end
+    for i = 1, #progress_ids do
+        local npc_id = progress_ids[i]
+        local state = RUNTIME.progress_by_npc[npc_id]
+        if state and state.smart_id == snapshot.smart_id and active_service_ids[npc_id] ~= true then
             maybe_arm_departed_post_tech_watch(snapshot, npc_id, state, tg)
-            RUNTIME.progress_by_npc[npc_id] = nil
+            clear_indexed_runtime_state("progress_by_npc", "progress_by_smart", npc_id)
         end
     end
 end
@@ -28269,7 +28814,7 @@ local function refresh_ingress_tracking(snapshot)
                     or state.smart_id ~= snapshot.smart_id
                     or state.rule_name ~= rule.name
                 then
-                    RUNTIME.ingress_by_npc[npc_id] = {
+                    set_indexed_runtime_state("ingress_by_npc", "ingress_by_smart", npc_id, {
                         smart_id = snapshot.smart_id,
                         smart_name = snapshot.smart_name,
                         rule_name = rule.name,
@@ -28278,7 +28823,7 @@ local function refresh_ingress_tracking(snapshot)
                         last_seen_tg = tg,
                         first_seen_tg = tg,
                         slot_owner_id = slot_owner_id,
-                    }
+                    })
                 else
                     state.last_seen_tg = tg
                     state.slot_owner_id = slot_owner_id
@@ -28291,9 +28836,16 @@ local function refresh_ingress_tracking(snapshot)
         end
     end
 
-    for npc_id, state in pairs(RUNTIME.ingress_by_npc) do
-        if state.smart_id == snapshot.smart_id and active_ids[npc_id] ~= true then
-            RUNTIME.ingress_by_npc[npc_id] = nil
+    local ingress_bucket = RUNTIME.ingress_by_smart and RUNTIME.ingress_by_smart[snapshot.smart_id] or nil
+    local ingress_ids = {}
+    for npc_id in pairs(ingress_bucket or {}) do
+        ingress_ids[#ingress_ids + 1] = npc_id
+    end
+    for i = 1, #ingress_ids do
+        local npc_id = ingress_ids[i]
+        local state = RUNTIME.ingress_by_npc[npc_id]
+        if state and state.smart_id == snapshot.smart_id and active_ids[npc_id] ~= true then
+            clear_indexed_runtime_state("ingress_by_npc", "ingress_by_smart", npc_id)
         end
     end
 end
@@ -28404,14 +28956,14 @@ end
 local function clear_completed_watch(npc_id)
     npc_id = tonumber(npc_id) or nil
     if npc_id then
-        RUNTIME.completed_watch_by_npc[npc_id] = nil
+        clear_indexed_runtime_state("completed_watch_by_npc", "completed_watch_by_smart", npc_id)
     end
 end
 
 local function clear_post_tech_watch(npc_id)
     npc_id = tonumber(npc_id) or nil
     if npc_id then
-        RUNTIME.post_tech_watch_by_npc[npc_id] = nil
+        clear_indexed_runtime_state("post_tech_watch_by_npc", "post_tech_watch_by_smart", npc_id)
     end
 end
 
@@ -28435,7 +28987,7 @@ local function arm_completed_watch(npc, smart, kind, status, reason)
         expect = "tech_or_exit"
     end
 
-    RUNTIME.completed_watch_by_npc[npc_id] = {
+    set_indexed_runtime_state("completed_watch_by_npc", "completed_watch_by_smart", npc_id, {
         npc_id = npc_id,
         smart_id = smart_id,
         smart_name = get_smart_name(smart),
@@ -28443,7 +28995,7 @@ local function arm_completed_watch(npc, smart, kind, status, reason)
         expect = expect,
         reason = tostring(reason or "-"),
         armed_tg = now(),
-    }
+    })
 
     return true
 end
@@ -28479,7 +29031,7 @@ arm_post_tech_watch = function(npc, smart, reason, left_service_tg)
             last_signature = build_post_tech_signature(npc, info, st),
             last_progress_tg = tg,
         }
-        RUNTIME.post_tech_watch_by_npc[npc_id] = watch
+        set_indexed_runtime_state("post_tech_watch_by_npc", "post_tech_watch_by_smart", npc_id, watch)
     else
         watch.smart_name = get_smart_name(smart)
         watch.reason = tostring(reason or watch.reason or "-")
@@ -28504,8 +29056,15 @@ local function detect_post_complete_issues(snapshot, issued)
     local issues = {}
     local tg = now()
 
-    for npc_id, watch in pairs(RUNTIME.completed_watch_by_npc) do
-        if watch.smart_id == snapshot.smart_id then
+    local bucket = RUNTIME.completed_watch_by_smart and RUNTIME.completed_watch_by_smart[snapshot.smart_id] or nil
+    local ids = {}
+    for npc_id in pairs(bucket or {}) do
+        ids[#ids + 1] = npc_id
+    end
+    for i = 1, #ids do
+        local npc_id = ids[i]
+        local watch = RUNTIME.completed_watch_by_npc[npc_id]
+        if watch and watch.smart_id == snapshot.smart_id then
             local entry = snapshot.entries[npc_id]
             if not (entry and entry.st and entry.active_section and entry.active_scheme == "beh") then
                 clear_completed_watch(npc_id)
@@ -28696,7 +29255,7 @@ local function ensure_state(issue)
             last_seen_tg = tg,
             last_action_tg = 0,
         }
-        RUNTIME.by_npc[npc_id] = state
+        set_indexed_runtime_state("by_npc", "by_smart", npc_id, state)
         log_info(
             "issue_seen kind=%s smart=%s npc=%s id=%s rule=%s linked=%s slot=%s active=%s",
             tostring(issue.kind),
@@ -28711,7 +29270,13 @@ local function ensure_state(issue)
         return state, true
     end
 
-    state.smart_id = issue.smart_id
+    if state.smart_id ~= issue.smart_id then
+        set_smart_bucket_entry("by_smart", state.smart_id, npc_id, false)
+        state.smart_id = issue.smart_id
+        set_smart_bucket_entry("by_smart", state.smart_id, npc_id, true)
+    else
+        state.smart_id = issue.smart_id
+    end
     state.last_seen_tg = tg
     return state, false
 end
@@ -28839,9 +29404,16 @@ local function clear_resolved_states(snapshot, issued)
         current_ids[npc_id] = true
     end
 
-    for npc_id, state in pairs(RUNTIME.by_npc) do
-        if state.smart_id == snapshot.smart_id and current_ids[npc_id] and issued[npc_id] ~= true then
-            RUNTIME.by_npc[npc_id] = nil
+    local bucket = RUNTIME.by_smart and RUNTIME.by_smart[snapshot.smart_id] or nil
+    local ids = {}
+    for npc_id in pairs(bucket or {}) do
+        ids[#ids + 1] = npc_id
+    end
+    for i = 1, #ids do
+        local npc_id = ids[i]
+        local state = RUNTIME.by_npc[npc_id]
+        if state and state.smart_id == snapshot.smart_id and current_ids[npc_id] and issued[npc_id] ~= true then
+            clear_indexed_runtime_state("by_npc", "by_smart", npc_id)
         end
     end
 end
@@ -28921,6 +29493,21 @@ local function on_server_entity_unregister(se_obj, type_name)
     if type_name == "se_smart_terrain" and id then
         clear_runtime_state_for_smart(id)
     end
+end
+
+local function wants_smart_update(smart, ctx)
+    if RUNTIME.ready ~= true then
+        return false
+    end
+    if type(ctx) == "table" then
+        if ctx.disabled == true or ctx.is_on_actor_level ~= true then
+            return false
+        end
+        if not tonumber(ctx.id) then
+            return false
+        end
+    end
+    return true
 end
 
 local function on_smart_terrain_update(smart)
@@ -29031,6 +29618,7 @@ end
 inst.on_actor_first_update = on_actor_first_update
 inst.on_load_state = on_load_state
 inst.on_server_entity_unregister = on_server_entity_unregister
+inst.wants_smart_update = wants_smart_update
 inst.on_smart_terrain_update = on_smart_terrain_update
 inst.on_npc_update = on_npc_update
 zhopa.smart_service_slot_doctor = inst
