@@ -779,6 +779,41 @@ print_trade_event = function(...)
 	end
 end
 
+local function emit_dynamic_news(method_name, ...)
+	if not (dynamic_news_manager and ui_options and type(ui_options.get) == "function") then
+		return false
+	end
+
+	local ok_enabled, enabled = pcall(ui_options.get, "alife/dynamic_news/nearby_activity_news")
+	if not ok_enabled then
+		log_trade_warn("dynamic_news_skip method=%s reason=ui_option_failed err=%s", tostring(method_name), tostring(enabled))
+		return false
+	end
+	if enabled ~= true then
+		return false
+	end
+
+	if type(dynamic_news_manager.get_dynamic_news) ~= "function" then
+		return false
+	end
+	local ok_news, news = pcall(dynamic_news_manager.get_dynamic_news)
+	if not (ok_news and news) then
+		log_trade_warn("dynamic_news_skip method=%s reason=get_news_failed err=%s", tostring(method_name), tostring(news))
+		return false
+	end
+
+	local fn = news[method_name]
+	if type(fn) ~= "function" then
+		return false
+	end
+	local ok_emit, err = pcall(fn, news, ...)
+	if not ok_emit then
+		log_trade_warn("dynamic_news_skip method=%s reason=emit_failed err=%s", tostring(method_name), tostring(err))
+		return false
+	end
+	return true
+end
+
 local function log_handler_binding_state(tag, force)
 	local now = (time_global and time_global()) or 0
 	if not force and now < (tonumber(ZHOPA_AXR_BIND_DIAG.next_tg) or 0) then
@@ -1317,9 +1352,7 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 	end
 	
 	if (#buy_sell_items > 0) then 
-		if (dynamic_news_manager and ui_options.get("alife/dynamic_news/nearby_activity_news")) then 
-			dynamic_news_manager.get_dynamic_news():BoughtItems(npc,seller,buy_sell_items)
-		end
+		emit_dynamic_news("BoughtItems", npc, seller, buy_sell_items)
 	end
 	log_always("buy_done npc=%s id=%s bought=%s policy_blocked=%s stock_blocked=%s money_blocked=%s money_left=%s",
 		npc and npc:name() or "nil",
@@ -1698,9 +1731,7 @@ function npc_tech_upgrade_sell(npc)
 	
 	-- Send news
 	if (#new_install > 0) then 
-		if (dynamic_news_manager and ui_options.get("alife/dynamic_news/nearby_activity_news")) then
-			dynamic_news_manager.get_dynamic_news():UpgradedItems(npc, mechanic, sec_wpn, new_install)
-		end
+		emit_dynamic_news("UpgradedItems", npc, mechanic, sec_wpn, new_install)
 	end
 
 	finalize_service_session(npc, "tech", #new_install > 0 and "done" or "done_empty")

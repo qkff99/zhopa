@@ -616,7 +616,20 @@ local function update_memory_snapshot(squad, source)
     return zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
 end
 
-local function dispatch_direct_squad_fsm(squad, source)
+local function call_module_method(switch_name, module_name, method_name, tag, ...)
+    if switch_name and can_run(switch_name) ~= true then
+        return false
+    end
+    local module = zhopa and zhopa[module_name] or nil
+    local fn = module and module[method_name] or nil
+    if type(fn) ~= "function" then
+        return false
+    end
+    safe_call(tag or (tostring(module_name) .. "." .. tostring(method_name)), fn, ...)
+    return true
+end
+
+local function dispatch_direct_squad_fsm(squad, source, entry)
     if squad and zhopa.memory and zhopa.memory.is_protected_squad then
         local ok_protected, protected = safe_call(
             "memory.is_protected_squad",
@@ -627,7 +640,9 @@ local function dispatch_direct_squad_fsm(squad, source)
             return false
         end
     end
-    local entry = update_memory_snapshot(squad, source)
+    if type(entry) ~= "table" then
+        entry = update_memory_snapshot(squad, source)
+    end
     if type(entry) ~= "table" then
         return false
     end
@@ -669,6 +684,60 @@ local function dispatch_direct_squad_fsm(squad, source)
         return true
     end
     return false
+end
+
+local function route_squad_first_update(squad, entry)
+    call_module_method("board_index", "board_index", "on_squad_first_update", "board_index.on_squad_first_update", squad)
+    call_module_method("mutants", "mutants", "on_squad_first_update", "mutants.on_squad_first_update", squad, entry)
+    call_module_method("debug_hud", "debug_hud", "on_squad_first_update", "debug_hud.on_squad_first_update", squad)
+end
+
+local function route_squad_update(squad, entry)
+    call_module_method("board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad)
+    call_module_method("mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry)
+    call_module_method("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad)
+end
+
+local function route_squad_npc_creation(squad, npc, smart)
+    call_module_method("npc_faction_override", "npc_faction_override", "on_squad_npc_creation", "npc_faction_override.on_squad_npc_creation", squad, npc, smart)
+    call_module_method("base_filler", "base_filler", "on_squad_npc_creation", "base_filler.on_squad_npc_creation", squad, npc, smart)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_squad_npc_creation", "dynamic_bases.on_squad_npc_creation", squad, npc, smart)
+    call_module_method("service_filler", "service_filler", "on_squad_npc_creation", "service_filler.on_squad_npc_creation", squad, npc, smart)
+end
+
+local function route_squad_npc_death(squad, npc, killer_npc, killer_squad)
+    call_module_method("npc_faction_override", "npc_faction_override", "on_squad_npc_death", "npc_faction_override.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("memory", "memory", "on_squad_npc_death", "memory.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("mutants", "mutants", "on_squad_npc_death", "mutants.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("base_filler", "base_filler", "on_squad_npc_death", "base_filler.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_squad_npc_death", "dynamic_bases.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("service_filler", "service_filler", "on_squad_npc_death", "service_filler.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+    call_module_method("debug_hud", "debug_hud", "on_squad_npc_death", "debug_hud.on_squad_npc_death", squad, npc, killer_npc, killer_squad)
+end
+
+local function route_squad_enter_smart(squad, smart, entry)
+    call_module_method("board_index", "board_index", "on_squad_enter_smart", "board_index.on_squad_enter_smart", squad, smart)
+    call_module_method("smart_tasks", "smart_tasks", "on_squad_enter_smart", "smart_tasks.on_squad_enter_smart", squad, smart, entry)
+    call_module_method("base_filler", "base_filler", "on_squad_enter_smart", "base_filler.on_squad_enter_smart", squad, smart)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_squad_enter_smart", "dynamic_bases.on_squad_enter_smart", squad, smart)
+    call_module_method("service_filler", "service_filler", "on_squad_enter_smart", "service_filler.on_squad_enter_smart", squad, smart)
+end
+
+local function route_squad_leave_smart(squad, smart, entry)
+    call_module_method("board_index", "board_index", "on_squad_leave_smart", "board_index.on_squad_leave_smart", squad, smart)
+    call_module_method("smart_tasks", "smart_tasks", "on_squad_leave_smart", "smart_tasks.on_squad_leave_smart", squad, smart, entry)
+    call_module_method("base_filler", "base_filler", "on_squad_leave_smart", "base_filler.on_squad_leave_smart", squad, smart)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_squad_leave_smart", "dynamic_bases.on_squad_leave_smart", squad, smart)
+    call_module_method("service_filler", "service_filler", "on_squad_leave_smart", "service_filler.on_squad_leave_smart", squad, smart)
+end
+
+local function route_squad_after_level_change(squad, old_level, new_level, entry)
+    call_module_method("board_index", "board_index", "on_squad_after_level_change", "board_index.on_squad_after_level_change", squad, old_level, new_level)
+    call_module_method("story_psy_watchdog", "story_psy_watchdog", "on_squad_after_level_change", "story_psy_watchdog.on_squad_after_level_change", squad, old_level, new_level, entry)
+    call_module_method("base_filler", "base_filler", "on_squad_after_level_change", "base_filler.on_squad_after_level_change", squad, old_level, new_level)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_squad_after_level_change", "dynamic_bases.on_squad_after_level_change", squad, old_level, new_level)
+    call_module_method("service_filler", "service_filler", "on_squad_after_level_change", "service_filler.on_squad_after_level_change", squad, old_level, new_level)
+    call_module_method("debug_hud", "debug_hud", "on_squad_after_level_change", "debug_hud.on_squad_after_level_change", squad, old_level, new_level)
 end
 
 local function debug_hud_enabled()
@@ -825,7 +894,7 @@ function Core:_on_game_start()
         RegisterScriptCallback("server_entity_on_unregister", zhopa.core.on_server_entity_unregister)
         RegisterScriptCallback("squad_on_first_update", zhopa.core.on_squad_first_update)
         RegisterScriptCallback("squad_on_update", zhopa.core.on_squad_update)
-        RegisterScriptCallback("squad_on_npc_creation", make_callback_forwarder("squad_on_npc_creation"))
+        RegisterScriptCallback("squad_on_npc_creation", zhopa.core.on_squad_npc_creation)
         RegisterScriptCallback("save_state", zhopa.core.save_state)
         RegisterScriptCallback("load_state", zhopa.core.load_state)
         RegisterScriptCallback("squad_on_enter_smart", zhopa.core.on_squad_enter_smart)
@@ -942,68 +1011,81 @@ function Core:_on_squad_npc_death(squad, npc, killer_npc, killer_squad)
     if self:_is_enabled() ~= true then
         return
     end
-    publish_bus_event("squad_on_npc_death", squad, npc, killer_npc, killer_squad)
+    route_squad_npc_death(squad, npc, killer_npc, killer_squad)
+end
+
+function Core:_on_squad_npc_creation(squad, npc, smart)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_squad_npc_creation(squad, npc, smart)
 end
 
 function Core:_on_squad_first_update(squad)
     if self:_is_enabled() ~= true then
         return
     end
+    local entry = nil
     if can_run("memory") then
-        update_memory_snapshot(squad, "squad_on_first_update")
+        entry = update_memory_snapshot(squad, "squad_on_first_update")
     end
-    publish_bus_event("squad_on_first_update", squad)
+    route_squad_first_update(squad, entry)
 end
 
 function Core:_on_squad_update(squad)
     if self:_is_enabled() ~= true then
         return
     end
+    local entry = nil
     if can_run("memory") then
+        entry = update_memory_snapshot(squad, "squad_on_update")
         if not self:_should_skip_offlevel_squad_update(squad) then
-            dispatch_direct_squad_fsm(squad, "squad_on_update")
+            dispatch_direct_squad_fsm(squad, "squad_on_update", entry)
         end
     end
-    publish_bus_event("squad_on_update", squad)
+    route_squad_update(squad, entry)
 end
 
 function Core:_on_squad_enter_smart(squad, smart)
     if self:_is_enabled() ~= true then
         return
     end
+    local entry = nil
     if can_run("memory") then
-        local entry = update_memory_snapshot(squad, "squad_on_enter_smart")
+        entry = update_memory_snapshot(squad, "squad_on_enter_smart")
         if entry and zhopa.memory and zhopa.memory.mark_arrived_to_target then
             safe_call("zhopa.memory.mark_arrived_to_target", zhopa.memory.mark_arrived_to_target, squad and squad.id, smart, "squad_on_enter_smart")
         end
     end
-    publish_bus_event("squad_on_enter_smart", squad, smart)
+    route_squad_enter_smart(squad, smart, entry)
 end
 
 function Core:_on_squad_leave_smart(squad, smart)
     if self:_is_enabled() ~= true then
         return
     end
+    local entry = nil
     if can_run("memory") then
-        local entry = update_memory_snapshot(squad, "squad_on_leave_smart")
+        entry = update_memory_snapshot(squad, "squad_on_leave_smart")
         if entry and zhopa.memory and zhopa.memory.mark_left_target then
             safe_call("zhopa.memory.mark_left_target", zhopa.memory.mark_left_target, squad and squad.id, smart, "squad_on_leave_smart")
         end
     end
-    publish_bus_event("squad_on_leave_smart", squad, smart)
+    route_squad_leave_smart(squad, smart, entry)
 end
 
 function Core:_on_squad_after_level_change(squad, old_level, new_level)
     if self:_is_enabled() ~= true then
         return
     end
+    local entry = nil
     if can_run("memory") then
-        local entry = update_memory_snapshot(squad, "squad_on_after_level_change")
+        entry = update_memory_snapshot(squad, "squad_on_after_level_change")
         if entry and zhopa.memory and zhopa.memory.mark_level_changed then
             safe_call("zhopa.memory.mark_level_changed", zhopa.memory.mark_level_changed, squad and squad.id, old_level, new_level, "squad_on_after_level_change")
         end
     end
-    publish_bus_event("squad_on_after_level_change", squad, old_level, new_level)
+    route_squad_after_level_change(squad, old_level, new_level, entry)
 end
 
 function Core:_on_server_entity_unregister(se_obj, type_name)
@@ -1032,6 +1114,7 @@ inst.on_option_change = function() return inst:_on_option_change() end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_squad_npc_death = function(squad, npc, killer_npc, killer_squad) return inst:_on_squad_npc_death(squad, npc, killer_npc, killer_squad) end
+inst.on_squad_npc_creation = function(squad, npc, smart) return inst:_on_squad_npc_creation(squad, npc, smart) end
 inst.on_squad_first_update = function(squad) return inst:_on_squad_first_update(squad) end
 inst.on_squad_update = function(squad) return inst:_on_squad_update(squad) end
 inst.on_squad_enter_smart = function(squad, smart) return inst:_on_squad_enter_smart(squad, smart) end
@@ -4596,26 +4679,6 @@ local function ensure_bus_subscriptions()
         local args = payload_args(payload)
         active_inst():_on_server_entity_unregister(args[1], args[2])
     end)
-    ensure("squad_on_first_update", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_squad_first_update(args[1])
-    end)
-    ensure("squad_on_update", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_squad_update(args[1])
-    end)
-    ensure("squad_on_enter_smart", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_squad_enter_smart(args[1], args[2])
-    end)
-    ensure("squad_on_leave_smart", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_squad_leave_smart(args[1], args[2])
-    end)
-    ensure("squad_on_after_level_change", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_squad_after_level_change(args[1], args[2], args[3])
-    end)
     ensure("smart_terrain_on_update", function(payload)
         local args = payload_args(payload)
         active_inst():_on_smart_terrain_update(args[1])
@@ -4635,6 +4698,11 @@ inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.on_game_start = function() return ensure_bus_subscriptions() end
+inst.on_squad_first_update = function(squad) return inst:_on_squad_first_update(squad) end
+inst.on_squad_update = function(squad) return inst:_on_squad_update(squad) end
+inst.on_squad_enter_smart = function(squad, smart) return inst:_on_squad_enter_smart(squad, smart) end
+inst.on_squad_leave_smart = function(squad, smart) return inst:_on_squad_leave_smart(squad, smart) end
+inst.on_squad_after_level_change = function(squad, old_level, new_level) return inst:_on_squad_after_level_change(squad, old_level, new_level) end
 inst.get_level_smarts = function(level_name, opts_or_fn) return inst:_get_level_smarts(level_name, opts_or_fn) end
 inst.get_base_smarts = function(level_name, opts_or_fn) return inst:_get_base_smarts(level_name, opts_or_fn) end
 inst.get_respawn_base_smarts = function(level_name, opts_or_fn) return inst:_get_respawn_base_smarts(level_name, opts_or_fn) end
@@ -5120,18 +5188,12 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
         local args = payload_args(payload)
         on_server_entity_unregister(args[1], args[2])
     end)
-    zhopa.bus.subscribe("squad_on_npc_creation", "zhopa_npc_faction_override", function(payload)
-        local args = payload_args(payload)
-        on_squad_npc_creation(args[1], args[2])
-    end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_npc_faction_override", function(payload)
-        local args = payload_args(payload)
-        on_squad_npc_death(args[1], args[2])
-    end)
 end
 
 zhopa.npc_faction_override = {
     on_game_start = on_game_start,
+    on_squad_npc_creation = on_squad_npc_creation,
+    on_squad_npc_death = on_squad_npc_death,
 }
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_npc_faction_override
@@ -7329,10 +7391,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
             inst:_purge_squad_entry(se_obj and se_obj.id or nil, "server_unregister", "server_entity_on_unregister")
         end
     end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_memory", function(payload)
-        local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-        inst:_on_squad_npc_death(args[1], args[2], args[3], args[4])
-    end)
 end
 
 function Memory:_set_surge_lock(squad_id, locked)
@@ -8236,25 +8294,21 @@ local function ensure_bus_subscriptions()
         reconcile_all_levels("on_option_change")
     end)
 
-    ensure("squad_on_after_level_change", function(payload)
-        if not feature_enabled_now() then
-            return
-        end
-        local args = bus_args(payload)
-        local squad = args[1]
-        if not squad then
-            return
-        end
-        try_process_squad(squad, "squad_on_after_level_change")
-    end)
-
     return true
+end
+
+local function on_squad_after_level_change(squad)
+    if not (feature_enabled_now() and squad) then
+        return
+    end
+    try_process_squad(squad, "squad_on_after_level_change")
 end
 
 ensure_bus_subscriptions()
 
 watchdog.on_game_start = ensure_bus_subscriptions
 watchdog.reconcile_all_levels = reconcile_all_levels
+watchdog.on_squad_after_level_change = on_squad_after_level_change
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_story_psy_watchdog
 
@@ -12228,22 +12282,6 @@ local function ensure_bus_subscriptions()
         end
     end)
 
-    ensure("squad_on_enter_smart", function(payload)
-        local args = bus_args(payload)
-        local smart_name = safe_object_name(args[2])
-        if smart_name then
-            mark_smart_dirty(smart_name)
-        end
-    end)
-
-    ensure("squad_on_leave_smart", function(payload)
-        local args = bus_args(payload)
-        local smart_name = safe_object_name(args[2])
-        if smart_name then
-            mark_smart_dirty(smart_name)
-        end
-    end)
-
     ensure("server_entity_on_unregister", function(payload)
         local args = bus_args(payload)
         on_server_entity_unregister(args[1], args[2])
@@ -12252,11 +12290,27 @@ local function ensure_bus_subscriptions()
     return true
 end
 
+local function on_squad_enter_smart(_, smart)
+    local smart_name = safe_object_name(smart)
+    if smart_name then
+        mark_smart_dirty(smart_name)
+    end
+end
+
+local function on_squad_leave_smart(_, smart)
+    local smart_name = safe_object_name(smart)
+    if smart_name then
+        mark_smart_dirty(smart_name)
+    end
+end
+
 ensure_bus_subscriptions()
 
 smart_tasks.on_game_start = ensure_bus_subscriptions
 smart_tasks.reactivate_runtime = reactivate_runtime
 smart_tasks.update_squad_tasks = update_squad_tasks_impl
+smart_tasks.on_squad_enter_smart = on_squad_enter_smart
+smart_tasks.on_squad_leave_smart = on_squad_leave_smart
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_smart_tasks
 
@@ -20477,7 +20531,7 @@ function Mutants:_is_target_sync_pending(task)
     return tonumber(p.target_sync_next_tg) == 0
 end
 
-function Mutants:_refresh_presence_for_live_squad(se_squad, source)
+function Mutants:_refresh_presence_for_live_squad(se_squad, source, entry)
     local sid = tonumber(se_squad and se_squad.id) or nil
     if not sid then
         return nil
@@ -20485,13 +20539,15 @@ function Mutants:_refresh_presence_for_live_squad(se_squad, source)
     if not read_commander_id(se_squad) then
         return nil
     end
-    if zhopa.memory and zhopa.memory.update_squad_snapshot_verified then
-        zhopa.memory.update_squad_snapshot_verified(se_squad, sid)
-    elseif zhopa.memory and zhopa.memory.update_squad_snapshot then
-        zhopa.memory.update_squad_snapshot(se_squad)
+    if type(entry) ~= "table" then
+        if zhopa.memory and zhopa.memory.update_squad_snapshot_verified then
+            zhopa.memory.update_squad_snapshot_verified(se_squad, sid)
+        elseif zhopa.memory and zhopa.memory.update_squad_snapshot then
+            zhopa.memory.update_squad_snapshot(se_squad)
+        end
+        entry = zhopa.memory and zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
     end
 
-    local entry = zhopa.memory and zhopa.memory.get_squad_entry and zhopa.memory.get_squad_entry(sid) or nil
     if type(entry) ~= "table" then
         self:_clear_hunt_presence_for_sid(sid)
         return nil
@@ -20795,14 +20851,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
             inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
         end
     end)
-    zhopa.bus.subscribe("squad_on_first_update", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        inst:_refresh_presence_for_live_squad(args[1], "first_update")
-    end)
-    zhopa.bus.subscribe("squad_on_update", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        inst:_refresh_presence_for_live_squad(args[1], "update")
-    end)
     zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_mutants", function(payload)
         local args = bus_args(payload)
         local se_obj = args[1]
@@ -20817,17 +20865,17 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
         local args = bus_args(payload)
         inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(args[1]))
     end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        local squad = args[1]
-        inst:_clear_hunt_presence_for_sid(squad and squad.id or nil)
-        inst:_mark_mutant_dirty_if_managed(squad, "npc_death")
-    end)
 end
 
 inst.update_squad_tasks = function(se_squad, ctx) return inst:_update_squad_tasks(se_squad, ctx) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
+inst.on_squad_first_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "first_update", entry) end
+inst.on_squad_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "update", entry) end
+inst.on_squad_npc_death = function(squad)
+    inst:_clear_hunt_presence_for_sid(squad and squad.id or nil)
+    return inst:_mark_mutant_dirty_if_managed(squad, "npc_death")
+end
 
 zhopa.mutants = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -22733,26 +22781,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
     zhopa.bus.subscribe("on_option_change", "zhopa_base_filler", function()
         inst:_reactivate_runtime("option_change")
     end)
-    zhopa.bus.subscribe("squad_on_enter_smart", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], false, "enter_smart")
-    end)
-    zhopa.bus.subscribe("squad_on_leave_smart", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], false, "leave_smart")
-    end)
-    zhopa.bus.subscribe("squad_on_after_level_change", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], false, "after_level_change")
-    end)
-    zhopa.bus.subscribe("squad_on_npc_creation", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], false, "npc_creation")
-    end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], false, "npc_death")
-    end)
     zhopa.bus.subscribe("smart_terrain_on_update", "zhopa_base_filler", function(payload)
         local args = bus_args(payload)
         inst:_mark_dirty_from_smart(args[1], false, "smart_update")
@@ -22782,6 +22810,11 @@ inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.is_base_camper_section = function(section) return is_base_camper_section(section) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
+inst.on_squad_enter_smart = function(squad) return inst:_mark_dirty_from_squad(squad, false, "enter_smart") end
+inst.on_squad_leave_smart = function(squad) return inst:_mark_dirty_from_squad(squad, false, "leave_smart") end
+inst.on_squad_after_level_change = function(squad) return inst:_mark_dirty_from_squad(squad, false, "after_level_change") end
+inst.on_squad_npc_creation = function(squad) return inst:_mark_dirty_from_squad(squad, false, "npc_creation") end
+inst.on_squad_npc_death = function(squad) return inst:_mark_dirty_from_squad(squad, false, "npc_death") end
 
 zhopa.base_filler = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -23848,41 +23881,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
             inst:_mark_target_dirty(smart_name, "smart_update")
         end
     end)
-    zhopa.bus.subscribe("squad_on_enter_smart", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart_name = inst:_resolve_target_smart_name_from_squad(args[1])
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "enter_smart")
-        end
-    end)
-    zhopa.bus.subscribe("squad_on_leave_smart", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart_name = inst:_resolve_target_smart_name_from_squad(args[1])
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "leave_smart")
-        end
-    end)
-    zhopa.bus.subscribe("squad_on_after_level_change", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart_name = inst:_resolve_target_smart_name_from_squad(args[1])
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "after_level_change")
-        end
-    end)
-    zhopa.bus.subscribe("squad_on_npc_creation", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart_name = inst:_resolve_target_smart_name_from_squad(args[1])
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "npc_creation")
-        end
-    end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart_name = inst:_resolve_target_smart_name_from_squad(args[1])
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "npc_death")
-        end
-    end)
     zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_dynamic_bases", function(payload)
         local args = bus_args(payload)
         local se_obj = args[1]
@@ -23898,12 +23896,25 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
     end)
 end
 
+local function mark_dynamic_base_from_squad(squad, reason)
+    local smart_name = inst:_resolve_target_smart_name_from_squad(squad)
+    if smart_name then
+        return inst:_mark_target_dirty(smart_name, reason)
+    end
+    return false
+end
+
 inst.on_first_update = function() return inst:_on_first_update() end
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.get_effective_owner = function(smart) return inst:_resolve_effective_owner_alias(smart) end
+inst.on_squad_enter_smart = function(squad) return mark_dynamic_base_from_squad(squad, "enter_smart") end
+inst.on_squad_leave_smart = function(squad) return mark_dynamic_base_from_squad(squad, "leave_smart") end
+inst.on_squad_after_level_change = function(squad) return mark_dynamic_base_from_squad(squad, "after_level_change") end
+inst.on_squad_npc_creation = function(squad) return mark_dynamic_base_from_squad(squad, "npc_creation") end
+inst.on_squad_npc_death = function(squad) return mark_dynamic_base_from_squad(squad, "npc_death") end
 
 zhopa.dynamic_bases = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -25838,26 +25849,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
         local args = bus_args(payload)
         inst:_mark_dirty_from_smart(args[1], "smart_update")
     end)
-    zhopa.bus.subscribe("squad_on_enter_smart", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], "enter_smart")
-    end)
-    zhopa.bus.subscribe("squad_on_leave_smart", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], "leave_smart")
-    end)
-    zhopa.bus.subscribe("squad_on_after_level_change", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], "after_level_change")
-    end)
-    zhopa.bus.subscribe("squad_on_npc_creation", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], "npc_creation")
-    end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_squad(args[1], "npc_death")
-    end)
     zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_service_filler", function(payload)
         local args = bus_args(payload)
         local se_obj = args[1]
@@ -25886,6 +25877,11 @@ inst.load_state = function(m_data) return inst:_load_state(m_data) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.is_service_section = function(section) return is_service_section(section) end
 inst.get_task_proxy_seed = function(npc) return inst:_get_task_proxy_seed(npc) end
+inst.on_squad_enter_smart = function(squad) return inst:_mark_dirty_from_squad(squad, "enter_smart") end
+inst.on_squad_leave_smart = function(squad) return inst:_mark_dirty_from_squad(squad, "leave_smart") end
+inst.on_squad_after_level_change = function(squad) return inst:_mark_dirty_from_squad(squad, "after_level_change") end
+inst.on_squad_npc_creation = function(squad) return inst:_mark_dirty_from_squad(squad, "npc_creation") end
+inst.on_squad_npc_death = function(squad) return inst:_mark_dirty_from_squad(squad, "npc_death") end
 
 zhopa.service_filler = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -28978,38 +28974,6 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
         local squad_id = payload and payload.squad_id or nil
         inst:_refresh_spot_for_id(squad_id, nil)
     end)
-    zhopa.bus.subscribe("squad_on_first_update", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local args = bus_args(payload)
-        local squad = args[1]
-        inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
-    end)
-    zhopa.bus.subscribe("squad_on_update", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local args = bus_args(payload)
-        local squad = args[1]
-        inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
-    end)
-    zhopa.bus.subscribe("squad_on_after_level_change", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local args = bus_args(payload)
-        local squad = args[1]
-        inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
-    end)
-    zhopa.bus.subscribe("squad_on_npc_death", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local args = bus_args(payload)
-        local squad = args[1]
-        inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
-    end)
     zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_debug_hud", function(payload)
         if not hud_hot_enabled() then
             return
@@ -29019,6 +28983,18 @@ if zhopa and zhopa.bus and zhopa.bus.subscribe then
         inst:_remove_spot(se_obj and se_obj.id or nil)
     end)
 end
+
+local function refresh_squad_spot_if_hot(squad)
+    if not hud_hot_enabled() then
+        return
+    end
+    inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
+end
+
+inst.on_squad_first_update = function(squad) return refresh_squad_spot_if_hot(squad) end
+inst.on_squad_update = function(squad) return refresh_squad_spot_if_hot(squad) end
+inst.on_squad_after_level_change = function(squad) return refresh_squad_spot_if_hot(squad) end
+inst.on_squad_npc_death = function(squad) return refresh_squad_spot_if_hot(squad) end
 
 zhopa.debug_hud = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
