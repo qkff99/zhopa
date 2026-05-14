@@ -105,8 +105,11 @@ function Timers:_dispatch(ns, name, ...)
     end
 
     self.entries[key] = nil
-    local args = entry.args or {}
-    safe_call(key, entry.fn, unpack(args))
+    if tonumber(entry.argc) and tonumber(entry.argc) > 0 then
+        safe_call(key, entry.fn, unpack(entry.args or {}, 1, tonumber(entry.argc) or 0))
+    else
+        safe_call(key, entry.fn)
+    end
     return true
 end
 
@@ -119,13 +122,15 @@ function Timers:_schedule(ns, name, delay_ms, fn, ...)
     local delay = tonumber(delay_ms) or 0
     if delay < 0 then delay = 0 end
     local delay_sec = delay / 1000
-    local args = {...}
+    local argc = select("#", ...)
+    local args = argc > 0 and {...} or nil
 
     self.entries[key] = {
         ns = ns,
         name = name,
         fn = fn,
         args = args,
+        argc = argc,
     }
 
     if CreateTimeEvent then
@@ -136,7 +141,10 @@ function Timers:_schedule(ns, name, delay_ms, fn, ...)
     end
 
     self.entries[key] = nil
-    return safe_call(key, fn, unpack(args))
+    if argc > 0 then
+        return safe_call(key, fn, unpack(args or {}, 1, argc))
+    end
+    return safe_call(key, fn)
 end
 
 function Timers:_cancel(ns, name)
@@ -149,7 +157,6 @@ function Timers:_cancel(ns, name)
 end
 
 function Timers:_reschedule(ns, name, delay_ms, fn, ...)
-    self:_cancel(ns, name)
     return self:_schedule(ns, name, delay_ms, fn, ...)
 end
 
@@ -261,9 +268,18 @@ local function runtime_enabled_now()
     return master_enabled_now() == true
 end
 
+local GVID_LEVEL_CACHE_MS = 1000
+local gvid_level_cache = {}
+
 local function now_level_name_by_gvid(gvid)
+    gvid = tonumber(gvid) or nil
     if not (gvid and alife and game_graph) then
         return nil
+    end
+    local now = (time_global and time_global()) or 0
+    local cached = gvid_level_cache[gvid]
+    if type(cached) == "table" and now <= (tonumber(cached.tg) or 0) + GVID_LEVEL_CACHE_MS then
+        return cached.value
     end
     local ok, res = pcall(function()
         local gg = game_graph()
@@ -281,8 +297,10 @@ local function now_level_name_by_gvid(gvid)
         return sim:level_name(gv:level_id())
     end)
     if ok and type(res) == "string" and res ~= "" then
+        gvid_level_cache[gvid] = { value = res, tg = now }
         return res
     end
+    gvid_level_cache[gvid] = { value = nil, tg = now }
     return nil
 end
 
@@ -348,6 +366,8 @@ end
 
 local PREVALIDATED_CTX = { prevalidated = true }
 local debug_hud_enabled
+local debug_hud_enabled_value = false
+local route_cache = {}
 local NO_DELTA_SQUAD_TICK_MS = 1000
 
 local function update_memory_snapshot(squad, source)
@@ -399,6 +419,31 @@ local function call_module_method_fast(switch_name, module_name, method_name, ta
         zhopa.log.error("CORE", "%s failed: %s", tostring(tag or (tostring(module_name) .. "." .. tostring(method_name))), tostring(err))
     end
     return ok == true
+end
+
+local function call_bound_method_fast(cache_key, switch_name, module_name, method_name, tag, ...)
+    if switch_name and can_run(switch_name) ~= true then
+        return false
+    end
+    local cached = route_cache[cache_key]
+    if cached == nil then
+        local module = zhopa and zhopa[module_name] or nil
+        local fn = module and module[method_name] or nil
+        cached = type(fn) == "function" and fn or false
+        route_cache[cache_key] = cached
+    end
+    if type(cached) ~= "function" then
+        return false
+    end
+    local ok, err = pcall(cached, ...)
+    if not ok and zhopa and zhopa.log and zhopa.log.error then
+        zhopa.log.error("CORE", "%s failed: %s", tostring(tag or (tostring(module_name) .. "." .. tostring(method_name))), tostring(err))
+    end
+    return ok == true
+end
+
+local function clear_route_cache()
+    route_cache = {}
 end
 
 local function read_object_name(obj)
@@ -516,10 +561,10 @@ local function route_squad_first_update(squad, entry)
 end
 
 local function route_squad_update(squad, entry, changed)
-    call_module_method_fast("board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad, entry, changed)
-    call_module_method_fast("mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry, changed)
+    call_bound_method_fast("board_index.on_squad_update", "board_index", "board_index", "on_squad_update", "board_index.on_squad_update", squad, entry, changed)
+    call_bound_method_fast("mutants.on_squad_update", "mutants", "mutants", "on_squad_update", "mutants.on_squad_update", squad, entry, changed)
     if debug_hud_enabled and debug_hud_enabled() then
-        call_module_method_fast("debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad, entry, changed)
+        call_bound_method_fast("debug_hud.on_squad_update", "debug_hud", "debug_hud", "on_squad_update", "debug_hud.on_squad_update", squad, entry, changed)
     end
 end
 
@@ -656,31 +701,53 @@ end
 
 local function route_smart_terrain_update(smart, ctx)
     ctx = ctx or build_smart_update_ctx(smart)
-    call_module_method_fast("board_index", "board_index", "on_smart_terrain_update", "board_index.on_smart_terrain_update", smart, ctx)
+    call_bound_method_fast("board_index.on_smart_terrain_update", "board_index", "board_index", "on_smart_terrain_update", "board_index.on_smart_terrain_update", smart, ctx)
     if wants_smart_update("smart_tasks", smart, ctx) then
-        call_module_method_fast("smart_tasks", "smart_tasks", "on_smart_terrain_update", "smart_tasks.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("smart_tasks.on_smart_terrain_update", "smart_tasks", "smart_tasks", "on_smart_terrain_update", "smart_tasks.on_smart_terrain_update", smart, ctx)
     end
     if wants_smart_update("mutants", smart, ctx) then
-        call_module_method_fast("mutants", "mutants", "on_smart_terrain_update", "mutants.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("mutants.on_smart_terrain_update", "mutants", "mutants", "on_smart_terrain_update", "mutants.on_smart_terrain_update", smart, ctx)
     end
     if wants_smart_update("base_filler", smart, ctx) then
-        call_module_method_fast("base_filler", "base_filler", "on_smart_terrain_update", "base_filler.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("base_filler.on_smart_terrain_update", "base_filler", "base_filler", "on_smart_terrain_update", "base_filler.on_smart_terrain_update", smart, ctx)
     end
     if wants_smart_update("dynamic_bases", smart, ctx) then
-        call_module_method_fast("dynamic_bases", "dynamic_bases", "on_smart_terrain_update", "dynamic_bases.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("dynamic_bases.on_smart_terrain_update", "dynamic_bases", "dynamic_bases", "on_smart_terrain_update", "dynamic_bases.on_smart_terrain_update", smart, ctx)
     end
     if wants_smart_update("service_filler", smart, ctx) then
-        call_module_method_fast("service_filler", "service_filler", "on_smart_terrain_update", "service_filler.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("service_filler.on_smart_terrain_update", "service_filler", "service_filler", "on_smart_terrain_update", "service_filler.on_smart_terrain_update", smart, ctx)
     end
     if wants_smart_update("smart_service_slot_doctor", smart, ctx) then
-        call_module_method_fast(nil, "smart_service_slot_doctor", "on_smart_terrain_update", "smart_service_slot_doctor.on_smart_terrain_update", smart, ctx)
+        call_bound_method_fast("smart_service_slot_doctor.on_smart_terrain_update", nil, "smart_service_slot_doctor", "on_smart_terrain_update", "smart_service_slot_doctor.on_smart_terrain_update", smart, ctx)
     end
 end
 
+local function module_needs_npc_update(module_name)
+    local module = zhopa and zhopa[module_name] or nil
+    local fn = module and module.needs_npc_update or nil
+    if type(fn) ~= "function" then
+        return true
+    end
+    local ok, res = pcall(fn)
+    if ok then
+        return res == true
+    end
+    if zhopa and zhopa.log and zhopa.log.error then
+        zhopa.log.error("CORE", "%s.needs_npc_update failed: %s", tostring(module_name), tostring(res))
+    end
+    return true
+end
+
 local function route_npc_update(npc)
-    call_module_method(nil, "loot", "on_npc_update", "loot.on_npc_update", npc)
-    call_module_method(nil, "loot_patch", "on_npc_update", "loot_patch.on_npc_update", npc)
-    call_module_method(nil, "smart_service_slot_doctor", "on_npc_update", "smart_service_slot_doctor.on_npc_update", npc)
+    if module_needs_npc_update("loot") then
+        call_bound_method_fast("loot.on_npc_update", nil, "loot", "on_npc_update", "loot.on_npc_update", npc)
+    end
+    if module_needs_npc_update("loot_patch") then
+        call_bound_method_fast("loot_patch.on_npc_update", nil, "loot_patch", "on_npc_update", "loot_patch.on_npc_update", npc)
+    end
+    if module_needs_npc_update("smart_service_slot_doctor") then
+        call_bound_method_fast("smart_service_slot_doctor.on_npc_update", nil, "smart_service_slot_doctor", "on_npc_update", "smart_service_slot_doctor.on_npc_update", npc)
+    end
 end
 
 local function route_npc_item_take(npc, item)
@@ -725,7 +792,14 @@ local function read_debug_hud_enabled()
     return false
 end
 
-debug_hud_enabled = read_debug_hud_enabled
+local function refresh_debug_hud_enabled()
+    debug_hud_enabled_value = read_debug_hud_enabled() == true
+    return debug_hud_enabled_value
+end
+
+debug_hud_enabled = function()
+    return debug_hud_enabled_value == true
+end
 
 local function apply_runtime_fixes()
     if smart_terrain and smart_terrain.smart_terrain and smart_terrain.smart_terrain.smart_terrain_squad_count then
@@ -789,7 +863,7 @@ function Core:_forget_offlevel_skip_counter(squad_id)
     end
 end
 
-function Core:_should_skip_offlevel_squad_update(squad)
+function Core:_should_skip_offlevel_squad_update(squad, entry)
     local skip_count = self:_get_offlevel_squad_update_skip_count()
     if skip_count <= 0 or not squad then
         return false
@@ -801,7 +875,10 @@ function Core:_should_skip_offlevel_squad_update(squad)
     end
 
     local actor_level = current_actor_level_name()
-    local squad_level = now_level_name_by_gvid(tonumber(squad.m_game_vertex_id) or 0)
+    local squad_level = type(entry) == "table" and entry.level or nil
+    if type(squad_level) ~= "string" or squad_level == "" then
+        squad_level = now_level_name_by_gvid(tonumber(squad.m_game_vertex_id) or 0)
+    end
     if type(actor_level) ~= "string" or actor_level == "" or type(squad_level) ~= "string" or squad_level == "" then
         self:_forget_offlevel_skip_counter(sid)
         return false
@@ -893,6 +970,8 @@ function Core:_should_run_no_delta_squad_tick(squad, entry)
 end
 
 function Core:_bootstrap_enabled_runtime(source)
+    clear_route_cache()
+    refresh_debug_hud_enabled()
     apply_runtime_fixes()
 
     if zhopa.xr_conditions_patch and zhopa.xr_conditions_patch.apply then
@@ -968,6 +1047,7 @@ function Core:_on_first_update()
 
     self:_reset_offlevel_skip_counters()
     local enabled = self:_refresh_master_enabled("first_update")
+    refresh_debug_hud_enabled()
     self:_sync_log_level()
 
     if zhopa.log and zhopa.log.info then
@@ -990,6 +1070,8 @@ function Core:_on_option_change()
 
     local prev_enabled = self.master_enabled_prev == true
     local enabled = self:_refresh_master_enabled("option_change")
+    refresh_debug_hud_enabled()
+    clear_route_cache()
     self:_sync_log_level()
 
     if enabled == true and prev_enabled ~= true then
@@ -1026,6 +1108,8 @@ end
 function Core:_load_state(m_data)
     self:_reset_offlevel_skip_counters()
     self.master_enabled_prev = self:_refresh_master_enabled("load_state")
+    refresh_debug_hud_enabled()
+    clear_route_cache()
     self:_sync_log_level()
     if can_run("memory") and zhopa.memory and zhopa.memory.load_state then
         safe_call("zhopa.memory.load_state", zhopa.memory.load_state, m_data)
@@ -1075,7 +1159,7 @@ function Core:_on_squad_update(squad)
     local changed = false
     if can_run("memory") then
         entry, changed = update_memory_snapshot(squad, "squad_on_update")
-        if not self:_should_skip_offlevel_squad_update(squad) and (changed == true or self:_should_run_no_delta_squad_tick(squad, entry)) then
+        if not self:_should_skip_offlevel_squad_update(squad, entry) and (changed == true or self:_should_run_no_delta_squad_tick(squad, entry)) then
             dispatch_direct_squad_fsm(squad, "squad_on_update", entry)
         end
     end
@@ -1948,6 +2032,24 @@ function Config:_read_ltx_raw(key)
     return res
 end
 
+function Config:_normalize_value(key, v)
+    if v == nil then return nil end
+    if type(v) == "string" then
+        if v == "true" then return true end
+        if v == "false" then return false end
+        local n = tonumber(v)
+        if n ~= nil then v = n end
+    end
+    if (key == "enabled") or (type(key) == "string" and string.sub(key, -8) == "_enabled") or (self.bool_keys and self.bool_keys[key]) then
+        if v == true or v == false then return v end
+        if type(v) == "number" then
+            if v == 0 then return false end
+            if v == 1 then return true end
+        end
+    end
+    return v
+end
+
 function Config:_read_mcm(key)
     if not (ui_mcm and ui_mcm.get) then return nil end
     local now = self:_tg()
@@ -1961,25 +2063,6 @@ function Config:_read_mcm(key)
         end
         return self.mcm_cache[key]
     end
-    local string_sub = string.sub
-
-    local function normalize(v)
-        if v == nil then return nil end
-        if type(v) == "string" then
-            if v == "true" then return true end
-            if v == "false" then return false end
-            local n = tonumber(v)
-            if n ~= nil then v = n end
-        end
-        if (key == "enabled") or (type(key) == "string" and string_sub(key, -8) == "_enabled") or (self.bool_keys and self.bool_keys[key]) then
-            if v == true or v == false then return v end
-            if type(v) == "number" then
-                if v == 0 then return false end
-                if v == 1 then return true end
-            end
-        end
-        return v
-    end
 
     local res = nil
     local full = self:_get_mcm_path(key)
@@ -1991,7 +2074,7 @@ function Config:_read_mcm(key)
     end
 
     if res ~= nil then
-        res = normalize(res)
+        res = self:_normalize_value(key, res)
         self.mcm_cache[key] = res
         return res
     end
@@ -2899,9 +2982,18 @@ local function safe_call(tag, fn, ...)
     return pcall(fn, ...)
 end
 
+local BOARD_GVID_LEVEL_CACHE_MS = 1000
+local board_gvid_level_cache = {}
+
 local function now_level_name_by_gvid(gvid)
+    gvid = tonumber(gvid) or nil
     if not (gvid and alife and game_graph) then
         return nil
+    end
+    local now = (time_global and time_global()) or 0
+    local cached = board_gvid_level_cache[gvid]
+    if type(cached) == "table" and now <= (tonumber(cached.tg) or 0) + BOARD_GVID_LEVEL_CACHE_MS then
+        return cached.value
     end
     local ok, level_name = pcall(function()
         local gv = game_graph():vertex(gvid)
@@ -2910,7 +3002,12 @@ local function now_level_name_by_gvid(gvid)
         end
         return alife():level_name(gv:level_id())
     end)
-    return ok and level_name or nil
+    if ok and type(level_name) == "string" and level_name ~= "" then
+        board_gvid_level_cache[gvid] = { value = level_name, tg = now }
+        return level_name
+    end
+    board_gvid_level_cache[gvid] = { value = nil, tg = now }
+    return nil
 end
 
 local function ensure_level_set(map, level_name)
@@ -3448,31 +3545,31 @@ function BoardIndex:__init()
 end
 
 function BoardIndex:_diag_callback(name)
-    local diag = ensure_diag(self.RUNTIME)
-    if not diag then
+    local diag = self.RUNTIME and self.RUNTIME.diag or nil
+    if not (diag and type(diag.callback_hits) == "table") then
         return
     end
     diag_inc(diag.callback_hits, name)
 end
 
 function BoardIndex:_diag_stat(name)
-    local diag = ensure_diag(self.RUNTIME)
-    if not diag then
+    local diag = self.RUNTIME and self.RUNTIME.diag or nil
+    if not (diag and type(diag.stats) == "table") then
         return
     end
     diag_inc(diag.stats, name)
 end
 
 function BoardIndex:_diag_fail(name)
-    local diag = ensure_diag(self.RUNTIME)
-    if not diag then
+    local diag = self.RUNTIME and self.RUNTIME.diag or nil
+    if not (diag and type(diag.failures) == "table") then
         return
     end
     diag_inc(diag.failures, name)
 end
 
 function BoardIndex:_diag_last(name, payload)
-    local diag = ensure_diag(self.RUNTIME)
+    local diag = self.RUNTIME and self.RUNTIME.diag or nil
     if not diag or type(name) ~= "string" or name == "" then
         return
     end
@@ -3716,6 +3813,16 @@ function BoardIndex:_upsert_smart_from_object(smart, source)
     local old_id = tonumber(prev and prev.id) or nil
     local old_is_base = prev and prev.is_base == true or false
     local old_is_respawn_base = prev and prev.is_respawn_base == true or false
+
+    if prev
+        and old_id == next_id
+        and old_level == next_level
+        and tonumber(prev.gvid) == next_gvid
+        and old_is_base == (next_is_base == true)
+        and old_is_respawn_base == (next_is_respawn_base == true)
+    then
+        return false
+    end
 
     local changed_old_level = false
     local changed_new_level = false
@@ -5158,14 +5265,28 @@ local function route_task_current_change(payload)
     end
 end
 
+local MEMORY_GVID_LEVEL_CACHE_MS = 1000
+local memory_gvid_level_cache = {}
+
 local function now_level_name_by_gvid(gvid)
+    gvid = tonumber(gvid) or nil
     if not (gvid and alife and game_graph) then return nil end
+    local now = tg()
+    local cached = memory_gvid_level_cache[gvid]
+    if type(cached) == "table" and now <= (tonumber(cached.tg) or 0) + MEMORY_GVID_LEVEL_CACHE_MS then
+        return cached.value
+    end
     local ok, res = pcall(function()
         local gv = game_graph():vertex(gvid)
         if not gv then return nil end
         return alife():level_name(gv:level_id())
     end)
-    return ok and res or nil
+    if ok and type(res) == "string" and res ~= "" then
+        memory_gvid_level_cache[gvid] = { value = res, tg = now }
+        return res
+    end
+    memory_gvid_level_cache[gvid] = { value = nil, tg = now }
+    return nil
 end
 
 local function get_board()
@@ -5560,6 +5681,7 @@ function Memory:_reset_runtime_tables()
     self.RUNTIME.anchors_by_community_level = {}
     self.RUNTIME.communities_by_smart_level = {}
     self.RUNTIME.trade_target_occupancy = {}
+    self.RUNTIME.index_rev = 0
 end
 
 function Memory:_clear_runtime_indexes()
@@ -5567,6 +5689,15 @@ function Memory:_clear_runtime_indexes()
     self.RUNTIME.anchors_by_community_level = {}
     self.RUNTIME.communities_by_smart_level = {}
     self.RUNTIME.trade_target_occupancy = {}
+    self.RUNTIME.index_rev = (tonumber(self.RUNTIME.index_rev) or 0) + 1
+end
+
+function Memory:_get_index_rev()
+    return tonumber(self.RUNTIME and self.RUNTIME.index_rev) or 0
+end
+
+function Memory:_bump_index_rev()
+    self.RUNTIME.index_rev = (tonumber(self.RUNTIME.index_rev) or 0) + 1
 end
 
 function Memory:_resolve_entry_trade_target(e)
@@ -5746,8 +5877,23 @@ function Memory:_reindex_entry(e)
     if type(e) ~= "table" then
         return
     end
+    local old_managed = e.index_managed_level
+    local old_anchor_comm = e.index_anchor_community
+    local old_anchor_level = e.index_anchor_level
+    local old_anchor_smart = e.index_anchor_smart
+    local old_trade_level = e.index_trade_target_level
+    local old_trade_smart = e.index_trade_target_smart
     self:_unindex_entry(e)
     self:_index_entry(e)
+    if old_managed ~= e.index_managed_level
+        or old_anchor_comm ~= e.index_anchor_community
+        or old_anchor_level ~= e.index_anchor_level
+        or old_anchor_smart ~= e.index_anchor_smart
+        or old_trade_level ~= e.index_trade_target_level
+        or old_trade_smart ~= e.index_trade_target_smart
+    then
+        self:_bump_index_rev()
+    end
 end
 
 function Memory:_rebuild_runtime_indexes()
@@ -6825,6 +6971,7 @@ inst.get_managed_squads_by_level = function() return inst:_get_managed_squads_by
 inst.get_anchor_index = function() return inst:_get_anchor_index() end
 inst.get_communities_by_smart_level = function() return inst:_get_communities_by_smart_level() end
 inst.get_trade_target_occupancy = function() return inst:_get_trade_target_occupancy() end
+inst.get_index_rev = function() return inst:_get_index_rev() end
 inst.mark_dirty = function(squad_id, key) return inst:_mark_dirty(squad_id, key) end
 inst.mark_arrived_to_target = function(squad_id, smart_ref, source) return inst:_mark_arrived_to_target(squad_id, smart_ref, source) end
 inst.mark_left_target = function(squad_id, smart_ref, source) return inst:_mark_left_target(squad_id, smart_ref, source) end
@@ -12809,14 +12956,28 @@ local function game_time_diff_sec(start_ct)
     return sec
 end
 
+local TASKS_GVID_LEVEL_CACHE_MS = 1000
+local tasks_gvid_level_cache = {}
+
 local function now_level_name_by_gvid(gvid)
+    gvid = tonumber(gvid) or nil
     if not (gvid and alife and game_graph) then return nil end
+    local now = tg()
+    local cached = tasks_gvid_level_cache[gvid]
+    if type(cached) == "table" and now <= (tonumber(cached.tg) or 0) + TASKS_GVID_LEVEL_CACHE_MS then
+        return cached.value
+    end
     local ok, res = pcall(function()
         local gv = game_graph():vertex(gvid)
         if not gv then return nil end
         return alife():level_name(gv:level_id())
     end)
-    return ok and res or nil
+    if ok and type(res) == "string" and res ~= "" then
+        tasks_gvid_level_cache[gvid] = { value = res, tg = now }
+        return res
+    end
+    tasks_gvid_level_cache[gvid] = { value = nil, tg = now }
+    return nil
 end
 
 local function get_board()
@@ -13575,8 +13736,9 @@ local function ensure_capability_index(level_name)
 
     local smart_revs = board_index and board_index.RUNTIME and board_index.RUNTIME.smart_revision_by_level or nil
     local smart_rev = tonumber(smart_revs and smart_revs[level_name]) or 0
+    local cfg_rev = tonumber(zhopa.runtime_cfg and zhopa.runtime_cfg.version) or 0
     local cached = RUNTIME.cap_index_by_level[level_name]
-    if type(cached) == "table" and tonumber(cached._smart_rev) == smart_rev then
+    if type(cached) == "table" and tonumber(cached._smart_rev) == smart_rev and tonumber(cached._cfg_rev) == cfg_rev then
         return cached
     end
 
@@ -13594,6 +13756,7 @@ local function ensure_capability_index(level_name)
         base = {},
         safe = {},
         _smart_rev = smart_rev,
+        _cfg_rev = cfg_rev,
     }
     local anomaly_set = {}
     local base_set = {}
@@ -13695,15 +13858,21 @@ function tasks._shared_build_key(level_name, community, section_name)
     return tostring(level_name or "-") .. "|" .. tostring(community or "-") .. "|" .. tostring(section_name or "-")
 end
 
+local effective_filter_opts = {}
+
+local function get_effective_filter_opts(community, section_name)
+    effective_filter_opts.community = community
+    effective_filter_opts.section_name = section_name
+    effective_filter_opts.filter_fn = nil
+    return effective_filter_opts
+end
+
 function tasks._get_effective_neighbors(level_name, community, section_name)
     if type(level_name) ~= "string" or level_name == "" then
         return {}
     end
     if zhopa.board_index and zhopa.board_index.get_level_neighbors then
-        local res = zhopa.board_index.get_level_neighbors(level_name, {
-            community = community,
-            section_name = section_name,
-        })
+        local res = zhopa.board_index.get_level_neighbors(level_name, get_effective_filter_opts(community, section_name))
         if type(res) == "table" then
             return res
         end
@@ -13716,10 +13885,7 @@ function tasks._get_effective_level_bases(level_name, community, section_name)
         return {}
     end
     if zhopa.board_index and zhopa.board_index.get_base_smarts then
-        local runtime = zhopa.board_index.get_base_smarts(level_name, {
-            community = community,
-            section_name = section_name,
-        })
+        local runtime = zhopa.board_index.get_base_smarts(level_name, get_effective_filter_opts(community, section_name))
         if type(runtime) == "table" then
             return runtime
         end
@@ -14080,8 +14246,12 @@ end
 function tasks._get_logic_index(now, purpose)
     now = tonumber(now) or tg()
     local bp = tasks._ensure_build_prep(now)
+    local memory = zhopa.memory
+    local memory_rev = memory and memory.get_index_rev and memory.get_index_rev() or 0
+    local cfg_rev = tonumber(zhopa.runtime_cfg and zhopa.runtime_cfg.version) or 0
     local cfg = RUNTIME.hotpath_cfg and RUNTIME.hotpath_cfg.builders or nil
     local ttl_ms = tonumber(cfg and cfg.logic_index_ttl_ms) or 1000
+    local stable_ttl_ms = ttl_ms * 10
     if purpose == "trade" then
         local trade_ttl_ms = tonumber(cfg and cfg.trade_taken_ttl_ms) or ttl_ms
         if trade_ttl_ms > 0 and trade_ttl_ms < ttl_ms then
@@ -14090,15 +14260,25 @@ function tasks._get_logic_index(now, purpose)
     end
 
     local cached = bp.logic_index_cache
-    if type(cached) == "table" and now <= ((tonumber(cached.tg) or 0) + ttl_ms) then
+    if type(cached) == "table"
+        and tonumber(cached._memory_rev) == tonumber(memory_rev)
+        and tonumber(cached._cfg_rev) == cfg_rev
+        and RUNTIME.task_index_dirty ~= true
+        and now <= ((tonumber(cached.tg) or 0) + stable_ttl_ms)
+    then
+        bp.logic_index_stats.hits = (tonumber(bp.logic_index_stats.hits) or 0) + 1
+        return cached
+    end
+    if type(cached) == "table" and RUNTIME.task_index_dirty ~= true and now <= ((tonumber(cached.tg) or 0) + ttl_ms) then
         bp.logic_index_stats.hits = (tonumber(bp.logic_index_stats.hits) or 0) + 1
         return cached
     end
 
     bp.logic_index_stats.misses = (tonumber(bp.logic_index_stats.misses) or 0) + 1
-    local memory = zhopa.memory
     local index = {
         tg = now,
+        _memory_rev = memory_rev,
+        _cfg_rev = cfg_rev,
         anchors_by_community_level = {},
         anchor_priority_by_community_level = {},
         communities_by_smart_level = {},
@@ -14336,12 +14516,13 @@ function tasks._prepare_reactive_context(se_squad, entry, now, mode)
 end
 
 local function make_task(task_type, target, params, priority)
+    local now = tg()
     return {
-        id = tostring(task_type) .. "_" .. tostring(tg()),
+        id = tostring(task_type) .. "_" .. tostring(now),
         type = task_type,
         target = target,
         params = params or {},
-        created_at_tg = tg(),
+        created_at_tg = now,
         priority = priority or 0,
     }
 end
@@ -18142,16 +18323,30 @@ local function is_hunt_enabled()
     return true
 end
 
+local MUTANT_GVID_LEVEL_CACHE_MS = 1000
+local mutant_gvid_level_cache = {}
+
 local function now_level_name_by_gvid(gvid)
+    gvid = tonumber(gvid) or nil
     if not (gvid and alife and game_graph) then
         return nil
+    end
+    local now = tg()
+    local cached = mutant_gvid_level_cache[gvid]
+    if type(cached) == "table" and now <= (tonumber(cached.tg) or 0) + MUTANT_GVID_LEVEL_CACHE_MS then
+        return cached.value
     end
     local ok, res = pcall(function()
         local gv = game_graph():vertex(gvid)
         if not gv then return nil end
         return alife():level_name(gv:level_id())
     end)
-    return ok and res or nil
+    if ok and type(res) == "string" and res ~= "" then
+        mutant_gvid_level_cache[gvid] = { value = res, tg = now }
+        return res
+    end
+    mutant_gvid_level_cache[gvid] = { value = nil, tg = now }
+    return nil
 end
 
 local function get_board()
@@ -23536,24 +23731,7 @@ local function factions_signature(src)
     return table_concat(out, ",")
 end
 
-local function collect_live_stalker_factions(smart, is_stalker_info_fn)
-    local factions_present = {}
-    local stalker_count = 0
-    local last_alias = nil
-    if not (smart and type(smart.npc_info) == "table") then
-        return factions_present, stalker_count, false, last_alias
-    end
-    for _, info in pairs(smart.npc_info) do
-        if is_stalker_info_fn(info) then
-            stalker_count = stalker_count + 1
-            local alias = safe_community_alias(type(info) == "table" and info.se_obj or nil)
-            if alias and ENGINE_BY_ALIAS[alias] then
-                factions_present[alias] = true
-                last_alias = alias
-            end
-        end
-    end
-
+local function detect_faction_war(factions_present)
     local faction_war = false
     if game_relations and game_relations.is_factions_enemies then
         for a in pairs(factions_present) do
@@ -23579,8 +23757,28 @@ local function collect_live_stalker_factions(smart, is_stalker_info_fn)
             end
         end
     end
+    return faction_war
+end
 
-    return factions_present, stalker_count, faction_war, last_alias
+local function collect_live_stalker_factions(smart, is_stalker_info_fn)
+    local factions_present = {}
+    local stalker_count = 0
+    local last_alias = nil
+    if not (smart and type(smart.npc_info) == "table") then
+        return factions_present, stalker_count, false, last_alias
+    end
+    for _, info in pairs(smart.npc_info) do
+        if is_stalker_info_fn(info) then
+            stalker_count = stalker_count + 1
+            local alias = safe_community_alias(type(info) == "table" and info.se_obj or nil)
+            if alias and ENGINE_BY_ALIAS[alias] then
+                factions_present[alias] = true
+                last_alias = alias
+            end
+        end
+    end
+
+    return factions_present, stalker_count, detect_faction_war(factions_present), last_alias
 end
 
 local function extract_member_candidate_id(k, v)
@@ -23630,6 +23828,7 @@ function ServiceFiller:__init()
         applied_signature_by_smart = {},
         skip_retry_tg_by_smart = {},
         pending_spawn_by_smart_role = {},
+        pin_signature_by_sid = {},
         warfare_ignore_installed = false,
         active_enabled = false,
         disabled_logged = false,
@@ -23740,7 +23939,7 @@ function ServiceFiller:_is_stalker_info(info)
     return ok and IsStalker(nil, clsid) or false
 end
 
-function ServiceFiller:_resolve_owner_alias(smart)
+function ServiceFiller:_resolve_owner_alias(smart, live_scan)
     if not smart then
         return nil, "no_smart", 0, "-", nil
     end
@@ -23758,8 +23957,15 @@ function ServiceFiller:_resolve_owner_alias(smart)
 
     local raw_faction = smart.faction
     local alias = normalize_alias(raw_faction)
-    local factions_present, stalker_count, faction_war, live_alias =
-        collect_live_stalker_factions(smart, function(info) return self:_is_stalker_info(info) end)
+    local factions_present = type(live_scan) == "table" and type(live_scan.factions_present) == "table" and live_scan.factions_present or nil
+    local stalker_count = type(live_scan) == "table" and tonumber(live_scan.stalker_count) or nil
+    local faction_war = type(live_scan) == "table" and live_scan.faction_war == true or nil
+    local live_alias = type(live_scan) == "table" and live_scan.live_alias or nil
+    if not factions_present then
+        factions_present, stalker_count, faction_war, live_alias =
+            collect_live_stalker_factions(smart, function(info) return self:_is_stalker_info(info) end)
+    end
+    stalker_count = tonumber(stalker_count) or 0
     if stalker_count <= 0 then
         return nil, "no_stalker_presence", stalker_count, factions_signature(factions_present), raw_faction
     end
@@ -23779,19 +23985,35 @@ function ServiceFiller:_scan_live_population_roles(smart)
     local out = {
         occupied = false,
         live_roles = {},
+        factions_present = {},
+        stalker_count = 0,
+        faction_war = false,
+        live_alias = nil,
     }
     if not (smart and type(smart.npc_info) == "table") then
         return out
     end
     local sim = alife and alife() or nil
+    local squad_section_by_gid = {}
     for _, info in pairs(smart.npc_info) do
         if self:_is_stalker_info(info) then
             local se_obj = type(info) == "table" and info.se_obj or nil
+            out.stalker_count = out.stalker_count + 1
+            local alias = safe_community_alias(se_obj)
+            if alias and ENGINE_BY_ALIAS[alias] then
+                out.factions_present[alias] = true
+                out.live_alias = alias
+            end
             local group_id = se_obj and tonumber(se_obj.group_id) or nil
             if group_id and group_id > 0 and group_id ~= 65535 and sim then
-                local ok_squad, se_squad = pcall(function() return sim:object(group_id) end)
-                if ok_squad and se_squad then
-                    if not is_service_section(safe_section(se_squad)) then
+                local squad_section = squad_section_by_gid[group_id]
+                if squad_section == nil then
+                    local ok_squad, se_squad = pcall(function() return sim:object(group_id) end)
+                    squad_section = ok_squad and se_squad and safe_section(se_squad) or false
+                    squad_section_by_gid[group_id] = squad_section
+                end
+                if squad_section then
+                    if not is_service_section(squad_section) then
                         out.occupied = true
                     end
                 else
@@ -23811,6 +24033,7 @@ function ServiceFiller:_scan_live_population_roles(smart)
             end
         end
     end
+    out.faction_war = detect_faction_war(out.factions_present)
     return out
 end
 
@@ -23983,6 +24206,21 @@ function ServiceFiller:_pin_service_squad(board, smart_name, smart, owner_alias,
         return false
     end
 
+    local sid = tonumber(se_squad.id) or nil
+    local pin_signature = tostring(smart_id) .. "|" .. tostring(smart_name) .. "|" .. tostring(owner_alias or "-") .. "|" .. tostring(role or "-")
+    if sid
+        and self.RUNTIME.pin_signature_by_sid
+        and self.RUNTIME.pin_signature_by_sid[sid] == pin_signature
+        and se_squad.scripted_target == smart_name
+        and tonumber(se_squad.assigned_target_id) == smart_id
+        and tonumber(se_squad.smart_id) == smart_id
+        and se_squad.current_action == 0
+        and se_squad.registered_with_warfare == false
+        and se_squad.rush_to_target == false
+    then
+        return false
+    end
+
     self.RUNTIME.stats.pin_runs = (tonumber(self.RUNTIME.stats.pin_runs) or 0) + 1
 
     local changed = false
@@ -24041,6 +24279,9 @@ function ServiceFiller:_pin_service_squad(board, smart_name, smart, owner_alias,
 
     if changed then
         self.RUNTIME.stats.pin_reset = (tonumber(self.RUNTIME.stats.pin_reset) or 0) + 1
+    end
+    if sid and self.RUNTIME.pin_signature_by_sid then
+        self.RUNTIME.pin_signature_by_sid[sid] = pin_signature
     end
     return changed
 end
@@ -24612,7 +24853,7 @@ function ServiceFiller:_process_smart(board, smart_name)
     local allowed_roles = self:_collect_allowed_roles(smart)
     local existing = self:_collect_existing_service_roles(board, smart)
     local live_scan = self:_scan_live_population_roles(smart)
-    local owner_alias, owner_source, stalker_count, factions_sig, raw_faction = self:_resolve_owner_alias(smart)
+    local owner_alias, owner_source, stalker_count, factions_sig, raw_faction = self:_resolve_owner_alias(smart, live_scan)
     local occupied = self:_smart_has_non_service_population(smart, live_scan)
     local allowed_roles_count = count_keys(allowed_roles)
     local existing_count = count_keys(existing)
@@ -24839,6 +25080,7 @@ function ServiceFiller:_load_state(m_data)
     self.RUNTIME.applied_signature_by_smart = {}
     self.RUNTIME.skip_retry_tg_by_smart = {}
     self.RUNTIME.pending_spawn_by_smart_role = {}
+    self.RUNTIME.pin_signature_by_sid = {}
     self.RUNTIME.warfare_ignore_installed = false
     self.RUNTIME.active_enabled = false
     self.RUNTIME.disabled_logged = false
@@ -25089,6 +25331,10 @@ local LOOT_PASSIVE_CLEANUP_STRIDE_MS = 1000
 local QUEST_CORPSE_CLUSTER_RADIUS_M = 20
 local QUEST_CORPSE_FLAG = "zhopa_quest_corpse"
 local VANILLA_DEATH_DROPPED_FLAG = "death_dropped"
+local LOOT_TIMER_NS = "zhopa_loot"
+local LOOT_SERVICE_TIMER = "service"
+local LOOT_SERVER_OBJECT_CACHE_MS = 250
+local LOOT_PROTECTED_SYNC_BUDGET = 512
 
 local inst = {
     RUNTIME = {
@@ -25119,6 +25365,10 @@ local inst = {
         quest_corpse_pending = {},
         quest_corpse_full_sync = false,
         quest_corpse_service_next_tg = 0,
+        quest_corpse_sync_cursor = nil,
+        server_object_cache = {},
+        server_object_cache_next_tg = 0,
+        quest_corpse_cluster_next_tg_by_id = {},
     }
 }
 
@@ -25126,6 +25376,27 @@ local remove_event_id
 local sync_protected_corpse_lootability
 local is_protected_corpse
 local mark_nearby_corpses_protected
+local run_loot_service
+local schedule_loot_service
+
+local function loot_timers_available()
+    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function"
+end
+
+local function on_loot_service_timer()
+    if run_loot_service then
+        run_loot_service(tg(), false)
+    end
+end
+
+schedule_loot_service = function(delay_ms)
+    if not loot_timers_available() then
+        return false
+    end
+    local delay = tonumber(delay_ms) or 0
+    if delay < 0 then delay = 0 end
+    return zhopa.timers.schedule(LOOT_TIMER_NS, LOOT_SERVICE_TIMER, delay, on_loot_service_timer)
+end
 
 local function apply_actor_loot_distance_override(enabled)
     if not (ui_options and ui_options.get and ui_options.set) then return end
@@ -25166,8 +25437,19 @@ local function get_server_object(id)
         return nil
     end
 
+    local now = tg()
+    local cache = inst.RUNTIME.server_object_cache
+    if type(cache) ~= "table" or now >= (tonumber(inst.RUNTIME.server_object_cache_next_tg) or 0) then
+        cache = {}
+        inst.RUNTIME.server_object_cache = cache
+        inst.RUNTIME.server_object_cache_next_tg = now + LOOT_SERVER_OBJECT_CACHE_MS
+    elseif cache[id] ~= nil then
+        return cache[id] or nil
+    end
+
     local storage = db and db.storage and db.storage[id]
     if storage and storage.object then
+        cache[id] = storage.object
         return storage.object
     end
 
@@ -25176,6 +25458,7 @@ local function get_server_object(id)
             return level.object_by_id(id)
         end)
         if ok_obj and obj then
+            cache[id] = obj
             return obj
         end
     end
@@ -25185,10 +25468,12 @@ local function get_server_object(id)
             return alife_object(id)
         end)
         if ok_obj and obj then
+            cache[id] = obj
             return obj
         end
     end
 
+    cache[id] = false
     return nil
 end
 
@@ -25473,6 +25758,7 @@ local function queue_quest_corpse_candidate(id, reason, now)
         entry.expires_tg = math.max(tonumber(entry.expires_tg) or 0, now + cfg_num("loot_quest_corpse_retry_ttl_ms", 15000, 1000))
     end
 
+    schedule_loot_service(0)
     return true
 end
 
@@ -25607,6 +25893,16 @@ mark_nearby_corpses_protected = function(anchor_corpse, reason)
     if anchor_id <= 0 or not anchor_pos then
         return 0
     end
+    local now = tg()
+    local next_by_id = inst.RUNTIME.quest_corpse_cluster_next_tg_by_id
+    if type(next_by_id) ~= "table" then
+        next_by_id = {}
+        inst.RUNTIME.quest_corpse_cluster_next_tg_by_id = next_by_id
+    end
+    if now < (tonumber(next_by_id[anchor_id]) or 0) then
+        return 0
+    end
+    next_by_id[anchor_id] = now + 1000
 
     local marked = 0
     level.iterate_nearest(anchor_pos, QUEST_CORPSE_CLUSTER_RADIUS_M, function(obj)
@@ -25670,7 +25966,21 @@ sync_protected_corpse_lootability = function(id)
         return false
     end
 
-    for sid, data in pairs(se_object) do
+    local cursor = inst.RUNTIME.quest_corpse_sync_cursor
+    local processed = 0
+    local completed = false
+    while processed < LOOT_PROTECTED_SYNC_BUDGET do
+        local ok_next, sid, data = pcall(next, se_object, cursor)
+        if not ok_next then
+            cursor = nil
+            ok_next, sid, data = pcall(next, se_object, nil)
+        end
+        if not (ok_next and sid ~= nil) then
+            cursor = nil
+            completed = true
+            break
+        end
+        cursor = sid
         if data and data[QUEST_CORPSE_FLAG] == true then
             apply_corpse_valuable_loot(sid, not enable)
             changed = true
@@ -25696,6 +26006,15 @@ sync_protected_corpse_lootability = function(id)
                 changed = true
             end
         end
+        processed = processed + 1
+    end
+    if completed == true then
+        inst.RUNTIME.quest_corpse_sync_cursor = nil
+        inst.RUNTIME.quest_corpse_full_sync = false
+    else
+        inst.RUNTIME.quest_corpse_sync_cursor = cursor
+        inst.RUNTIME.quest_corpse_full_sync = true
+        schedule_loot_service(cfg_num("loot_quest_corpse_service_ms", 250, 0))
     end
     return changed
 end
@@ -25768,6 +26087,13 @@ local function get_update_cfg(now)
     inst.RUNTIME.cfg_snapshot = snapshot
     inst.RUNTIME.cfg_snapshot_next_tg = now + LOOT_CFG_SNAPSHOT_TTL_MS
     return snapshot
+end
+
+local function has_quest_corpse_work()
+    if inst.RUNTIME.quest_corpse_full_sync == true then
+        return true
+    end
+    return type(inst.RUNTIME.quest_corpse_pending) == "table" and next(inst.RUNTIME.quest_corpse_pending) ~= nil
 end
 
 local function apply_actor_loot_distance_override_throttled(now, enabled, force)
@@ -26151,7 +26477,22 @@ local function maybe_cleanup_runtime(now, force)
     if force == true or (has_pending_events() and now >= ((tonumber(inst.RUNTIME.last_cleanup_tg) or 0) + LOOT_PASSIVE_CLEANUP_STRIDE_MS)) then
         cleanup_events(now)
     end
+    if has_pending_events() then
+        schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
+    end
     return true
+end
+
+run_loot_service = function(now, force)
+    now = tonumber(now) or tg()
+    if inst.RUNTIME.rioc_patch_applied ~= true then
+        patch_recover_item_on_corpse()
+    end
+    service_quest_corpse_candidates(now)
+    maybe_cleanup_runtime(now, force == true)
+    if has_quest_corpse_work() or has_pending_events() then
+        schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
+    end
 end
 
 local function unlock_corpse(corpse)
@@ -26173,6 +26514,8 @@ function inst.on_npc_death(victim, who)
         add_event_id("corpse", id, now)
         enforce_caps()
         maybe_cleanup_runtime(now, false)
+    else
+        schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
     end
     if cfg_bool("loot_unlock_corpses", true) then
         unlock_corpse(victim)
@@ -26205,6 +26548,8 @@ function inst.on_npc_item_drop(npc, item)
         add_event_id("item", id, now)
         enforce_caps()
         maybe_cleanup_runtime(now, false)
+    else
+        schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
     end
 end
 
@@ -26218,33 +26563,41 @@ function inst.on_actor_item_drop(item)
         add_event_id("item", id, now)
         enforce_caps()
         maybe_cleanup_runtime(now, false)
+    else
+        schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
     end
 end
 
 function inst.on_game_start()
-    patch_recover_item_on_corpse()
-    maybe_cleanup_runtime(tg(), true)
     inst.RUNTIME.quest_corpse_full_sync = true
+    inst.RUNTIME.quest_corpse_sync_cursor = nil
+    run_loot_service(tg(), true)
+    schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
 end
 
 function inst.on_load_state()
-    patch_recover_item_on_corpse()
     inst.RUNTIME.quest_corpse_full_sync = true
+    inst.RUNTIME.quest_corpse_sync_cursor = nil
+    run_loot_service(tg(), false)
+    schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
 end
 
 function inst.on_npc_update()
-    if inst.RUNTIME.rioc_patch_applied ~= true then
-        patch_recover_item_on_corpse()
-    end
-    service_quest_corpse_candidates(tg())
-    if has_pending_events() then
-        maybe_cleanup_runtime(tg(), false)
-    end
+    run_loot_service(tg(), false)
 end
 
 function inst.on_option_change()
-    maybe_cleanup_runtime(tg(), true)
     inst.RUNTIME.quest_corpse_full_sync = true
+    inst.RUNTIME.quest_corpse_sync_cursor = nil
+    run_loot_service(tg(), true)
+    schedule_loot_service(LOOT_PASSIVE_CLEANUP_STRIDE_MS)
+end
+
+function inst.needs_npc_update()
+    if loot_timers_available() then
+        return false
+    end
+    return inst.RUNTIME.rioc_patch_applied ~= true or has_quest_corpse_work() or has_pending_events()
 end
 
 function inst.is_recent_item_id(id)
@@ -26307,6 +26660,29 @@ local LootPatch = {
 local EVENT_SCAN_COOLDOWN_MS = 250
 local PATCH_RETRY_COOLDOWN_MS = 1000
 local LOOT_PATCH_CFG_SNAPSHOT_MS = 1000
+local LOOT_PATCH_TIMER_NS = "zhopa_loot_patch"
+local LOOT_PATCH_RETRY_TIMER = "retry"
+
+local maybe_retry_apply
+
+local function loot_patch_timers_available()
+    return zhopa and zhopa.timers and type(zhopa.timers.schedule) == "function"
+end
+
+local function on_loot_patch_retry_timer()
+    if maybe_retry_apply then
+        maybe_retry_apply()
+    end
+end
+
+local function schedule_loot_patch_retry(delay_ms)
+    if not loot_patch_timers_available() then
+        return false
+    end
+    local delay = tonumber(delay_ms) or PATCH_RETRY_COOLDOWN_MS
+    if delay < 0 then delay = 0 end
+    return zhopa.timers.schedule(LOOT_PATCH_TIMER_NS, LOOT_PATCH_RETRY_TIMER, delay, on_loot_patch_retry_timer)
+end
 
 local function cfg(key, def)
     if not (zhopa.config and zhopa.config.get) then return def end
@@ -26811,7 +27187,7 @@ function LootPatch.apply()
     return LootPatch.RUNTIME.patched == true
 end
 
-local function maybe_retry_apply()
+maybe_retry_apply = function()
     local loot_items_enabled = cfg("loot_items_enabled", false) == true
     local assist_ready = loot_items_enabled ~= true or LootPatch.RUNTIME.gather_items_patched == true
     if LootPatch.RUNTIME.patched == true and assist_ready == true then
@@ -26826,10 +27202,15 @@ local function maybe_retry_apply()
 
     LootPatch.RUNTIME.next_retry_tg = now + PATCH_RETRY_COOLDOWN_MS
     log_debug("APPLY_RETRY now=%s", tostring(now))
-    return LootPatch.apply() == true
+    local ok = LootPatch.apply() == true
+    if ok ~= true then
+        schedule_loot_patch_retry(PATCH_RETRY_COOLDOWN_MS)
+    end
+    return ok
 end
 
 function LootPatch.on_game_start()
+    schedule_loot_patch_retry(PATCH_RETRY_COOLDOWN_MS)
     return true
 end
 
@@ -26857,6 +27238,18 @@ end
 
 function LootPatch.on_npc_update()
     return maybe_retry_apply()
+end
+
+function LootPatch.needs_npc_update()
+    if loot_patch_timers_available() then
+        return false
+    end
+    local loot_items_enabled = cfg("loot_items_enabled", false) == true
+    local assist_ready = loot_items_enabled ~= true or LootPatch.RUNTIME.gather_items_patched == true
+    if LootPatch.RUNTIME.patched == true and assist_ready == true then
+        return false
+    end
+    return tg() >= (tonumber(LootPatch.RUNTIME.next_retry_tg) or 0)
 end
 
 zhopa.loot_patch = LootPatch
@@ -27898,6 +28291,7 @@ local POST_COMPLETE_TRADE_TO_TECH_VERIFY_MS = 10000
 local POST_TECH_UNKNOWN_GRACE_MS = 10000
 local POST_TECH_UNKNOWN_STALL_MS = 15000
 local POST_TECH_UNKNOWN_WATCH_MAX_MS = 45000
+local POST_TECH_NPC_UPDATE_CHECK_MS = 500
 local STATE_FLUSH_UPDATES = 5
 local INGRESS_WATCH_SMARTS = {
     jup_a6 = true,
@@ -27966,6 +28360,7 @@ local RULES = {
 
 local resolve_issue_with_flush
 local arm_post_tech_watch
+local get_service_rule_by_active_section
 
 local RUNTIME = {
     ready = false,
@@ -28445,6 +28840,7 @@ local function build_smart_snapshot(smart)
                     job_section = job and job.section or nil,
                     active_section = active_section,
                     active_scheme = active_scheme,
+                    active_rule = get_service_rule_by_active_section and get_service_rule_by_active_section(active_section) or nil,
                     path_index = (active_scheme == "beh") and safe_path_index(obj) or nil,
                     current_point_index = safe_current_point_index(obj),
                     position = safe_position(obj),
@@ -28467,21 +28863,13 @@ local function build_smart_snapshot(smart)
     return snapshot
 end
 
-local function get_service_rule_by_active_section(active_section)
+get_service_rule_by_active_section = function(active_section)
     for _, rule in ipairs(RULES) do
         if active_section_matches_rule(rule, active_section) then
             return rule
         end
     end
     return nil
-end
-
-local function log_smart_seen(snapshot)
-    return
-end
-
-local function log_service_snapshot(snapshot, issues)
-    return
 end
 
 local function clear_runtime_state_for_npc(npc_id)
@@ -28547,8 +28935,10 @@ local function stable_table_fingerprint(t)
         return "-"
     end
     local keys = {}
+    local only_key = nil
     for k, v in pairs(t) do
         if v ~= nil then
+            only_key = k
             keys[#keys + 1] = {
                 raw = k,
                 sort = tostring(k),
@@ -28557,6 +28947,9 @@ local function stable_table_fingerprint(t)
     end
     if #keys == 0 then
         return "-"
+    end
+    if #keys == 1 then
+        return tostring(only_key) .. "=" .. tostring(t[only_key] or 0)
     end
     table_sort(keys, function(a, b)
         return a.sort < b.sort
@@ -28746,7 +29139,7 @@ local function refresh_progress_tracking(snapshot)
 
     for npc_id, entry in pairs(snapshot.entries) do
         if entry.active_section and entry.active_scheme == "beh" then
-            local rule = get_service_rule_by_active_section(entry.active_section)
+            local rule = entry.active_rule or get_service_rule_by_active_section(entry.active_section)
             if rule then
                 active_service_ids[npc_id] = true
                 local signature = build_progress_signature(entry, rule)
@@ -29069,7 +29462,7 @@ local function detect_post_complete_issues(snapshot, issued)
             if not (entry and entry.st and entry.active_section and entry.active_scheme == "beh") then
                 clear_completed_watch(npc_id)
             else
-                local active_rule = get_service_rule_by_active_section(entry.active_section)
+                local active_rule = entry.active_rule or get_service_rule_by_active_section(entry.active_section)
                 local slot_section = entry.job_section
                 if active_rule and not slot_section_matches_rule(active_rule, slot_section) then
                     slot_section = section_to_logic_from_active(entry.active_section)
@@ -29122,7 +29515,7 @@ local function detect_orphan_service_issues(snapshot, issued)
 
     for npc_id, entry in pairs(snapshot.entries) do
         if issued[npc_id] ~= true and entry.active_section and entry.active_scheme == "beh" then
-            local rule = get_service_rule_by_active_section(entry.active_section)
+            local rule = entry.active_rule or get_service_rule_by_active_section(entry.active_section)
             if rule then
                 local slot_section = entry.job_section
                 if not slot_section_matches_rule(rule, slot_section) then
@@ -29153,7 +29546,7 @@ local function detect_no_progress_issues(snapshot, issued)
 
     for npc_id, entry in pairs(snapshot.entries) do
         if issued[npc_id] ~= true and entry.active_section and entry.active_scheme == "beh" then
-            local rule = get_service_rule_by_active_section(entry.active_section)
+            local rule = entry.active_rule or get_service_rule_by_active_section(entry.active_section)
             if rule and RUNTIME.completed_watch_by_npc[npc_id] == nil then
                 local slot_section = entry.job_section
                 if not slot_section_matches_rule(rule, slot_section) then
@@ -29458,14 +29851,11 @@ local function process_smart(smart)
         return
     end
 
-    log_smart_seen(snapshot)
-
     sanitize_service_slots(snapshot)
     refresh_progress_tracking(snapshot)
     refresh_ingress_tracking(snapshot)
 
     local issues, issued = detect_cleanup_issues(snapshot)
-    log_service_snapshot(snapshot, issues)
     for i = 1, #issues do
         local issue = issues[i]
         local resolver = RESOLVERS[issue.kind]
@@ -29528,12 +29918,17 @@ local function on_npc_update(npc)
         return
     end
 
+    local tg = now()
+    if tg < (tonumber(watch.next_check_tg) or 0) then
+        return
+    end
+    watch.next_check_tg = tg + POST_TECH_NPC_UPDATE_CHECK_MS
+
     if not is_alive_object(npc) then
         clear_post_tech_watch(npc_id)
         return
     end
 
-    local tg = now()
     if (tg - (tonumber(watch.armed_tg) or tg)) > POST_TECH_UNKNOWN_WATCH_MAX_MS then
         clear_post_tech_watch(npc_id)
         return
@@ -29613,6 +30008,12 @@ end
 function inst.on_axr_service_result(npc, smart, kind, status, reason)
     arm_completed_watch(npc, smart, kind, status, reason)
     arm_post_tech_unknown_watch(npc, smart, kind, status, reason)
+end
+
+function inst.needs_npc_update()
+    return RUNTIME.ready == true
+        and type(RUNTIME.post_tech_watch_by_npc) == "table"
+        and next(RUNTIME.post_tech_watch_by_npc) ~= nil
 end
 
 inst.on_actor_first_update = on_actor_first_update
