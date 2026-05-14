@@ -349,8 +349,8 @@ local function resolve_squad_id_from_npc(npc)
 	return nil
 end
 
-local function publish_trade_service_event(npc, smart, source, phase, status, reason)
-	if not (zhopa and zhopa.bus and type(zhopa.bus.publish) == "function") then
+local function notify_zhopa_trade_service_result(npc, smart, source, phase, status, reason)
+	if not (zhopa and zhopa.core and type(zhopa.core.on_trade_service_result) == "function") then
 		return false
 	end
 	if not (npc and type(npc.id) == "function") then
@@ -362,18 +362,17 @@ local function publish_trade_service_event(npc, smart, source, phase, status, re
 		return false
 	end
 
-	zhopa.bus.publish("trade_service_event", {
-		args = {
-			squad_id,
-			npc:id(),
-			get_smart_name_safe(smart),
-			source or "axr_trade_manager",
-			phase,
-			status,
-			reason,
-		}
-	})
-	return true
+	local ok, res = pcall(
+		zhopa.core.on_trade_service_result,
+		squad_id,
+		npc:id(),
+		get_smart_name_safe(smart),
+		source or "axr_trade_manager",
+		phase,
+		status,
+		reason
+	)
+	return ok and res ~= false
 end
 
 local function notify_zhopa_trade_started(npc, smart, source)
@@ -382,7 +381,7 @@ local function notify_zhopa_trade_started(npc, smart, source)
 	end
 	local src = source or "axr_trade_manager"
 	local phase = string.find(tostring(src), "tech", 1, true) and "tech" or "trade"
-	if publish_trade_service_event(npc, smart, src, phase, "entered", src) == true then
+	if notify_zhopa_trade_service_result(npc, smart, src, phase, "entered", src) == true then
 		return true
 	end
 	if not (zhopa and zhopa.trade and type(zhopa.trade.notify_trade_started) == "function") then
@@ -662,9 +661,6 @@ local function clear_tech_item_intent(st)
 	end
 end
 
-local function has_service_items(tbl)
-	return type(tbl) == "table" and next(tbl) ~= nil
-end
 
 local function mark_tech_item_intent(st, sec)
 	if not (st and sec) then
@@ -905,7 +901,7 @@ local function finalize_service_session(npc, kind, reason)
 	if smart_service_slot_doctor and type(smart_service_slot_doctor.on_axr_service_result) == "function" then
 		pcall(smart_service_slot_doctor.on_axr_service_result, npc, smart, kind, status, reason)
 	end
-	publish_trade_service_event(npc, smart, source, tostring(kind), status, tostring(reason))
+	notify_zhopa_trade_service_result(npc, smart, source, tostring(kind), status, tostring(reason))
 end
 
 log_always("module_loaded rev=%s", tostring(ZHOPA_AXR_PATCH_REV))

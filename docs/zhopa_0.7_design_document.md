@@ -9,8 +9,8 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 
 Базовый контур такой:
 - engine callbacks приходят в `zhopa.core`;
-- `zhopa.core` публикует события в `zhopa.bus`;
-- модули подписываются на bus и держат только локальное runtime state;
+- `zhopa.core` напрямую маршрутизирует callbacks в методы модулей;
+- модули держат только локальное runtime state за явными методами `zhopa.*`;
 - отложенная логика выполняется через keyed timers из `zhopa.timers`;
 - steady-state central dispatcher отсутствует;
 - whole-world scan loop отсутствует;
@@ -29,35 +29,33 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 `gamedata/scripts/zhopa.script` теперь монолитный runtime bundle. Внутренний порядок логических блоков:
 1. `zhopa_oop`
 2. `zhopa_switches`
-3. `zhopa_bus`
-4. `zhopa_timers`
-5. `zhopa_core`
-6. `zhopa_safe`
-7. `zhopa_log`
-8. `zhopa_heli_guard_patch`
-9. `zhopa_mcm_schema`
-10. `zhopa_config`
-11. `zhopa_board_index`
-12. `zhopa_npc_faction_override`
-13. `zhopa_xr_conditions_patch`
-14. `zhopa_memory`
-15. `zhopa_story_psy_watchdog`
-16. `zhopa_story_events`
-17. `zhopa_smart_tasks`
-18. `zhopa_trade`
-19. `zhopa_tasks_registry`
-20. `zhopa_mutants`
-21. `zhopa_base_filler`
-22. `zhopa_dynamic_bases`
-23. `zhopa_service_filler`
-24. `zhopa_axr_task_patch`
-25. `zhopa_loot`
-26. `zhopa_loot_patch`
-27. `zhopa_fast_trading`
-28. `zhopa_debug_hud`
-29. `smart_service_slot_doctor`
+3. `zhopa_timers`
+4. `zhopa_core`
+5. `zhopa_safe`
+6. `zhopa_log`
+7. `zhopa_heli_guard_patch`
+8. `zhopa_config`
+9. `zhopa_board_index`
+10. `zhopa_npc_faction_override`
+11. `zhopa_xr_conditions_patch`
+12. `zhopa_memory`
+13. `zhopa_story_psy_watchdog`
+14. `zhopa_story_events`
+15. `zhopa_smart_tasks`
+16. `zhopa_trade`
+17. `zhopa_tasks_registry`
+18. `zhopa_mutants`
+19. `zhopa_base_filler`
+20. `zhopa_dynamic_bases`
+21. `zhopa_service_filler`
+22. `zhopa_axr_task_patch`
+23. `zhopa_loot`
+24. `zhopa_loot_patch`
+25. `zhopa_fast_trading`
+26. `zhopa_debug_hud`
+27. `smart_service_slot_doctor`
 
-`axr_trade_manager.script` остается отдельным внешним bridge, который подключается при startup. `zhopa_mcm.script` остается отдельным MCM adapter со встроенной копией schema.
+`axr_trade_manager.script` остается отдельным внешним bridge, который подключается при startup. `zhopa_mcm.script` остается отдельным MCM adapter. `zhopa_mcm_schema.script` теперь единственный источник schema для runtime config и MCM.
 
 ### 2.2 Порядок startup hooks
 1. `zhopa.loot.on_game_start()`
@@ -66,11 +64,10 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 4. `zhopa.npc_faction_override.on_game_start()`
 5. `zhopa.heli_guard_patch.on_game_start()`
 6. `zhopa.board_index.on_game_start()`
-7. `smart_service_slot_doctor.on_game_start()`
-8. `axr_trade_manager.on_game_start()`
-9. `zhopa.core.on_game_start()`
+7. `axr_trade_manager.on_game_start()`
+8. `zhopa.core.on_game_start()`
 
-`zhopa_story_events`, `zhopa_smart_tasks` и `zhopa_story_psy_watchdog` подписываются на bus сами при загрузке и восстанавливают подписки после load-событий.
+`zhopa_story_events`, `zhopa_smart_tasks` и `zhopa_story_psy_watchdog` открывают прямые методы, которые вызывает `zhopa.core`.
 
 ### 2.3 Callback surface
 `zhopa.core` - центральный hub engine callbacks:
@@ -86,9 +83,6 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 - `squad_on_leave_smart`
 - `squad_on_after_level_change`
 - `smart_terrain_on_update`
-- `on_try_respawn`
-- `npc_on_net_spawn`
-- `npc_on_net_destroy`
 - `npc_on_update`
 - `npc_on_item_take`
 - `npc_on_item_drop`
@@ -155,18 +149,7 @@ ZHOPA - это децентрализованный reactive ALife layer для 
 ### 4.2 `zhopa_switches`
 Матрица включения модулей. Делает feature-gating на runtime и на старте. Если подсистема кажется выключенной, сначала проверяется именно этот слой.
 
-### 4.3 `zhopa_bus`
-Pub/sub слой для межмодульной реактивной доставки.
-
-Публичный API:
-- `subscribe(event, name, fn)`
-- `unsubscribe(event, name)`
-- `publish(event, payload)`
-- `count(event)`
-- `has(event, name)`
-- `reset(event)`
-
-### 4.4 `zhopa_timers`
+### 4.3 `zhopa_timers`
 Ключевой timer registry.
 
 Используется для:
@@ -179,13 +162,13 @@ Pub/sub слой для межмодульной реактивной доста
 
 Требование: keyed timers, а не общий polling loop.
 
-### 4.5 `zhopa_safe`
+### 4.4 `zhopa_safe`
 Nil-safe wrapper слой вокруг движка и engine objects. Его роль - снять из кода дублирование проверок `type(...)`, `pcall`, `nil`-guard и безопасных fallback'ов.
 
-### 4.6 `zhopa_log`
+### 4.5 `zhopa_log`
 Централизованный логгер и gating по уровню логов. При `log_level = 0` файл лога не должен создаваться.
 
-### 4.7 `zhopa_config`
+### 4.6 `zhopa_config`
 Слой чтения конфигурации.
 
 Семантика чтения:
@@ -217,7 +200,7 @@ Nil-safe wrapper слой вокруг движка и engine objects. Его р
 - регистрирует engine callbacks;
 - синхронизирует log level;
 - bootstraps enabled runtime;
-- публикует bus events;
+- напрямую маршрутизирует callbacks в методы модулей;
 - делает save/load routing;
 - маршрутизирует `squad_on_update` в специализированные FSM.
 
@@ -239,8 +222,7 @@ Nil-safe wrapper слой вокруг движка и engine objects. Его р
 ### Key helpers
 - `can_run(name)` - проверяет switches/config gating;
 - `safe_call(tag, fn, ...)` - безопасный вызов движка;
-- `publish_bus_event(name, ...)` - fan-out в bus;
-- `make_callback_forwarder(name)` - превращает engine callback в bus event;
+- `route_*` helpers - ограниченный прямой fan-out в методы модулей;
 - `update_memory_snapshot(squad, source)` - обновляет `zhopa_memory`;
 - `dispatch_direct_squad_fsm(squad, source)` - отправляет squad в FSM chain;
 - `apply_runtime_fixes()` - runtime shims/fixes;
@@ -432,11 +414,11 @@ Nil-safe wrapper слой вокруг движка и engine objects. Его р
 1. `npc_on_item_take` или service callbacks создают service event.
 2. `trade` проверяет surge lock и live state.
 3. `can_trade_now` решает, можно ли стартовать `TRADE`.
-4. На старте и конце session данные синхронизируются через memory/bus.
+4. На старте и конце session данные синхронизируются через memory и прямые core routes.
 5. Таймауты и cooldown решаются keyed timers, а не глобальным polling loop.
 
 ### Helper-кластеры
-- event storage: `apply_service_event_to_memory`, `remember_service_event`, `bus_args`;
+- service result storage: `apply_service_event_to_memory`, `remember_service_event`;
 - surge gate: `surge_started_uncached`, `is_surge_started`, `get_surge_lock`;
 - smart/job inference: `infer_seller_id_from_smart`, `smart_has_trader_job_slot`, `resolve_live_trader_for_trade_smart`, `evict_leader_from_trade_job`;
 - trade state: `prepare_trade_flags`, `is_trade_job`, `is_tech_job`, `is_trader_job`, `has_service_items`, `get_service_state`, `get_trade_phase`.
@@ -475,7 +457,7 @@ Nil-safe wrapper слой вокруг движка и engine objects. Его р
 - suppression: `begin_item_take_suppress`, `end_item_take_suppress`, `is_item_take_suppressed`, `create_item_self_suppressed`;
 - job classification: `is_trade_job`, `is_tech_job`, `is_trader_job`, `smart_has_trader_job_slot`, `smart_has_tech_job_slot`, `smart_has_free_tech_job_slot`;
 - candidate selection: `pick_random_buy_candidate`, `pick_random_mechanic_bonus_candidate`;
-- state update: `mark_tech_item_intent`, `clear_service_intents`, `finalize_service_session`, `publish_trade_service_event`, `notify_zhopa_trade_started`;
+- state update: `mark_tech_item_intent`, `clear_service_intents`, `finalize_service_session`, `notify_zhopa_trade_service_result`, `notify_zhopa_trade_started`;
 - logging: `emit_prefixed_log`, `emit_zhopa_trade_log`, `log_trade_info`, `log_trade_warn`, `log_handler_binding_state`.
 
 ## 11. Smart control tasks: `zhopa.smart_tasks`
@@ -489,7 +471,7 @@ Nil-safe wrapper слой вокруг движка и engine objects. Его р
 
 ### Основные правила
 - smart control живет через claim cache;
-- dirty smart state reconciles через bus/timers;
+- dirty smart state reconciles через прямые core routes и timers;
 - conflict resolution идет по текущему live occupancy;
 - task assignment не должен требовать scan loop;
 - `control` - это не roam task, а ownership/occupation task.

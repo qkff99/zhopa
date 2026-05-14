@@ -9,8 +9,8 @@ ZHOPA is a decentralized reactive ALife layer for Anomaly 1.5.3.
 
 The runtime model is:
 - engine callbacks enter `zhopa.core`;
-- `zhopa.core` publishes events to `zhopa.bus`;
-- modules subscribe to the bus and keep only local runtime state;
+- `zhopa.core` routes engine callbacks directly to module methods;
+- modules keep only local runtime state behind explicit `zhopa.*` methods;
 - delayed logic uses keyed timers from `zhopa.timers`;
 - there is no central steady-state dispatcher;
 - there is no whole-world scan loop;
@@ -29,35 +29,33 @@ Architecture invariants:
 Current `gamedata/scripts/zhopa.script` is a monolithic runtime bundle. Internal logical block order:
 1. `zhopa_oop`
 2. `zhopa_switches`
-3. `zhopa_bus`
-4. `zhopa_timers`
-5. `zhopa_core`
-6. `zhopa_safe`
-7. `zhopa_log`
-8. `zhopa_heli_guard_patch`
-9. `zhopa_mcm_schema`
-10. `zhopa_config`
-11. `zhopa_board_index`
-12. `zhopa_npc_faction_override`
-13. `zhopa_xr_conditions_patch`
-14. `zhopa_memory`
-15. `zhopa_story_psy_watchdog`
-16. `zhopa_story_events`
-17. `zhopa_smart_tasks`
-18. `zhopa_trade`
-19. `zhopa_tasks_registry`
-20. `zhopa_mutants`
-21. `zhopa_base_filler`
-22. `zhopa_dynamic_bases`
-23. `zhopa_service_filler`
-24. `zhopa_axr_task_patch`
-25. `zhopa_loot`
-26. `zhopa_loot_patch`
-27. `zhopa_fast_trading`
-28. `zhopa_debug_hud`
-29. `smart_service_slot_doctor`
+3. `zhopa_timers`
+4. `zhopa_core`
+5. `zhopa_safe`
+6. `zhopa_log`
+7. `zhopa_heli_guard_patch`
+8. `zhopa_config`
+9. `zhopa_board_index`
+10. `zhopa_npc_faction_override`
+11. `zhopa_xr_conditions_patch`
+12. `zhopa_memory`
+13. `zhopa_story_psy_watchdog`
+14. `zhopa_story_events`
+15. `zhopa_smart_tasks`
+16. `zhopa_trade`
+17. `zhopa_tasks_registry`
+18. `zhopa_mutants`
+19. `zhopa_base_filler`
+20. `zhopa_dynamic_bases`
+21. `zhopa_service_filler`
+22. `zhopa_axr_task_patch`
+23. `zhopa_loot`
+24. `zhopa_loot_patch`
+25. `zhopa_fast_trading`
+26. `zhopa_debug_hud`
+27. `smart_service_slot_doctor`
 
-`axr_trade_manager.script` remains a separate external bridge required during startup. `zhopa_mcm.script` remains a separate MCM adapter with an embedded schema copy.
+`axr_trade_manager.script` remains a separate external bridge required during startup. `zhopa_mcm.script` remains a separate MCM adapter. `zhopa_mcm_schema.script` is the single schema source used by runtime config and MCM.
 
 ### 2.2 Startup hook order
 1. `zhopa.loot.on_game_start()`
@@ -66,11 +64,10 @@ Current `gamedata/scripts/zhopa.script` is a monolithic runtime bundle. Internal
 4. `zhopa.npc_faction_override.on_game_start()`
 5. `zhopa.heli_guard_patch.on_game_start()`
 6. `zhopa.board_index.on_game_start()`
-7. `smart_service_slot_doctor.on_game_start()`
-8. `axr_trade_manager.on_game_start()`
-9. `zhopa.core.on_game_start()`
+7. `axr_trade_manager.on_game_start()`
+8. `zhopa.core.on_game_start()`
 
-`zhopa_story_events`, `zhopa_smart_tasks`, and `zhopa_story_psy_watchdog` subscribe to the bus when loaded and refresh subscriptions on load-related events.
+`zhopa_story_events`, `zhopa_smart_tasks`, and `zhopa_story_psy_watchdog` expose direct methods called by `zhopa.core`.
 
 ### 2.3 Callback surface
 `zhopa.core` is the central engine callback hub:
@@ -86,9 +83,6 @@ Current `gamedata/scripts/zhopa.script` is a monolithic runtime bundle. Internal
 - `squad_on_leave_smart`
 - `squad_on_after_level_change`
 - `smart_terrain_on_update`
-- `on_try_respawn`
-- `npc_on_net_spawn`
-- `npc_on_net_destroy`
 - `npc_on_update`
 - `npc_on_item_take`
 - `npc_on_item_drop`
@@ -155,18 +149,7 @@ Local class/singleton helper. It only exists to standardize how modules are inst
 ### 4.2 `zhopa_switches`
 Runtime module switch matrix. Used for feature gating on boot and at runtime.
 
-### 4.3 `zhopa_bus`
-Pub/sub layer for cross-module reactive delivery.
-
-Public API:
-- `subscribe(event, name, fn)`
-- `unsubscribe(event, name)`
-- `publish(event, payload)`
-- `count(event)`
-- `has(event, name)`
-- `reset(event)`
-
-### 4.4 `zhopa_timers`
+### 4.3 `zhopa_timers`
 Keyed timer registry.
 
 Used for:
@@ -177,13 +160,13 @@ Used for:
 - cleanup;
 - delayed continuation.
 
-### 4.5 `zhopa_safe`
+### 4.4 `zhopa_safe`
 Nil-safe wrapper layer around engine access. Its job is to centralize guards, `pcall` boundaries, and fallback handling.
 
-### 4.6 `zhopa_log`
+### 4.5 `zhopa_log`
 Central logger with log-level gating. At `log_level = 0`, the log file should not be created.
 
-### 4.7 `zhopa_config`
+### 4.6 `zhopa_config`
 Configuration access layer.
 
 Read order:
@@ -215,7 +198,7 @@ Helper groups:
 - registers engine callbacks;
 - syncs log level;
 - bootstraps enabled runtime;
-- publishes bus events;
+- routes callback subjects directly to module methods;
 - routes save/load;
 - dispatches `squad_on_update` into specialized FSMs.
 
@@ -232,13 +215,19 @@ Helper groups:
 - `on_squad_enter_smart(...)`
 - `on_squad_leave_smart(...)`
 - `on_squad_after_level_change(...)`
+- `on_server_entity_register(...)`
 - `on_server_entity_unregister(...)`
+- `on_smart_terrain_update(...)`
+- `on_npc_update(...)`
+- `on_npc_item_take(...)`
+- `on_npc_item_drop(...)`
+- `on_npc_death(...)`
+- `on_actor_item_drop(...)`
 
 ### Key helpers
 - `can_run(name)` - switch/config gate;
 - `safe_call(tag, fn, ...)` - safe engine call;
-- `publish_bus_event(name, ...)` - bus fan-out;
-- `make_callback_forwarder(name)` - engine callback to bus event bridge;
+- `route_*` helpers - bounded direct fan-out to module methods;
 - `update_memory_snapshot(squad, source)` - refresh `zhopa_memory`;
 - `dispatch_direct_squad_fsm(squad, source)` - route a squad into the FSM chain;
 - `apply_runtime_fixes()` - runtime shims/fixes;
@@ -430,11 +419,11 @@ This is the main stalker task engine. It builds, selects, validates, and complet
 1. `npc_on_item_take` or service callbacks create a service event.
 2. `trade` checks surge lock and live state.
 3. `can_trade_now` decides whether `TRADE` may start.
-4. Start/end sync happens through memory and bus.
+4. Start/end sync happens through memory and direct core routes.
 5. Timeouts and cooldowns use keyed timers, not a global polling loop.
 
 ### Helper clusters
-- event storage: `apply_service_event_to_memory`, `remember_service_event`, `bus_args`;
+- service result storage: `apply_service_event_to_memory`, `remember_service_event`;
 - surge gate: `surge_started_uncached`, `is_surge_started`, `get_surge_lock`;
 - smart/job inference: `infer_seller_id_from_smart`, `smart_has_trader_job_slot`, `resolve_live_trader_for_trade_smart`, `evict_leader_from_trade_job`;
 - trade state: `prepare_trade_flags`, `is_trade_job`, `is_tech_job`, `is_trader_job`, `has_service_items`, `get_service_state`, `get_trade_phase`.
@@ -473,7 +462,7 @@ This is where the class of bug lives where a service NPC can receive its own `ha
 - suppression: `begin_item_take_suppress`, `end_item_take_suppress`, `is_item_take_suppressed`, `create_item_self_suppressed`;
 - job classification: `is_trade_job`, `is_tech_job`, `is_trader_job`, `smart_has_trader_job_slot`, `smart_has_tech_job_slot`, `smart_has_free_tech_job_slot`;
 - candidate selection: `pick_random_buy_candidate`, `pick_random_mechanic_bonus_candidate`;
-- state update: `mark_tech_item_intent`, `clear_service_intents`, `finalize_service_session`, `publish_trade_service_event`, `notify_zhopa_trade_started`;
+- state update: `mark_tech_item_intent`, `clear_service_intents`, `finalize_service_session`, `notify_zhopa_trade_service_result`, `notify_zhopa_trade_started`;
 - logging: `emit_prefixed_log`, `emit_zhopa_trade_log`, `log_trade_info`, `log_trade_warn`, `log_handler_binding_state`.
 
 ## 11. Smart Control Tasks: `zhopa.smart_tasks`
@@ -487,7 +476,7 @@ This is where the class of bug lives where a service NPC can receive its own `ha
 
 ### Main rules
 - smart control lives through claim caches;
-- dirty smart state reconciles through bus and timers;
+- dirty smart state reconciles through direct core routes and timers;
 - conflict resolution is based on current live occupancy;
 - assignment must not require a scan loop;
 - `control` is an ownership/occupation task, not a roam task.

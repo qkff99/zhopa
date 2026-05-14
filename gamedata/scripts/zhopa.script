@@ -43,7 +43,6 @@ s.core = true
 s.safe = true
 s.log = true
 s.config = true
-s.bus = true
 s.timers = true
 s.board_index = true
 s.memory = true
@@ -61,165 +60,6 @@ s.debug_hud = true
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_switches
 
--- BEGIN module zhopa_bus
-zhopa_bundle_module = function()
-zhopa = zhopa or {}
-
-local type = _G.type
-local pcall = _G.pcall
-local setmetatable = _G.setmetatable
-
-local function ensure_class()
-    local cls = zhopa.class
-    if type(cls) == "function" then
-        local ok, probe = pcall(cls, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local c = {}
-            c.__index = c
-            c.__name = name or "class"
-            function c.new(...)
-                local self = setmetatable({}, c)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return c
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
-
-local Bus = zhopa.class("Bus")
-Bus.__index = Bus
-
-function Bus:__init()
-    self.subscribers = {}
-end
-
-function Bus:_subscribe(event, name, fn)
-    if type(event) ~= "string" or event == "" then return false end
-    if type(name) ~= "string" or name == "" then return false end
-    if type(fn) ~= "function" then return false end
-
-    local list = self.subscribers[event]
-    if not list then
-        list = {}
-        self.subscribers[event] = list
-    end
-
-    for i = 1, #list do
-        if list[i].name == name then
-            return false
-        end
-    end
-
-    list[#list + 1] = { name = name, fn = fn }
-    return true
-end
-
-function Bus:_unsubscribe(event, name)
-    local list = self.subscribers[event]
-    if not list or type(name) ~= "string" or name == "" then
-        return false
-    end
-
-    for i = 1, #list do
-        if list[i].name == name then
-            table.remove(list, i)
-            if #list == 0 then
-                self.subscribers[event] = nil
-            end
-            return true
-        end
-    end
-
-    return false
-end
-
-function Bus:_publish(event, payload)
-    local list = self.subscribers[event]
-    if not list or #list == 0 then
-        return 0
-    end
-
-    payload = payload or {}
-    local delivered = 0
-    for i = 1, #list do
-        local sub = list[i]
-        local fn = sub and sub.fn or nil
-        if type(fn) ~= "function" then
-            delivered = delivered + 1
-        else
-            local ok, err = pcall(fn, payload)
-            if not ok and zhopa and zhopa.log and zhopa.log.error then
-                zhopa.log.error("BUS", "subscriber failed event=%s name=%s err=%s", tostring(event), tostring(sub and sub.name or "-"), tostring(err))
-            end
-            delivered = delivered + 1
-        end
-    end
-    return delivered
-end
-
-function Bus:_count(event)
-    local list = self.subscribers[event]
-    return list and #list or 0
-end
-
-function Bus:_has(event, name)
-    local list = self.subscribers[event]
-    if not list or type(name) ~= "string" or name == "" then
-        return false
-    end
-    for i = 1, #list do
-        if list[i].name == name then
-            return true
-        end
-    end
-    return false
-end
-
-function Bus:_reset(event)
-    if event == nil then
-        self.subscribers = {}
-        return true
-    end
-    self.subscribers[event] = nil
-    return true
-end
-
-local inst = Bus.new and Bus.new() or setmetatable({}, Bus)
-if not inst.subscribers then
-    Bus.__init(inst)
-end
-
-inst.subscribe = function(event, name, fn) return inst:_subscribe(event, name, fn) end
-inst.unsubscribe = function(event, name) return inst:_unsubscribe(event, name) end
-inst.publish = function(event, payload) return inst:_publish(event, payload) end
-inst.count = function(event) return inst:_count(event) end
-inst.has = function(event, name) return inst:_has(event, name) end
-inst.reset = function(event) return inst:_reset(event) end
-
-zhopa.bus = inst
-end; zhopa_bundle_module(); zhopa_bundle_module = nil
--- END module zhopa_bus
 
 -- BEGIN module zhopa_timers
 zhopa_bundle_module = function()
@@ -234,43 +74,6 @@ local unpack = _G.unpack
 local CreateTimeEvent = _G.CreateTimeEvent
 local RemoveTimeEvent = _G.RemoveTimeEvent
 
-local function ensure_class()
-    local cls = zhopa.class
-    if type(cls) == "function" then
-        local ok, probe = pcall(cls, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local c = {}
-            c.__index = c
-            c.__name = name or "class"
-            function c.new(...)
-                local self = setmetatable({}, c)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return c
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Timers = zhopa.class("Timers")
 Timers.__index = Timers
@@ -403,54 +206,12 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
 local alife = _G.alife
 local game_graph = _G.game_graph
 
-local function ensure_class()
-    local cls = zhopa.class
-    if type(cls) == "function" then
-        local ok, probe = pcall(cls, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local c = {}
-            c.__index = c
-            c.__name = name or "class"
-            function c.new(...)
-                local self = setmetatable({}, c)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return c
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Core = zhopa.class("Core")
 Core.__index = Core
@@ -562,35 +323,6 @@ local function get_offlevel_squad_update_skip_count()
     return value
 end
 
-local function publish_bus_event(name, ...)
-    local bus = zhopa.bus
-    local publish = bus and bus.publish or nil
-    if not publish then
-        return
-    end
-    if bus.count and bus.count(name) <= 0 then
-        return
-    end
-    local argc = select("#", ...)
-    local args = {}
-    for i = 1, argc do
-        args[i] = select(i, ...)
-    end
-    return publish(name, {
-        event = name,
-        argc = argc,
-        args = args,
-    })
-end
-
-local function make_callback_forwarder(name)
-    return function(...)
-        if runtime_enabled_now() ~= true then
-            return
-        end
-        publish_bus_event(name, ...)
-    end
-end
 
 local PREVALIDATED_CTX = { prevalidated = true }
 
@@ -740,6 +472,123 @@ local function route_squad_after_level_change(squad, old_level, new_level, entry
     call_module_method("debug_hud", "debug_hud", "on_squad_after_level_change", "debug_hud.on_squad_after_level_change", squad, old_level, new_level)
 end
 
+local function route_actor_first_update()
+    call_module_method("board_index", "board_index", "on_actor_first_update", "board_index.on_actor_first_update")
+    call_module_method("npc_faction_override", "npc_faction_override", "on_actor_first_update", "npc_faction_override.on_actor_first_update")
+    call_module_method("memory", "memory", "on_actor_first_update", "memory.on_actor_first_update")
+    call_module_method("story_psy_watchdog", "story_psy_watchdog", "on_actor_first_update", "story_psy_watchdog.on_actor_first_update")
+    call_module_method("story_events", "story_events", "on_actor_first_update", "story_events.on_actor_first_update")
+    call_module_method("smart_tasks", "smart_tasks", "on_actor_first_update", "smart_tasks.on_actor_first_update")
+    call_module_method("mutants", "mutants", "on_actor_first_update", "mutants.on_actor_first_update")
+    call_module_method(nil, "loot_patch", "on_actor_first_update", "loot_patch.on_actor_first_update")
+    call_module_method(nil, "smart_service_slot_doctor", "on_actor_first_update", "smart_service_slot_doctor.on_actor_first_update")
+    call_module_method("debug_hud", "debug_hud", "on_actor_first_update", "debug_hud.on_actor_first_update")
+end
+
+local function route_option_change()
+    call_module_method(nil, "heli_guard_patch", "on_option_change", "heli_guard_patch.on_option_change")
+    call_module_method("npc_faction_override", "npc_faction_override", "on_option_change", "npc_faction_override.on_option_change")
+    call_module_method("story_psy_watchdog", "story_psy_watchdog", "on_option_change", "story_psy_watchdog.on_option_change")
+    call_module_method("story_events", "story_events", "on_option_change", "story_events.on_option_change")
+    call_module_method("smart_tasks", "smart_tasks", "on_option_change", "smart_tasks.on_option_change")
+    call_module_method(nil, "trade", "on_option_change", "trade.on_option_change")
+    call_module_method("tasks", "tasks", "on_option_change", "tasks.on_option_change")
+    call_module_method("base_filler", "base_filler", "on_option_change", "base_filler.on_option_change")
+    call_module_method("dynamic_bases", "dynamic_bases", "on_option_change", "dynamic_bases.on_option_change")
+    call_module_method("service_filler", "service_filler", "on_option_change", "service_filler.on_option_change")
+    call_module_method(nil, "loot", "on_option_change", "loot.on_option_change")
+    call_module_method(nil, "fast_trading", "on_option_change", "fast_trading.on_option_change")
+    call_module_method("debug_hud", "debug_hud", "on_option_change", "debug_hud.on_option_change")
+end
+
+local function route_save_state(m_data)
+    call_module_method("story_events", "story_events", "save_state", "story_events.save_state", m_data)
+end
+
+local function route_load_state(m_data)
+    call_module_method("board_index", "board_index", "on_load_state", "board_index.on_load_state", m_data)
+    call_module_method("npc_faction_override", "npc_faction_override", "on_load_state", "npc_faction_override.on_load_state", m_data)
+    call_module_method("story_psy_watchdog", "story_psy_watchdog", "on_load_state", "story_psy_watchdog.on_load_state", m_data)
+    call_module_method("story_events", "story_events", "load_state", "story_events.load_state", m_data)
+    call_module_method("smart_tasks", "smart_tasks", "on_load_state", "smart_tasks.on_load_state", m_data)
+    call_module_method(nil, "trade", "on_load_state", "trade.on_load_state", m_data)
+    call_module_method("tasks", "tasks", "on_load_state", "tasks.on_load_state", m_data)
+    call_module_method("mutants", "mutants", "on_load_state", "mutants.on_load_state", m_data)
+    call_module_method("base_filler", "base_filler", "on_load_state", "base_filler.on_load_state", m_data)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_load_state", "dynamic_bases.on_load_state", m_data)
+    call_module_method("service_filler", "service_filler", "on_load_state", "service_filler.on_load_state", m_data)
+    call_module_method(nil, "loot", "on_load_state", "loot.on_load_state", m_data)
+    call_module_method(nil, "loot_patch", "on_load_state", "loot_patch.on_load_state", m_data)
+    call_module_method(nil, "fast_trading", "on_load_state", "fast_trading.on_load_state", m_data)
+    call_module_method(nil, "smart_service_slot_doctor", "on_load_state", "smart_service_slot_doctor.on_load_state", m_data)
+    call_module_method("debug_hud", "debug_hud", "on_load_state", "debug_hud.on_load_state", m_data)
+end
+
+local function route_server_entity_register(se_obj, type_name)
+    call_module_method("board_index", "board_index", "on_server_entity_register", "board_index.on_server_entity_register", se_obj, type_name)
+    call_module_method("npc_faction_override", "npc_faction_override", "on_server_entity_register", "npc_faction_override.on_server_entity_register", se_obj, type_name)
+    call_module_method("mutants", "mutants", "on_server_entity_register", "mutants.on_server_entity_register", se_obj, type_name)
+    call_module_method(nil, "loot", "on_server_entity_register", "loot.on_server_entity_register", se_obj, type_name)
+    call_module_method(nil, "loot_patch", "on_server_entity_register", "loot_patch.on_server_entity_register", se_obj, type_name)
+end
+
+local function route_server_entity_unregister(se_obj, type_name)
+    call_module_method("board_index", "board_index", "on_server_entity_unregister", "board_index.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("npc_faction_override", "npc_faction_override", "on_server_entity_unregister", "npc_faction_override.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("memory", "memory", "on_server_entity_unregister", "memory.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("story_events", "story_events", "on_server_entity_unregister", "story_events.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("smart_tasks", "smart_tasks", "on_server_entity_unregister", "smart_tasks.on_server_entity_unregister", se_obj, type_name)
+    call_module_method(nil, "trade", "on_server_entity_unregister", "trade.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("tasks", "tasks", "on_server_entity_unregister", "tasks.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("mutants", "mutants", "on_server_entity_unregister", "mutants.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("base_filler", "base_filler", "on_server_entity_unregister", "base_filler.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_server_entity_unregister", "dynamic_bases.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("service_filler", "service_filler", "on_server_entity_unregister", "service_filler.on_server_entity_unregister", se_obj, type_name)
+    call_module_method(nil, "smart_service_slot_doctor", "on_server_entity_unregister", "smart_service_slot_doctor.on_server_entity_unregister", se_obj, type_name)
+    call_module_method("debug_hud", "debug_hud", "on_server_entity_unregister", "debug_hud.on_server_entity_unregister", se_obj, type_name)
+end
+
+local function route_smart_terrain_update(smart)
+    call_module_method("board_index", "board_index", "on_smart_terrain_update", "board_index.on_smart_terrain_update", smart)
+    call_module_method("smart_tasks", "smart_tasks", "on_smart_terrain_update", "smart_tasks.on_smart_terrain_update", smart)
+    call_module_method("mutants", "mutants", "on_smart_terrain_update", "mutants.on_smart_terrain_update", smart)
+    call_module_method("base_filler", "base_filler", "on_smart_terrain_update", "base_filler.on_smart_terrain_update", smart)
+    call_module_method("dynamic_bases", "dynamic_bases", "on_smart_terrain_update", "dynamic_bases.on_smart_terrain_update", smart)
+    call_module_method("service_filler", "service_filler", "on_smart_terrain_update", "service_filler.on_smart_terrain_update", smart)
+    call_module_method(nil, "smart_service_slot_doctor", "on_smart_terrain_update", "smart_service_slot_doctor.on_smart_terrain_update", smart)
+end
+
+local function route_npc_update(npc)
+    call_module_method(nil, "loot", "on_npc_update", "loot.on_npc_update", npc)
+    call_module_method(nil, "loot_patch", "on_npc_update", "loot_patch.on_npc_update", npc)
+    call_module_method(nil, "smart_service_slot_doctor", "on_npc_update", "smart_service_slot_doctor.on_npc_update", npc)
+end
+
+local function route_npc_item_take(npc, item)
+    call_module_method(nil, "fast_trading", "on_npc_item_take", "fast_trading.on_npc_item_take", npc, item)
+end
+
+local function route_npc_item_drop(npc, item)
+    call_module_method(nil, "loot", "on_npc_item_drop", "loot.on_npc_item_drop", npc, item)
+end
+
+local function route_npc_death(victim, who)
+    call_module_method(nil, "loot", "on_npc_death", "loot.on_npc_death", victim, who)
+end
+
+local function route_actor_item_drop(item)
+    call_module_method(nil, "loot", "on_actor_item_drop", "loot.on_actor_item_drop", item)
+end
+
+local function route_task_current_changed(payload)
+    call_module_method("smart_tasks", "smart_tasks", "on_task_current_changed", "smart_tasks.on_task_current_changed", payload)
+    call_module_method("debug_hud", "debug_hud", "on_task_current_changed", "debug_hud.on_task_current_changed", payload)
+end
+
+local function route_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
+    call_module_method(nil, "trade", "on_trade_service_result", "trade.on_trade_service_result", squad_id, npc_id, smart_name, source, phase, status, reason)
+end
+
 local function debug_hud_enabled()
     if runtime_enabled_now() ~= true then
         return false
@@ -881,7 +730,7 @@ function Core:_bootstrap_enabled_runtime(source)
         safe_call("zhopa.loot_patch.apply", zhopa.loot_patch.apply)
     end
 
-    publish_bus_event("actor_on_first_update", nil)
+    route_actor_first_update()
 end
 
 function Core:_on_game_start()
@@ -890,7 +739,7 @@ function Core:_on_game_start()
     if RegisterScriptCallback then
         RegisterScriptCallback("actor_on_first_update", zhopa.core.on_first_update)
         RegisterScriptCallback("on_option_change", zhopa.core.on_option_change)
-        RegisterScriptCallback("server_entity_on_register", make_callback_forwarder("server_entity_on_register"))
+        RegisterScriptCallback("server_entity_on_register", zhopa.core.on_server_entity_register)
         RegisterScriptCallback("server_entity_on_unregister", zhopa.core.on_server_entity_unregister)
         RegisterScriptCallback("squad_on_first_update", zhopa.core.on_squad_first_update)
         RegisterScriptCallback("squad_on_update", zhopa.core.on_squad_update)
@@ -900,15 +749,12 @@ function Core:_on_game_start()
         RegisterScriptCallback("squad_on_enter_smart", zhopa.core.on_squad_enter_smart)
         RegisterScriptCallback("squad_on_leave_smart", zhopa.core.on_squad_leave_smart)
         RegisterScriptCallback("squad_on_after_level_change", zhopa.core.on_squad_after_level_change)
-        RegisterScriptCallback("smart_terrain_on_update", make_callback_forwarder("smart_terrain_on_update"))
-        RegisterScriptCallback("on_try_respawn", make_callback_forwarder("on_try_respawn"))
-        RegisterScriptCallback("npc_on_net_spawn", make_callback_forwarder("npc_on_net_spawn"))
-        RegisterScriptCallback("npc_on_net_destroy", make_callback_forwarder("npc_on_net_destroy"))
-        RegisterScriptCallback("npc_on_update", make_callback_forwarder("npc_on_update"))
-        RegisterScriptCallback("npc_on_item_take", make_callback_forwarder("npc_on_item_take"))
-        RegisterScriptCallback("npc_on_item_drop", make_callback_forwarder("npc_on_item_drop"))
-        RegisterScriptCallback("npc_on_death_callback", make_callback_forwarder("npc_on_death_callback"))
-        RegisterScriptCallback("actor_on_item_drop", make_callback_forwarder("actor_on_item_drop"))
+        RegisterScriptCallback("smart_terrain_on_update", zhopa.core.on_smart_terrain_update)
+        RegisterScriptCallback("npc_on_update", zhopa.core.on_npc_update)
+        RegisterScriptCallback("npc_on_item_take", zhopa.core.on_npc_item_take)
+        RegisterScriptCallback("npc_on_item_drop", zhopa.core.on_npc_item_drop)
+        RegisterScriptCallback("npc_on_death_callback", zhopa.core.on_npc_death)
+        RegisterScriptCallback("actor_on_item_drop", zhopa.core.on_actor_item_drop)
         RegisterScriptCallback("squad_on_npc_death", zhopa.core.on_squad_npc_death)
     end
 end
@@ -949,9 +795,7 @@ function Core:_on_option_change()
         self:_bootstrap_enabled_runtime("option_enable")
     end
 
-    if zhopa.bus and zhopa.bus.publish then
-        safe_call("zhopa.bus.publish(on_option_change)", zhopa.bus.publish, "on_option_change", { source = "engine" })
-    end
+    route_option_change()
 
     if zhopa.log and zhopa.log.info then
         zhopa.log.info("CORE", "OPTION_CHANGE_RELOADED enabled=%s prev=%s", tostring(enabled), tostring(prev_enabled))
@@ -978,7 +822,7 @@ function Core:_save_state(m_data)
         safe_call("zhopa.service_filler.save_state", zhopa.service_filler.save_state, m_data)
     end
 
-    publish_bus_event("save_state", m_data)
+    route_save_state(m_data)
 end
 
 function Core:_load_state(m_data)
@@ -1000,11 +844,7 @@ function Core:_load_state(m_data)
     if can_run("service_filler") and zhopa.service_filler and zhopa.service_filler.load_state then
         safe_call("zhopa.service_filler.load_state", zhopa.service_filler.load_state, m_data)
     end
-    if can_run("debug_hud") and debug_hud_enabled() and zhopa.debug_hud and zhopa.debug_hud.on_load_state then
-        safe_call("zhopa.debug_hud.on_load_state", zhopa.debug_hud.on_load_state)
-    end
-
-    publish_bus_event("load_state", m_data)
+    route_load_state(m_data)
 end
 
 function Core:_on_squad_npc_death(squad, npc, killer_npc, killer_squad)
@@ -1095,10 +935,64 @@ function Core:_on_server_entity_unregister(se_obj, type_name)
     if self:_is_enabled() ~= true then
         return
     end
-    if can_run("memory") and type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id and zhopa.memory and zhopa.memory.purge_squad_entry then
-        safe_call("zhopa.memory.purge_squad_entry(server_unregister)", zhopa.memory.purge_squad_entry, se_obj.id, "server_unregister", type_name)
+    route_server_entity_unregister(se_obj, type_name)
+end
+
+function Core:_on_server_entity_register(se_obj, type_name)
+    if self:_is_enabled() ~= true then
+        return
     end
-    publish_bus_event("server_entity_on_unregister", se_obj, type_name)
+    route_server_entity_register(se_obj, type_name)
+end
+
+function Core:_on_smart_terrain_update(smart)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_smart_terrain_update(smart)
+end
+
+function Core:_on_npc_update(npc)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_npc_update(npc)
+end
+
+function Core:_on_npc_item_take(npc, item)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_npc_item_take(npc, item)
+end
+
+function Core:_on_npc_item_drop(npc, item)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_npc_item_drop(npc, item)
+end
+
+function Core:_on_npc_death(victim, who)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_npc_death(victim, who)
+end
+
+function Core:_on_actor_item_drop(item)
+    if self:_is_enabled() ~= true then
+        return
+    end
+    route_actor_item_drop(item)
+end
+
+function Core:_on_task_current_changed(payload)
+    route_task_current_changed(payload)
+end
+
+function Core:_on_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
+    route_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
 end
 
 local inst = Core.new and Core.new() or setmetatable({}, Core)
@@ -1121,6 +1015,15 @@ inst.on_squad_enter_smart = function(squad, smart) return inst:_on_squad_enter_s
 inst.on_squad_leave_smart = function(squad, smart) return inst:_on_squad_leave_smart(squad, smart) end
 inst.on_squad_after_level_change = function(squad, old_level, new_level) return inst:_on_squad_after_level_change(squad, old_level, new_level) end
 inst.on_server_entity_unregister = function(se_obj, type_name) return inst:_on_server_entity_unregister(se_obj, type_name) end
+inst.on_server_entity_register = function(se_obj, type_name) return inst:_on_server_entity_register(se_obj, type_name) end
+inst.on_smart_terrain_update = function(smart) return inst:_on_smart_terrain_update(smart) end
+inst.on_npc_update = function(npc) return inst:_on_npc_update(npc) end
+inst.on_npc_item_take = function(npc, item) return inst:_on_npc_item_take(npc, item) end
+inst.on_npc_item_drop = function(npc, item) return inst:_on_npc_item_drop(npc, item) end
+inst.on_npc_death = function(victim, who) return inst:_on_npc_death(victim, who) end
+inst.on_actor_item_drop = function(item) return inst:_on_actor_item_drop(item) end
+inst.on_task_current_changed = function(payload) return inst:_on_task_current_changed(payload) end
+inst.on_trade_service_result = function(squad_id, npc_id, smart_name, source, phase, status, reason) return inst:_on_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason) end
 
 zhopa.core = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -1318,7 +1221,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -1327,47 +1229,6 @@ local time_global = _G.time_global
 local level = _G.level
 local string_match = string.match
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Logger = zhopa.class("Logger")
 Logger.__index = Logger
@@ -1713,376 +1574,16 @@ local function on_game_start()
     return false
 end
 
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("on_option_change", "zhopa_heli_guard_patch", function()
-        if master_enabled() == true then
-            apply_patch()
-        end
-    end)
-end
-
 local inst = {
     apply = apply_patch,
     on_game_start = on_game_start,
+    on_option_change = on_game_start,
 }
 
 zhopa.heli_guard_patch = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_heli_guard_patch
 
--- BEGIN module zhopa_mcm_schema
-zhopa_bundle_module = function()
-zhopa = zhopa or {}
-
-local OPTION_DEFS = {
-    enabled = { type = "check", val = 1, def = true },
-    debug_hud_enabled = { type = "check", val = 1, def = false },
-    explore_enabled = { type = "check", val = 1, def = true },
-    smart_tasks_enabled = { type = "check", val = 1, def = true },
-    smart_tasks_control_enabled = { type = "check", val = 1, def = true },
-    smart_tasks_control_max_squads_per_faction = { type = "track", val = 2, min = 1, max = 12, step = 1, def = 1 },
-    story_events_enabled = { type = "check", val = 1, def = true },
-    story_events_north_migration_enabled = { type = "check", val = 1, def = true },
-    story_events_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 33 },
-    home_region_attachment_enabled = { type = "check", val = 1, def = true },
-    story_psy_watchdog_enabled = { type = "check", val = 1, def = true },
-    mutant_sim_enabled = { type = "check", val = 1, def = true },
-    mutant_explore_enabled = { type = "check", val = 1, def = true },
-    mutant_hunt_enabled = { type = "check", val = 1, def = true },
-    artefact_enabled = { type = "check", val = 1, def = true },
-    populate_enabled = { type = "check", val = 1, def = true },
-    base_camping_enabled = { type = "check", val = 1, def = true },
-    base_camping_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 12, step = 0.25, def = 1 },
-    base_filler_enabled = { type = "check", val = 1, def = false },
-    base_filler_npc_min = { type = "track", val = 2, min = 1, max = 8, step = 1, def = 5 },
-    base_filler_npc_max = { type = "track", val = 2, min = 1, max = 8, step = 1, def = 8 },
-    base_filler_daily_respawn_game_hours = { type = "track", val = 2, min = 1, max = 168, step = 1, def = 24 },
-    dynamic_bases_enabled = { type = "check", val = 1, def = false },
-    service_filler_enabled = { type = "check", val = 1, def = false },
-    service_filler_respawn_game_hours = { type = "track", val = 2, min = 0.25, max = 168, step = 0.25, def = 6 },
-    task_arrive_dist_cap_m = { type = "track", val = 2, min = 1, max = 50, step = 1, def = 5 },
-    target_sync_enabled = { type = "check", val = 1, def = true },
-    online_intent_enforce_enabled = { type = "check", val = 1, def = true },
-    patrol_enabled = { type = "check", val = 1, def = true },
-    mutant_patrol_enabled = { type = "check", val = 1, def = true },
-    trade_enabled = { type = "check", val = 1, def = true },
-    npc_faction_override_enabled = { type = "check", val = 1, def = false },
-    loot_enabled = { type = "check", val = 1, def = true },
-    log_level = { type = "track", val = 2, min = 0, max = 5, step = 1, def = 0 },
-    log_filter_active_level_only = { type = "check", val = 1, def = true },
-    log_filter_active_level_drop_unknown = { type = "check", val = 1, def = false },
-    offlevel_squad_update_skip_count = { type = "track", val = 2, min = 0, max = 10, step = 1, def = 0 },
-    surge_check_cache_ms = { type = "track", val = 2, min = 0, max = 2000, step = 10, def = 250 },
-    smart_enemy_cache_ttl_ms = { type = "track", val = 2, min = 250, max = 120000, step = 250, def = 5000 },
-    loot_scan_radius_m = { type = "track", val = 2, min = 5, max = 150, step = 1, def = 35 },
-    loot_corpse_detect_dist_m = { type = "track", val = 2, min = 5, max = 150, step = 1, def = 35 },
-    loot_event_ttl_s = { type = "track", val = 2, min = 10, max = 600, step = 10, def = 180 },
-    loot_event_cap_total = { type = "track", val = 2, min = 100, max = 10000, step = 50, def = 1200 },
-    loot_event_cap_corpses = { type = "track", val = 2, min = 50, max = 10000, step = 50, def = 800 },
-    loot_event_cap_items = { type = "track", val = 2, min = 50, max = 10000, step = 50, def = 800 },
-    loot_collect_during_surge = { type = "check", val = 1, def = false },
-    loot_collect_after_surge_grace_ms = { type = "track", val = 2, min = 0, max = 600000, step = 1000, def = 120000 },
-    loot_patch_max_memory_size = { type = "track", val = 2, min = 8, max = 256, step = 1, def = 48 },
-    loot_disable_near_actor_limit = { type = "check", val = 1, def = true },
-    loot_unlock_corpses = { type = "check", val = 1, def = true },
-    loot_protect_quest_corpses_enabled = { type = "check", val = 1, def = true },
-    loot_items_enabled = { type = "check", val = 1, def = true },
-    loot_items_detect_dist_m = { type = "track", val = 2, min = 5, max = 150, step = 1, def = 35 },
-    loot_items_allow_unseen = { type = "check", val = 1, def = true },
-    rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
-    mutant_rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
-    mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1.0 },
-    rest_fallback_stay_min_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 900 },
-    rest_fallback_stay_max_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 1800 },
-    night_rest_enabled = { type = "check", val = 1, def = true },
-    trade_max_squads_per_smart = { type = "track", val = 2, min = 1, max = 12, step = 1, def = 3 },
-    trade_travel_timeout_ms = { type = "track", val = 2, min = 60000, max = 3600000, step = 60000, def = 600000 },
-    trade_axr_buy_all_enabled = { type = "check", val = 1, def = true },
-    fast_trading_enabled = { type = "check", val = 1, def = true },
-    fast_trading_delay_ms = { type = "track", val = 2, min = 0, max = 5000, step = 100, def = 500 },
-    fast_trading_cooldown_ms = { type = "track", val = 2, min = 0, max = 300000, step = 5000, def = 60000 },
-}
-
-local PANELS = {
-    {
-        id = "general",
-        text = "ui_mcm_zhopa_panel_general",
-        groups = {
-            {
-                id = "core",
-                text = "ui_mcm_zhopa_group_general_core",
-                options = {
-                    "enabled",
-                },
-            },
-            {
-                id = "world",
-                text = "ui_mcm_zhopa_group_general_world",
-                options = {
-                    "home_region_attachment_enabled",
-                    "npc_faction_override_enabled",
-                    "story_psy_watchdog_enabled",
-                },
-            },
-        },
-    },
-    {
-        id = "tasks",
-        text = "ui_mcm_zhopa_panel_tasks",
-        groups = {
-            {
-                id = "roam",
-                text = "ui_mcm_zhopa_group_tasks_roam",
-                options = {
-                    "explore_enabled",
-                    "populate_enabled",
-                    "artefact_enabled",
-                    "patrol_enabled",
-                    "base_camping_enabled",
-                    "base_camping_duration_game_hours",
-                },
-            },
-            {
-                id = "rest",
-                text = "ui_mcm_zhopa_group_tasks_rest",
-                options = {
-                    "night_rest_enabled",
-                    "rest_duration_game_hours",
-                    "rest_fallback_stay_min_sec",
-                    "rest_fallback_stay_max_sec",
-                },
-            },
-            {
-                id = "smart",
-                text = "ui_mcm_zhopa_group_tasks_smart",
-                options = {
-                    "smart_tasks_enabled",
-                    "smart_tasks_control_enabled",
-                    "smart_tasks_control_max_squads_per_faction",
-                },
-            },
-            {
-                id = "story",
-                text = "ui_mcm_zhopa_group_tasks_story",
-                options = {
-                    "story_events_enabled",
-                    "story_events_north_migration_enabled",
-                    "story_events_north_migration_percent",
-                },
-            },
-            {
-                id = "targeting",
-                text = "ui_mcm_zhopa_group_tasks_targeting",
-                options = {
-                    "task_arrive_dist_cap_m",
-                    "target_sync_enabled",
-                    "online_intent_enforce_enabled",
-                },
-            },
-        },
-    },
-    {
-        id = "mutants",
-        text = "ui_mcm_zhopa_panel_mutants",
-        groups = {
-            {
-                id = "behavior",
-                text = "ui_mcm_zhopa_group_mutants_behavior",
-                options = {
-                    "mutant_sim_enabled",
-                    "mutant_explore_enabled",
-                    "mutant_hunt_enabled",
-                    "mutant_patrol_enabled",
-                },
-            },
-            {
-                id = "timing",
-                text = "ui_mcm_zhopa_group_mutants_timing",
-                options = {
-                    "mutant_rest_duration_game_hours",
-                    "mutant_patrol_duration_game_hours",
-                },
-            },
-        },
-    },
-    {
-        id = "trade",
-        text = "ui_mcm_zhopa_panel_trade",
-        groups = {
-            {
-                id = "general",
-                text = "ui_mcm_zhopa_group_trade_general",
-                options = {
-                    "trade_enabled",
-                    "trade_max_squads_per_smart",
-                    "trade_travel_timeout_ms",
-                    "trade_axr_buy_all_enabled",
-                },
-            },
-            {
-                id = "fast",
-                text = "ui_mcm_zhopa_group_trade_fast",
-                options = {
-                    "fast_trading_enabled",
-                    "fast_trading_delay_ms",
-                    "fast_trading_cooldown_ms",
-                },
-            },
-        },
-    },
-    {
-        id = "bases",
-        text = "ui_mcm_zhopa_panel_bases",
-        groups = {
-            {
-                id = "base_filler",
-                text = "ui_mcm_zhopa_group_bases_base_filler",
-                options = {
-                    "base_filler_enabled",
-                    "base_filler_npc_min",
-                    "base_filler_npc_max",
-                    "base_filler_daily_respawn_game_hours",
-                },
-            },
-            {
-                id = "dynamic",
-                text = "ui_mcm_zhopa_group_bases_dynamic",
-                options = {
-                    "dynamic_bases_enabled",
-                },
-            },
-            {
-                id = "service",
-                text = "ui_mcm_zhopa_group_bases_service",
-                options = {
-                    "service_filler_enabled",
-                    "service_filler_respawn_game_hours",
-                },
-            },
-        },
-    },
-    {
-        id = "loot",
-        text = "ui_mcm_zhopa_panel_loot",
-        groups = {
-            {
-                id = "general",
-                text = "ui_mcm_zhopa_group_loot_general",
-                options = {
-                    "loot_enabled",
-                    "loot_scan_radius_m",
-                    "loot_corpse_detect_dist_m",
-                    "loot_collect_during_surge",
-                    "loot_collect_after_surge_grace_ms",
-                    "loot_disable_near_actor_limit",
-                    "loot_unlock_corpses",
-                    "loot_protect_quest_corpses_enabled",
-                },
-            },
-            {
-                id = "limits",
-                text = "ui_mcm_zhopa_group_loot_limits",
-                options = {
-                    "loot_event_ttl_s",
-                    "loot_event_cap_total",
-                    "loot_event_cap_corpses",
-                    "loot_event_cap_items",
-                },
-            },
-            {
-                id = "items",
-                text = "ui_mcm_zhopa_group_loot_items",
-                options = {
-                    "loot_items_enabled",
-                    "loot_items_detect_dist_m",
-                    "loot_items_allow_unseen",
-                },
-            },
-            {
-                id = "patch",
-                text = "ui_mcm_zhopa_group_loot_patch",
-                options = {
-                    "loot_patch_max_memory_size",
-                },
-            },
-        },
-    },
-    {
-        id = "perf",
-        text = "ui_mcm_zhopa_panel_perf",
-        groups = {
-            {
-                id = "budgets",
-                text = "ui_mcm_zhopa_group_perf_budgets",
-                options = {
-                    "offlevel_squad_update_skip_count",
-                },
-            },
-            {
-                id = "caches",
-                text = "ui_mcm_zhopa_group_perf_caches",
-                options = {
-                    "surge_check_cache_ms",
-                    "smart_enemy_cache_ttl_ms",
-                },
-            },
-        },
-    },
-    {
-        id = "debug",
-        text = "ui_mcm_zhopa_panel_debug",
-        groups = {
-            {
-                id = "runtime",
-                text = "ui_mcm_zhopa_group_debug_runtime",
-                options = {
-                    "debug_hud_enabled",
-                },
-            },
-            {
-                id = "logging",
-                text = "ui_mcm_zhopa_group_debug_logging",
-                options = {
-                    "log_level",
-                    "log_filter_active_level_only",
-                    "log_filter_active_level_drop_unknown",
-                },
-            },
-        },
-    },
-}
-
-local PATH_BY_KEY = {}
-
-for i = 1, #PANELS do
-    local panel = PANELS[i]
-    for j = 1, #panel.groups do
-        local group = panel.groups[j]
-        for k = 1, #group.options do
-            local key = group.options[k]
-            PATH_BY_KEY[key] = "zhopa/" .. panel.id .. "/" .. key
-        end
-    end
-end
-
-local schema = {
-    options = OPTION_DEFS,
-    panels = PANELS,
-    path_by_key = PATH_BY_KEY,
-}
-
-function schema.get_path(key)
-    return PATH_BY_KEY[key]
-end
-
-function schema.get_option(key)
-    return OPTION_DEFS[key]
-end
-
-zhopa.mcm_schema = schema
-_G.zhopa_mcm_schema = schema
-end; zhopa_bundle_module(); zhopa_bundle_module = nil
--- END module zhopa_mcm_schema
 
 -- BEGIN module zhopa_config
 zhopa_bundle_module = function()
@@ -2090,7 +1591,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -2100,47 +1600,6 @@ local time_global = _G.time_global
 local MCM_NIL = {}
 local LTX_NIL = {}
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Config = zhopa.class("Config")
 Config.__index = Config
@@ -2227,8 +1686,8 @@ function Config:_get_mcm_path(key)
     end
 
     local schema = zhopa and zhopa.mcm_schema or nil
-    if not (type(schema) == "table" and type(schema.get_path) == "function") and require then
-        -- monolith: zhopa_mcm_schema is loaded earlier
+    if not (type(schema) == "table" and type(schema.get_path) == "function") then
+        zhopa_require_external("zhopa_mcm_schema")
         schema = zhopa and zhopa.mcm_schema or nil
     end
 
@@ -2291,14 +1750,6 @@ function Config:_read_ltx_raw(key)
     local n = tonumber(res)
     if n ~= nil then return n end
     return res
-end
-
-function Config:_read_ltx(key, default)
-    local value = self:_read_ltx_raw(key)
-    if value == nil then
-        return default
-    end
-    return value
 end
 
 function Config:_read_mcm(key)
@@ -3074,7 +2525,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -3087,46 +2537,6 @@ local net_packet = _G.net_packet
 local clsid = rawget(_G, "clsid") or {}
 local table_sort = _G.table and _G.table.sort or nil
 
-local function ensure_class()
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local BoardIndex = zhopa.class("BoardIndex")
 BoardIndex.__index = BoardIndex
@@ -3163,18 +2573,6 @@ local function now_level_name_by_gvid(gvid)
         return alife():level_name(gv:level_id())
     end)
     return ok and level_name or nil
-end
-
-local function append_level_value(map, level_name, value)
-    if type(level_name) ~= "string" or level_name == "" then
-        return
-    end
-    local arr = map[level_name]
-    if type(arr) ~= "table" then
-        arr = {}
-        map[level_name] = arr
-    end
-    arr[#arr + 1] = value
 end
 
 local function ensure_level_set(map, level_name)
@@ -3655,13 +3053,6 @@ local function is_respawn_base_smart(smart)
     return smart.respawn_point == true and type(smart.respawn_params) == "table"
 end
 
-local function payload_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
 local function level_from_object(obj)
     if not obj then return nil end
     return now_level_name_by_gvid(tonumber(obj.m_game_vertex_id) or 0)
@@ -3907,29 +3298,6 @@ function BoardIndex:_mark_revision_union(kind, old_map, new_map)
             self:_bump_revision(kind, level_name)
         end
     end
-end
-
-function BoardIndex:_remove_level_value(map, level_name, value)
-    local arr = map[level_name]
-    if type(arr) ~= "table" or value == nil then
-        return false
-    end
-    local out = {}
-    local changed = false
-    for i = 1, #arr do
-        local item = arr[i]
-        if item ~= value then
-            out[#out + 1] = item
-        else
-            changed = true
-        end
-    end
-    if #out > 0 then
-        map[level_name] = out
-    else
-        map[level_name] = nil
-    end
-    return changed
 end
 
 function BoardIndex:_rebuild_neighbors()
@@ -4646,58 +4014,15 @@ if not inst.RUNTIME then
     BoardIndex.__init(inst)
 end
 
-local function active_inst()
-    local current = zhopa and zhopa.board_index or nil
-    if type(current) == "table" and current.RUNTIME then
-        return current
-    end
-    return inst
-end
-
-local function ensure_bus_subscriptions()
-    local bus = zhopa and zhopa.bus or nil
-    if not (type(bus) == "table" and type(bus.subscribe) == "function") then
-        return false
-    end
-
-    local function ensure(event_name, fn)
-        if type(bus.has) == "function" then
-            local ok_has, has = pcall(bus.has, event_name, "zhopa_board_index")
-            if ok_has and has == true then
-                return true
-            end
-        end
-        local ok_sub, res = pcall(bus.subscribe, event_name, "zhopa_board_index", fn)
-        return ok_sub and res ~= false
-    end
-
-    ensure("server_entity_on_register", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_server_entity_register(args[1], args[2])
-    end)
-    ensure("server_entity_on_unregister", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_server_entity_unregister(args[1], args[2])
-    end)
-    ensure("smart_terrain_on_update", function(payload)
-        local args = payload_args(payload)
-        active_inst():_on_smart_terrain_update(args[1])
-    end)
-    ensure("actor_on_first_update", function()
-        active_inst():_on_bootstrap()
-    end)
-    ensure("load_state", function()
-        active_inst():_on_bootstrap()
-    end)
-    return true
-end
-
-ensure_bus_subscriptions()
-
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
-inst.on_game_start = function() return ensure_bus_subscriptions() end
+inst.on_game_start = function() return true end
+inst.on_actor_first_update = function() return inst:_on_bootstrap() end
+inst.on_load_state = function() return inst:_on_bootstrap() end
+inst.on_server_entity_register = function(se_obj, type_name) return inst:_on_server_entity_register(se_obj, type_name) end
+inst.on_server_entity_unregister = function(se_obj, type_name) return inst:_on_server_entity_unregister(se_obj, type_name) end
+inst.on_smart_terrain_update = function(smart) return inst:_on_smart_terrain_update(smart) end
 inst.on_squad_first_update = function(squad) return inst:_on_squad_first_update(squad) end
 inst.on_squad_update = function(squad) return inst:_on_squad_update(squad) end
 inst.on_squad_enter_smart = function(squad, smart) return inst:_on_squad_enter_smart(squad, smart) end
@@ -4796,12 +4121,6 @@ local function get_board()
     return rawget(_G, "SIMBOARD")
 end
 
-local function payload_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
 
 local function is_valid_server_id(id)
     id = tonumber(id) or 0
@@ -5170,28 +4489,13 @@ end
 local function on_game_start()
 end
 
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("actor_on_first_update", "zhopa_npc_faction_override", function()
-        on_actor_first_update()
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_npc_faction_override", function()
-        on_option_change()
-    end)
-    zhopa.bus.subscribe("load_state", "zhopa_npc_faction_override", function()
-        on_load_state()
-    end)
-    zhopa.bus.subscribe("server_entity_on_register", "zhopa_npc_faction_override", function(payload)
-        local args = payload_args(payload)
-        on_server_entity_register(args[1], args[2])
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_npc_faction_override", function(payload)
-        local args = payload_args(payload)
-        on_server_entity_unregister(args[1], args[2])
-    end)
-end
-
 zhopa.npc_faction_override = {
     on_game_start = on_game_start,
+    on_actor_first_update = on_actor_first_update,
+    on_option_change = on_option_change,
+    on_load_state = on_load_state,
+    on_server_entity_register = on_server_entity_register,
+    on_server_entity_unregister = on_server_entity_unregister,
     on_squad_npc_creation = on_squad_npc_creation,
     on_squad_npc_death = on_squad_npc_death,
 }
@@ -5555,7 +4859,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -5580,47 +4883,6 @@ local INTEGRITY_SOFT_FAIL_WINDOW_MS = 30000
 
 local STATE_VERSION = "1.0.1"
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Memory = zhopa.class("Memory")
 Memory.__index = Memory
@@ -5629,15 +4891,12 @@ local function tg()
     return (time_global and time_global()) or 0
 end
 
-local function publish_memory_event(name, payload)
-    local bus = zhopa.bus
-    if not (bus and bus.publish and type(name) == "string" and name ~= "") then
-        return
+local function route_task_current_change(payload)
+    local core = zhopa and zhopa.core or nil
+    local fn = core and core.on_task_current_changed or nil
+    if type(fn) == "function" then
+        fn(payload)
     end
-    if bus.count and bus.count(name) <= 0 then
-        return
-    end
-    bus.publish(name, payload or { event = name })
 end
 
 local function now_level_name_by_gvid(gvid)
@@ -5861,12 +5120,6 @@ local function has_story_binding(object_id)
     return ok and story ~= nil and story ~= false
 end
 
-local function payload_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
 
 local function extract_smart_name(smart_ref)
     if type(smart_ref) == "string" and smart_ref ~= "" then
@@ -6832,8 +6085,7 @@ function Memory:_set_task_current(squad_id, task)
     ensure_dirty_shape(e)
     e.dirty.task = true
     self:_reindex_entry(e)
-    publish_memory_event("memory_task_changed", {
-        event = "memory_task_changed",
+    route_task_current_change({
         squad_id = tonumber(e.squad_id) or tonumber(squad_id) or nil,
         prev_task = prev_task,
         current_task = e.tasks and e.tasks.current or nil,
@@ -6848,8 +6100,7 @@ function Memory:_clear_tasks(squad_id)
     ensure_dirty_shape(e)
     e.dirty.task = true
     self:_reindex_entry(e)
-    publish_memory_event("memory_task_changed", {
-        event = "memory_task_changed",
+    route_task_current_change({
         squad_id = tonumber(e.squad_id) or tonumber(squad_id) or nil,
         prev_task = prev_task,
         current_task = e.tasks and e.tasks.current or nil,
@@ -7377,20 +6628,14 @@ inst.on_squad_npc_death = function(squad_or_id, npc, killer_npc, killer_squad) r
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("actor_on_first_update", "zhopa_memory", function()
-        inst:_rebuild_runtime_indexes()
-        inst:_prune_missing_squads_once("actor_on_first_update")
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_memory", function(payload)
-        local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-        local se_obj = args[1]
-        local type_name = args[2]
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" then
-            inst:_purge_squad_entry(se_obj and se_obj.id or nil, "server_unregister", "server_entity_on_unregister")
-        end
-    end)
+inst.on_actor_first_update = function()
+    inst:_rebuild_runtime_indexes()
+    inst:_prune_missing_squads_once("actor_on_first_update")
+end
+inst.on_server_entity_unregister = function(se_obj, type_name)
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" then
+        inst:_purge_squad_entry(se_obj and se_obj.id or nil, "server_unregister", "server_entity_on_unregister")
+    end
 end
 
 function Memory:_set_surge_lock(squad_id, locked)
@@ -8255,46 +7500,19 @@ local function reconcile_all_levels(source)
     return converted
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" or type(payload.args) ~= "table" then
-        return {}
-    end
-    return payload.args
+local function on_actor_first_update()
+    invalidate_runtime_caches()
+    reconcile_all_levels("actor_on_first_update")
 end
 
-local function ensure_bus_subscriptions()
-    local bus = zhopa and zhopa.bus or nil
-    if not (type(bus) == "table" and type(bus.subscribe) == "function") then
-        return false
-    end
+local function on_load_state()
+    invalidate_runtime_caches()
+    reconcile_all_levels("load_state")
+end
 
-    local function ensure(event_name, fn)
-        if type(bus.has) == "function" then
-            local ok_has, has = pcall(bus.has, event_name, "zhopa_story_psy_watchdog")
-            if ok_has and has == true then
-                return true
-            end
-        end
-        local ok_sub, res = pcall(bus.subscribe, event_name, "zhopa_story_psy_watchdog", fn)
-        return ok_sub and res ~= false
-    end
-
-    ensure("actor_on_first_update", function()
-        invalidate_runtime_caches()
-        reconcile_all_levels("actor_on_first_update")
-    end)
-
-    ensure("load_state", function()
-        invalidate_runtime_caches()
-        reconcile_all_levels("load_state")
-    end)
-
-    ensure("on_option_change", function()
-        invalidate_runtime_caches()
-        reconcile_all_levels("on_option_change")
-    end)
-
-    return true
+local function on_option_change()
+    invalidate_runtime_caches()
+    reconcile_all_levels("on_option_change")
 end
 
 local function on_squad_after_level_change(squad)
@@ -8304,10 +7522,11 @@ local function on_squad_after_level_change(squad)
     try_process_squad(squad, "squad_on_after_level_change")
 end
 
-ensure_bus_subscriptions()
-
-watchdog.on_game_start = ensure_bus_subscriptions
+watchdog.on_game_start = function() return true end
 watchdog.reconcile_all_levels = reconcile_all_levels
+watchdog.on_actor_first_update = on_actor_first_update
+watchdog.on_load_state = on_load_state
+watchdog.on_option_change = on_option_change
 watchdog.on_squad_after_level_change = on_squad_after_level_change
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_story_psy_watchdog
@@ -10060,69 +9279,35 @@ function story_events.update_squad_tasks(se_squad, ctx)
     return is_sid_locked(sid)
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" or type(payload.args) ~= "table" then
-        return {}
-    end
-    return payload.args
+local function on_actor_first_update()
+    get_state_event()
+    reconcile_selected_statuses("actor_on_first_update")
 end
 
-local function ensure_bus_subscriptions()
-    local bus = zhopa and zhopa.bus or nil
-    if not (type(bus) == "table" and type(bus.subscribe) == "function") then
-        return false
-    end
-
-    local function ensure(event_name, fn)
-        if type(bus.has) == "function" then
-            local ok_has, has = pcall(bus.has, event_name, "zhopa_story_events")
-            if ok_has and has == true then
-                return true
-            end
-        end
-        local ok_sub, res = pcall(bus.subscribe, event_name, "zhopa_story_events", fn)
-        return ok_sub and res ~= false
-    end
-
-    ensure("save_state", function(payload)
-        local args = bus_args(payload)
-        save_state_blob(args[1])
-    end)
-
-    ensure("load_state", function(payload)
-        local args = bus_args(payload)
-        load_state_blob(args[1])
-        reconcile_selected_statuses("load_state")
-    end)
-
-    ensure("actor_on_first_update", function()
-        get_state_event()
-        reconcile_selected_statuses("actor_on_first_update")
-    end)
-
-    ensure("on_option_change", function()
-        get_state_event()
-        reconcile_selected_statuses("on_option_change")
-    end)
-
-    ensure("server_entity_on_unregister", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local sid = normalize_sid(se_obj and se_obj.id)
-        if sid and is_sid_selected(sid) == true then
-            local event = get_state_event()
-            if normalize_status(event.status_by_sid[sid]) ~= "done" then
-                set_sid_status(sid, "pending")
-            end
-        end
-    end)
-
-    return true
+local function on_option_change()
+    get_state_event()
+    reconcile_selected_statuses("on_option_change")
 end
 
-ensure_bus_subscriptions()
+local function on_server_entity_unregister(se_obj)
+    local sid = normalize_sid(se_obj and se_obj.id)
+    if sid and is_sid_selected(sid) == true then
+        local event = get_state_event()
+        if normalize_status(event.status_by_sid[sid]) ~= "done" then
+            set_sid_status(sid, "pending")
+        end
+    end
+end
 
-story_events.on_game_start = ensure_bus_subscriptions
+story_events.on_game_start = function() return true end
+story_events.save_state = save_state_blob
+story_events.load_state = function(m_data)
+    load_state_blob(m_data)
+    reconcile_selected_statuses("load_state")
+end
+story_events.on_actor_first_update = on_actor_first_update
+story_events.on_option_change = on_option_change
+story_events.on_server_entity_unregister = on_server_entity_unregister
 story_events.get_state = function()
     return get_state_event()
 end
@@ -12054,7 +11239,7 @@ local function reactivate_runtime(reason)
     log_info("runtime_reactivated reason=%s dirty=%s", tostring(reason or "-"), tostring(next(RUNTIME.dirty_smarts) ~= nil))
 end
 
-local function on_memory_task_changed(payload)
+local function on_task_current_changed(payload)
     local sid = tonumber(type(payload) == "table" and payload.squad_id or nil)
     if not sid then
         return
@@ -12231,63 +11416,25 @@ local function update_squad_tasks_impl(se_squad, ctx)
     return false
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
+local function on_actor_first_update()
+    reactivate_runtime("actor_on_first_update")
 end
 
-local function ensure_bus_subscriptions()
-    local bus = zhopa and zhopa.bus or nil
-    if not (type(bus) == "table" and type(bus.subscribe) == "function") then
-        return false
+local function on_load_state()
+    reactivate_runtime("load_state")
+end
+
+local function on_option_change()
+    reactivate_runtime("option_change")
+end
+
+local function on_smart_terrain_update(smart)
+    local smart_name = safe_object_name(smart)
+    if smart_name and (get_tasktype_for_smart(smart_name) or RUNTIME.claims_by_smart[smart_name]) then
+        mark_smart_dirty(smart_name)
+        process_dirty_smarts(1, { smart_name })
+        try_fill_control_smart_jobs_once(smart_name, smart)
     end
-
-    local function ensure(event_name, fn)
-        if type(bus.has) == "function" then
-            local ok_has, has = pcall(bus.has, event_name, "zhopa_smart_tasks")
-            if ok_has and has == true then
-                return true
-            end
-        end
-        local ok_sub, res = pcall(bus.subscribe, event_name, "zhopa_smart_tasks", fn)
-        return ok_sub and res ~= false
-    end
-
-    ensure("actor_on_first_update", function()
-        reactivate_runtime("actor_on_first_update")
-    end)
-
-    ensure("load_state", function()
-        reactivate_runtime("load_state")
-    end)
-
-    ensure("on_option_change", function()
-        reactivate_runtime("option_change")
-    end)
-
-    ensure("memory_task_changed", function(payload)
-        on_memory_task_changed(payload)
-    end)
-
-    ensure("smart_terrain_on_update", function(payload)
-        local args = bus_args(payload)
-        local smart = args[1]
-        local smart_name = safe_object_name(smart)
-        if smart_name and (get_tasktype_for_smart(smart_name) or RUNTIME.claims_by_smart[smart_name]) then
-            mark_smart_dirty(smart_name)
-            process_dirty_smarts(1, { smart_name })
-            try_fill_control_smart_jobs_once(smart_name, smart)
-        end
-    end)
-
-    ensure("server_entity_on_unregister", function(payload)
-        local args = bus_args(payload)
-        on_server_entity_unregister(args[1], args[2])
-    end)
-
-    return true
 end
 
 local function on_squad_enter_smart(_, smart)
@@ -12304,11 +11451,15 @@ local function on_squad_leave_smart(_, smart)
     end
 end
 
-ensure_bus_subscriptions()
-
-smart_tasks.on_game_start = ensure_bus_subscriptions
+smart_tasks.on_game_start = function() return true end
 smart_tasks.reactivate_runtime = reactivate_runtime
 smart_tasks.update_squad_tasks = update_squad_tasks_impl
+smart_tasks.on_actor_first_update = on_actor_first_update
+smart_tasks.on_load_state = on_load_state
+smart_tasks.on_option_change = on_option_change
+smart_tasks.on_task_current_changed = on_task_current_changed
+smart_tasks.on_smart_terrain_update = on_smart_terrain_update
+smart_tasks.on_server_entity_unregister = on_server_entity_unregister
 smart_tasks.on_squad_enter_smart = on_squad_enter_smart
 smart_tasks.on_squad_leave_smart = on_squad_leave_smart
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
@@ -12383,13 +11534,6 @@ local RUNTIME = {
     service_event_by_squad = {},
 }
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
 local function apply_service_event_to_memory(squad_id, evt)
     squad_id = tonumber(squad_id) or 0
     if squad_id <= 0 or type(evt) ~= "table" then
@@ -12413,11 +11557,11 @@ local function apply_service_event_to_memory(squad_id, evt)
     local p = type(task.params) == "table" and task.params or {}
     task.params = p
 
-    p.trade_service_event_tg = tonumber(evt.tg) or tg()
-    p.trade_service_event_source = evt.source
-    p.trade_service_event_reason = evt.reason
-    p.trade_service_event_phase = evt.phase
-    p.trade_service_event_status = evt.status
+    p.trade_service_result_tg = tonumber(evt.tg) or tg()
+    p.trade_service_result_source = evt.source
+    p.trade_service_result_reason = evt.reason
+    p.trade_service_result_phase = evt.phase
+    p.trade_service_result_status = evt.status
 
     if evt.phase == "trade" or evt.phase == "tech" then
         p.trade_phase_kind = evt.phase
@@ -12781,10 +11925,10 @@ local function log_trade_done_gate_once(p, entry, target, phase_tag, leader_id, 
         tostring(trade_pending == true),
         tostring(tech_pending == true),
         tostring(reset_active == true),
-        tostring(p.trade_service_event_status or "-"),
-        tostring(p.trade_service_event_phase or "-"),
-        tostring(p.trade_service_event_source or "-"),
-        tostring(p.trade_service_event_reason or "-")
+        tostring(p.trade_service_result_status or "-"),
+        tostring(p.trade_service_result_phase or "-"),
+        tostring(p.trade_service_result_source or "-"),
+        tostring(p.trade_service_result_reason or "-")
     )
 end
 
@@ -13092,27 +12236,24 @@ function trade.tick(se_squad, entry, task)
     return "TRADING"
 end
 
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("load_state", "zhopa_trade", function()
-        trade.reset_runtime()
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_trade", function()
-        trade.reset_runtime()
-    end)
-    zhopa.bus.subscribe("trade_service_event", "zhopa_trade", function(payload)
-        local args = bus_args(payload)
-        remember_service_event(args[1], args[2], args[3], args[4], args[5], args[6], args[7])
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_trade", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local type_name = args[2]
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id then
-            local sid = tonumber(se_obj.id) or 0
-            RUNTIME.trade_started_by_squad[sid] = nil
-            RUNTIME.service_event_by_squad[sid] = nil
-        end
-    end)
+function trade.on_load_state()
+    trade.reset_runtime()
+end
+
+function trade.on_option_change()
+    trade.reset_runtime()
+end
+
+function trade.on_trade_service_result(squad_id, npc_id, smart_name, source, phase, status, reason)
+    return remember_service_event(squad_id, npc_id, smart_name, source, phase, status, reason)
+end
+
+function trade.on_server_entity_unregister(se_obj, type_name)
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id then
+        local sid = tonumber(se_obj.id) or 0
+        RUNTIME.trade_started_by_squad[sid] = nil
+        RUNTIME.service_event_by_squad[sid] = nil
+    end
 end
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_trade
@@ -13273,11 +12414,6 @@ function tasks._can_assign_trade_task(entry, source)
     return true
 end
 
-local function mark_entry_dirty(entry, key)
-    if not (entry and entry.squad_id and zhopa.memory and zhopa.memory.mark_dirty) then return end
-    zhopa.memory.mark_dirty(entry.squad_id, key)
-end
-
 local function consume_entry_dirty(entry, key)
     if not (entry and zhopa.memory and zhopa.memory.consume_dirty) then
         return false
@@ -13299,43 +12435,6 @@ local ctx_get_populate_anchor_by_level
 local ctx_get_populate_anchor_priority_by_level
 local ctx_get_populate_pass2_levels
 local ctx_get_populate_candidate_bundle
-
-local function table_size(t)
-    local n = 0
-    if type(t) ~= "table" then
-        return 0
-    end
-    for _ in pairs(t) do
-        n = n + 1
-    end
-    return n
-end
-
-local function trim_cache_to_max(cache, max_entries, stamp_key)
-    if type(cache) ~= "table" then return end
-    local size = table_size(cache)
-    if size <= max_entries then return end
-
-    while size > max_entries do
-        local oldest_k = nil
-        local oldest_t = nil
-        for k, v in pairs(cache) do
-            local ts = nil
-            if type(v) == "table" then
-                ts = tonumber(v[stamp_key]) or tonumber(v.tg) or tonumber(v.next_tg) or 0
-            else
-                ts = 0
-            end
-            if oldest_t == nil or ts < oldest_t then
-                oldest_t = ts
-                oldest_k = k
-            end
-        end
-        if oldest_k == nil then break end
-        cache[oldest_k] = nil
-        size = size - 1
-    end
-end
 
 local function has_game_time()
     return game and game.get_game_time and game.CTime
@@ -13419,15 +12518,6 @@ local function safe_obj_by_id(id)
         if obj then return obj end
     end
     return nil
-end
-
-local function is_alive_obj(obj)
-    if not obj then return false end
-    if obj.alive then
-        local ok, a = pcall(function() return obj:alive() end)
-        if ok then return a == true end
-    end
-    return true
 end
 
 local function surge_active_uncached()
@@ -14158,37 +13248,6 @@ function tasks._reset_build_prep_runtime()
     RUNTIME.cap_index_by_level = {}
     RUNTIME.filtered_cap_bucket_cache = {}
     RUNTIME.cap_bucket_bundle_cache = {}
-end
-
-function tasks._get_known_levels()
-    local board_index = zhopa.board_index
-    local levels = {}
-    local seen = {}
-    local function add_level(name)
-        if type(name) ~= "string" or name == "" or seen[name] then
-            return
-        end
-        seen[name] = true
-        levels[#levels + 1] = name
-    end
-
-    local runtime = board_index and board_index.RUNTIME or nil
-    local sources = runtime and {
-        runtime.smarts_by_level,
-        runtime.base_smarts_by_level,
-        runtime.respawn_base_smarts_by_level,
-        runtime.squads_by_level,
-        runtime.neighbors_by_level,
-    } or nil
-    for i = 1, sources and #sources or 0 do
-        local src = sources[i]
-        if type(src) == "table" then
-            for level_name in pairs(src) do
-                add_level(level_name)
-            end
-        end
-    end
-    return levels
 end
 
 local function ensure_capability_index(level_name)
@@ -14997,18 +14056,6 @@ RUNTIME.resolve_entry_anchor_smart = function(entry)
     return nil, nil
 end
 
-local function is_ally_faction(a, b)
-    if not (a and b) then return false end
-    if a == b then return true end
-    if game_relations and game_relations.is_factions_enemies then
-        local ok, enemies = pcall(function() return game_relations.is_factions_enemies(a, b) end)
-        if ok then
-            return enemies == false
-        end
-    end
-    return false
-end
-
 local function try_game_graph_distance(sgvid, tgvid)
     sgvid = tonumber(sgvid)
     tgvid = tonumber(tgvid)
@@ -15328,23 +14375,6 @@ local function smart_has_enemy_for_faction(sm, community, smart_name)
 
     RUNTIME.smart_enemy_fallback_cache[cache_key] = { tg = now, hostile = false }
     return false
-end
-
-local function obj_community_name(obj)
-    if not obj then return nil end
-    if character_community then
-        local ok, res = pcall(character_community, obj)
-        if ok and res and res ~= "" then return res end
-    end
-    if obj.community then
-        local ok, res = pcall(function() return obj:community() end)
-        if ok and res and res ~= "" then return res end
-    end
-    if obj.character_community then
-        local ok, res = pcall(function() return obj:character_community() end)
-        if ok and res and res ~= "" then return res end
-    end
-    return nil
 end
 
 -- OPTIMIZED: Uses sm.npc_info instead of level.iterate_nearest
@@ -15965,10 +14995,6 @@ local function get_online_intent_enforce_enabled()
     return zhopa.config.get("online_intent_enforce_enabled", true) ~= false
 end
 
-local function get_target_num_cfg(key, default, min_v)
-    return cfg_num(key, default, min_v)
-end
-
 local function resolve_target_smart_id(smart_name)
     if type(smart_name) ~= "string" or smart_name == "" then
         return nil, nil
@@ -16098,85 +15124,6 @@ local function sync_rest_always_arrived(se_squad, task_or_flag)
     pcall(function()
         se_squad.always_arrived = should_hold
     end)
-end
-
-local function smart_distance_to_target_m(se_squad, smart_name)
-    if not (se_squad and type(smart_name) == "string" and smart_name ~= "") then return nil end
-    local sm = get_smart_by_name(smart_name)
-    if not sm then return nil end
-    local p1 = zhopa.safe and zhopa.safe.safe_position and zhopa.safe.safe_position(se_squad) or nil
-    local p2 = sm.position
-    if not (p1 and p2 and p1.distance_to) then return nil end
-    local ok, d = pcall(function() return p1:distance_to(p2) end)
-    d = ok and tonumber(d) or nil
-    return d
-end
-
-local function pick_alt_target_for_task(task, cur_level, community, section_name, prefer_current_level, ctx)
-    if not (task and type(cur_level) == "string" and cur_level ~= "") then return nil end
-    local current = task.target
-    local target_level = task.params and task.params.target_level or cur_level
-
-    local function pick_from_list(list, list_level)
-        if not list or #list <= 0 then return nil end
-        local allowed_cache = ctx and ctx.allowed_by_name or nil
-
-        for _ = 1, math.min(12, #list) do
-            local c = community and pick_random_valid_safe(list, community, allowed_cache, list_level, section_name) or pick_random_valid(list, community, list_level, section_name)
-            if c and c ~= current then
-                local sm = get_smart_by_name(c)
-                local allowed = (not community) and true or (allowed_cache and allowed_cache[c])
-                if allowed == nil then
-                    allowed = tasks._is_roam_smart_allowed and tasks._is_roam_smart_allowed(c, community) == true or false
-                    if allowed_cache then
-                        allowed_cache[c] = allowed
-                    end
-                end
-                if sm and (not smart_is_blacklisted_by_obj(sm, c, community, section_name)) and allowed == true then
-                    return c
-                end
-            end
-        end
-
-        for i = 1, #list do
-            local c = list[i]
-            if c and c ~= current then
-                local sm = get_smart_by_name(c)
-                local allowed = (not community) and true or (allowed_cache and allowed_cache[c])
-                if allowed == nil then
-                    allowed = tasks._is_roam_smart_allowed and tasks._is_roam_smart_allowed(c, community) == true or false
-                    if allowed_cache then
-                        allowed_cache[c] = allowed
-                    end
-                end
-                if sm and (not smart_is_blacklisted_by_obj(sm, c, community, section_name)) and allowed == true then
-                    return c
-                end
-            end
-        end
-        return nil
-    end
-
-    local smarts_by_level = ctx_get_smarts_by_level(ctx)
-    local current_level_smarts = (ctx and ctx.cur_level == cur_level and ctx.current_level_smarts)
-        or (smarts_by_level and smarts_by_level[cur_level])
-        or get_smarts_for_level(cur_level, community, section_name)
-    local target_level_smarts = (smarts_by_level and smarts_by_level[target_level])
-        or get_smarts_for_level(target_level, community, section_name)
-
-    if prefer_current_level == true then
-        local c1 = pick_from_list(current_level_smarts, cur_level)
-        if c1 then return c1 end
-        local c2 = pick_from_list(target_level_smarts, target_level)
-        if c2 then return c2 end
-    else
-        local c1 = pick_from_list(target_level_smarts, target_level)
-        if c1 then return c1 end
-        local c2 = pick_from_list(current_level_smarts, cur_level)
-        if c2 then return c2 end
-    end
-
-    return nil
 end
 
 local function enforce_online_task_intent(se_squad, entry, task)
@@ -18541,32 +17488,18 @@ function tasks.is_smart_spawn_allowed(smart_name, community, level_name, section
     return true, "ok"
 end
 
-local function task_bus_args(payload)
-    if type(payload) == "table" and type(payload.args) == "table" then
-        return payload.args
+function tasks.on_load_state()
+    tasks._reset_build_prep_runtime()
+    if zhopa.timers and zhopa.timers.clear then
+        zhopa.timers.clear(TASK_STATE_TIMER_NS)
     end
-    return {}
+    RUNTIME.task_warn_once = {}
 end
 
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("load_state", "zhopa_tasks", function()
-        tasks._reset_build_prep_runtime()
-        if zhopa.timers and zhopa.timers.clear then
-            zhopa.timers.clear(TASK_STATE_TIMER_NS)
-        end
-        RUNTIME.task_warn_once = {}
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_tasks", function()
-        tasks.on_option_change()
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_tasks", function(payload)
-        local args = task_bus_args(payload)
-        local se_obj = args[1]
-        local type_name = args[2]
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id then
-            cancel_task_state_timer(se_obj.id)
-        end
-    end)
+function tasks.on_server_entity_unregister(se_obj, type_name)
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" and se_obj and se_obj.id then
+        cancel_task_state_timer(se_obj.id)
+    end
 end
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module zhopa_tasks_registry
@@ -18577,7 +17510,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -18663,47 +17595,6 @@ local function is_valid_server_id(id)
     return id ~= nil and id > 0 and id ~= 65535
 end
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local Mutants = zhopa.class("Mutants")
 Mutants.__index = Mutants
@@ -18920,17 +17811,6 @@ local function is_surge_active()
         end
     end
     return false
-end
-
-local function validate_live_squad_with_memory(se_squad, source)
-    if zhopa.memory and zhopa.memory.validate_live_squad then
-        return zhopa.memory.validate_live_squad(se_squad, source)
-    end
-    local sid = tonumber(se_squad and se_squad.id)
-    if se_squad and sid then
-        return true, sid, nil, nil
-    end
-    return false, sid, "validate_unavailable", "soft"
 end
 
 local function resolve_entry_level(entry, se_squad)
@@ -20511,26 +19391,6 @@ function Mutants:_apply_task(se_squad, task, predator_phase)
     end
 end
 
-function Mutants:_is_target_sync_pending(task)
-    if type(task) ~= "table" then
-        return false
-    end
-    if type(task.target) ~= "string" or task.target == "" then
-        return false
-    end
-    local p = type(task.params) == "table" and task.params or {}
-    if p.target_sync_name ~= task.target then
-        return true
-    end
-    if tonumber(p.target_sync_started_tg) == nil then
-        return true
-    end
-    if p.target_sync_due == true then
-        return true
-    end
-    return tonumber(p.target_sync_next_tg) == 0
-end
-
 function Mutants:_refresh_presence_for_live_squad(se_squad, source, entry)
     local sid = tonumber(se_squad and se_squad.id) or nil
     if not sid then
@@ -20825,51 +19685,34 @@ if not inst.RUNTIME then
     Mutants.__init(inst)
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("actor_on_first_update", "zhopa_mutants", function()
-        inst:_reset_presence_runtime()
-        inst:_bootstrap_presence_from_board("actor_first_update")
-    end)
-    zhopa.bus.subscribe("load_state", "zhopa_mutants", function()
-        inst:_reset_presence_runtime()
-        inst:_bootstrap_presence_from_board("load_state")
-    end)
-    zhopa.bus.subscribe("server_entity_on_register", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local type_name = args[2]
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" then
-            inst:_refresh_presence_for_live_squad(se_obj, "server_register")
-        elseif type(type_name) == "string" and type_name == "se_smart_terrain" then
-            inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
-        end
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local type_name = args[2]
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" then
-            inst:_clear_hunt_presence_for_sid(se_obj and se_obj.id or nil)
-        elseif type(type_name) == "string" and type_name == "se_smart_terrain" then
-            inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
-        end
-    end)
-    zhopa.bus.subscribe("smart_terrain_on_update", "zhopa_mutants", function(payload)
-        local args = bus_args(payload)
-        inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(args[1]))
-    end)
-end
-
 inst.update_squad_tasks = function(se_squad, ctx) return inst:_update_squad_tasks(se_squad, ctx) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
+inst.on_actor_first_update = function()
+    inst:_reset_presence_runtime()
+    inst:_bootstrap_presence_from_board("actor_first_update")
+end
+inst.on_load_state = function()
+    inst:_reset_presence_runtime()
+    inst:_bootstrap_presence_from_board("load_state")
+end
+inst.on_server_entity_register = function(se_obj, type_name)
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" then
+        inst:_refresh_presence_for_live_squad(se_obj, "server_register")
+    elseif type(type_name) == "string" and type_name == "se_smart_terrain" then
+        inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
+    end
+end
+inst.on_server_entity_unregister = function(se_obj, type_name)
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" then
+        inst:_clear_hunt_presence_for_sid(se_obj and se_obj.id or nil)
+    elseif type(type_name) == "string" and type_name == "se_smart_terrain" then
+        inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(se_obj))
+    end
+end
+inst.on_smart_terrain_update = function(smart)
+    inst:_invalidate_hunt_level_smarts_cache(resolve_smart_level_from_obj(smart))
+end
 inst.on_squad_first_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "first_update", entry) end
 inst.on_squad_update = function(squad, entry) return inst:_refresh_presence_for_live_squad(squad, "update", entry) end
 inst.on_squad_npc_death = function(squad)
@@ -20887,7 +19730,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -20909,47 +19751,6 @@ local alife_create = _G.alife_create
 local ini_sys = _G.ini_sys
 local math_sqrt = _G.math and _G.math.sqrt or nil
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local BaseFiller = zhopa.class("BaseFiller")
 BaseFiller.__index = BaseFiller
@@ -21555,13 +20356,6 @@ function BaseFiller:_mark_level_fill_now(level_name)
     return stamp
 end
 
-function BaseFiller:_seed_default_fill_now()
-    local now_gt = game_time_now()
-    local stamp = now_gt and ctime_to_table(now_gt) or nil
-    self.STATE.default_last_fill_gt = stamp
-    return stamp
-end
-
 function BaseFiller:_is_spawn_blocked_near_actor(smart)
     local actor_pos = safe_actor_position()
     if not actor_pos then
@@ -22151,87 +20945,6 @@ function BaseFiller:_sync_memory_for_camper(se_squad, clear_once)
     end
 end
 
-function BaseFiller:_iter_camper_members(se_squad)
-    local out = {}
-    if not se_squad then
-        return out
-    end
-
-    local seen = {}
-    local function push(id)
-        id = tonumber(id)
-        if not id or id <= 0 or seen[id] then
-            return
-        end
-        seen[id] = true
-        out[#out + 1] = id
-    end
-
-    local ok_members, a, b, c = pcall(function() return se_squad:squad_members() end)
-    if ok_members and a ~= nil then
-        local ok_iter = pcall(function()
-            for member in a, b, c do
-                local mid = extract_member_candidate_id(nil, member)
-                push(mid)
-            end
-        end)
-        if (not ok_iter) and type(a) == "table" then
-            for k, v in pairs(a) do
-                push(extract_member_candidate_id(k, v))
-            end
-        end
-    end
-
-    if #out <= 0 then
-        local cid = nil
-        local ok_cid = pcall(function() cid = tonumber(se_squad:commander_id()) end)
-        if ok_cid and cid then
-            push(cid)
-        else
-            self:_warn_throttled(
-                "members_unreadable:" .. tostring(se_squad and se_squad.id or "-"),
-                30000,
-                "members_unreadable sid=%s",
-                tostring(se_squad and se_squad.id or "-")
-            )
-        end
-    end
-
-    return out
-end
-
-function BaseFiller:_resolve_smart_runtime(smart_name)
-    if type(smart_name) ~= "string" or smart_name == "" then
-        return nil, nil, nil
-    end
-    local board = get_board()
-    if not (board and board.smarts_by_names) then
-        return nil, nil, board
-    end
-    local smart = board.smarts_by_names[smart_name]
-    if not smart then
-        return nil, nil, board
-    end
-    local smart_id = tonumber(smart.id) or nil
-    local node = smart_id and board.smarts and board.smarts[smart_id] or nil
-    return smart, node, board
-end
-
-function BaseFiller:_is_smart_on_actor_level(smart)
-    if not smart then
-        return false
-    end
-    local ok_actor, actor_level = pcall(function() return smart.is_on_actor_level end)
-    if ok_actor and actor_level ~= nil then
-        return actor_level == true
-    end
-
-    local active_level = loaded_level_name()
-    local gvid = tonumber(smart.m_game_vertex_id) or nil
-    local smart_level = gvid and now_level_name_by_gvid(gvid) or nil
-    return smart_level ~= nil and smart_level == active_level
-end
-
 function BaseFiller:_get_npc_info(smart, npc_id)
     if not (smart and type(smart.npc_info) == "table") then
         return nil
@@ -22767,47 +21480,28 @@ if not inst.RUNTIME then
     BaseFiller.__init(inst)
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("load_state", "zhopa_base_filler", function()
-        inst:_reactivate_runtime("load_state")
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_base_filler", function()
-        inst:_reactivate_runtime("option_change")
-    end)
-    zhopa.bus.subscribe("smart_terrain_on_update", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_smart(args[1], false, "smart_update")
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_base_filler", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local smart_name = object_name(se_obj)
-        if inst:_is_target_smart(smart_name) then
-            inst:_drop_target(smart_name)
-            return
-        end
-        local sid = tonumber(se_obj and se_obj.id) or nil
-        smart_name = sid and inst.RUNTIME.sid_to_smart[sid] or nil
-        if sid then
-            inst.RUNTIME.sid_to_smart[sid] = nil
-        end
-        if type(smart_name) == "string" and smart_name ~= "" then
-            inst.RUNTIME.smart_to_sid[smart_name] = nil
-            inst:_mark_target_dirty(smart_name, false, "server_unregister")
-        end
-    end)
-end
-
 inst.on_first_update = function() return inst:_on_first_update() end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
+inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
+inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
+inst.on_smart_terrain_update = function(smart) return inst:_mark_dirty_from_smart(smart, false, "smart_update") end
+inst.on_server_entity_unregister = function(se_obj)
+    local smart_name = object_name(se_obj)
+    if inst:_is_target_smart(smart_name) then
+        inst:_drop_target(smart_name)
+        return
+    end
+    local sid = tonumber(se_obj and se_obj.id) or nil
+    smart_name = sid and inst.RUNTIME.sid_to_smart[sid] or nil
+    if sid then
+        inst.RUNTIME.sid_to_smart[sid] = nil
+    end
+    if type(smart_name) == "string" and smart_name ~= "" then
+        inst.RUNTIME.smart_to_sid[smart_name] = nil
+        inst:_mark_target_dirty(smart_name, false, "server_unregister")
+    end
+end
 inst.is_base_camper_section = function(section) return is_base_camper_section(section) end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.on_squad_enter_smart = function(squad) return inst:_mark_dirty_from_squad(squad, false, "enter_smart") end
@@ -22826,7 +21520,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -22841,47 +21534,6 @@ local alife = _G.alife
 local game_graph = _G.game_graph
 local game_relations = _G.game_relations
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local DynamicBases = zhopa.class("DynamicBases")
 DynamicBases.__index = DynamicBases
@@ -23132,22 +21784,6 @@ end
 
 local function is_supported_alias(alias)
     return alias ~= nil and ENGINE_BY_ALIAS[alias] ~= nil
-end
-
-local function has_stalker_presence(smart)
-    if not (smart and type(smart.npc_info) == "table") then
-        return false
-    end
-    for _, info in pairs(smart.npc_info) do
-        local se_obj = type(info) == "table" and info.se_obj or nil
-        if se_obj and IsStalker then
-            local ok, clsid = pcall(function() return se_obj:clsid() end)
-            if ok and IsStalker(nil, clsid) then
-                return true
-            end
-        end
-    end
-    return false
 end
 
 local function community_alias_from_obj(se_obj)
@@ -23859,43 +22495,6 @@ if not inst.RUNTIME then
     DynamicBases.__init(inst)
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("load_state", "zhopa_dynamic_bases", function()
-        inst:_reactivate_runtime("load_state")
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_dynamic_bases", function()
-        inst:_reactivate_runtime("option_change")
-    end)
-    zhopa.bus.subscribe("smart_terrain_on_update", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local smart = args[1]
-        local smart_name, keep = inst:_upsert_target_from_smart(smart, "smart_update")
-        if keep and smart_name then
-            inst:_mark_target_dirty(smart_name, "smart_update")
-        end
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_dynamic_bases", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local smart_name = object_name(se_obj)
-        if inst:_is_target_smart(smart_name) then
-            inst:_forget_target(smart_name, false)
-            return
-        end
-        smart_name = inst:_resolve_target_smart_name_from_squad(se_obj)
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "server_unregister")
-        end
-    end)
-end
-
 local function mark_dynamic_base_from_squad(squad, reason)
     local smart_name = inst:_resolve_target_smart_name_from_squad(squad)
     if smart_name then
@@ -23908,6 +22507,27 @@ inst.on_first_update = function() return inst:_on_first_update() end
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
+inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
+inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
+inst.on_smart_terrain_update = function(smart)
+    local smart_name, keep = inst:_upsert_target_from_smart(smart, "smart_update")
+    if keep and smart_name then
+        return inst:_mark_target_dirty(smart_name, "smart_update")
+    end
+    return false
+end
+inst.on_server_entity_unregister = function(se_obj)
+    local smart_name = object_name(se_obj)
+    if inst:_is_target_smart(smart_name) then
+        inst:_forget_target(smart_name, false)
+        return
+    end
+    smart_name = inst:_resolve_target_smart_name_from_squad(se_obj)
+    if smart_name then
+        return inst:_mark_target_dirty(smart_name, "server_unregister")
+    end
+    return false
+end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.get_effective_owner = function(smart) return inst:_resolve_effective_owner_alias(smart) end
 inst.on_squad_enter_smart = function(squad) return mark_dynamic_base_from_squad(squad, "enter_smart") end
@@ -23926,7 +22546,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -23947,47 +22566,6 @@ local game_graph = _G.game_graph
 local alife = _G.alife
 local ini_sys = _G.ini_sys
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local ServiceFiller = zhopa.class("ServiceFiller")
 ServiceFiller.__index = ServiceFiller
@@ -24468,26 +23046,6 @@ local function classify_job_role(job_or_section, smart)
     return classify_provider_job_role(job_or_section, smart)
 end
 
-local function role_profile(alias, role)
-    if DISABLED_SERVICE_ROLES[role] == true then
-        return nil
-    end
-    if role == "guide" then
-        return GUIDE_PROFILE_BY_FACTION[alias]
-    end
-    if role == "leader" then
-        return LEADER_PROFILE_BY_FACTION[alias]
-    end
-    local engine = alias_to_engine(alias)
-    if not engine then
-        return nil
-    end
-    if role == "tech" then
-        role = "mechanic"
-    end
-    return "sim_default_" .. engine .. "_" .. role
-end
-
 local function safe_community_alias(se_obj)
     if not se_obj then
         return nil
@@ -24694,46 +23252,6 @@ function ServiceFiller:_service_section(alias, role)
         return section
     end
     return nil
-end
-
-function ServiceFiller:_iter_squad_members(se_squad)
-    local out = {}
-    if not se_squad then
-        return out
-    end
-
-    local seen = {}
-    local function push(id)
-        id = tonumber(id)
-        if not id or id <= 0 or seen[id] then
-            return
-        end
-        seen[id] = true
-        out[#out + 1] = id
-    end
-
-    local ok_members, a, b, c = pcall(function() return se_squad:squad_members() end)
-    if ok_members and a ~= nil then
-        local ok_iter = pcall(function()
-            for member in a, b, c do
-                push(extract_member_candidate_id(nil, member))
-            end
-        end)
-        if (not ok_iter) and type(a) == "table" then
-            for k, v in pairs(a) do
-                push(extract_member_candidate_id(k, v))
-            end
-        end
-    end
-
-    if #out <= 0 then
-        local ok_cid, cid = pcall(function() return tonumber(se_squad:commander_id()) end)
-        if ok_cid and cid then
-            push(cid)
-        end
-    end
-
-    return out
 end
 
 function ServiceFiller:_get_npc_info(smart, npc_id)
@@ -25831,49 +24349,29 @@ if not inst.RUNTIME then
     ServiceFiller.__init(inst)
 end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("load_state", "zhopa_service_filler", function()
-        inst:_reactivate_runtime("load_state")
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_service_filler", function()
-        inst:_reactivate_runtime("option_change")
-    end)
-    zhopa.bus.subscribe("smart_terrain_on_update", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        inst:_mark_dirty_from_smart(args[1], "smart_update")
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_service_filler", function(payload)
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        local type_name = args[2]
-        local smart_name = object_name(se_obj)
-        if inst:_is_target_smart(smart_name) then
-            inst:_remove_target(smart_name)
-            return
-        end
-        if type(type_name) == "string" and type_name == "sim_squad_scripted" then
-            inst:_mark_dirty_from_squad(se_obj, "server_unregister")
-            return
-        end
-        local smart_id = tonumber(se_obj and se_obj.smart_id) or nil
-        smart_name = smart_id and zhopa.board_index and zhopa.board_index.get_smart_name_by_id and zhopa.board_index.get_smart_name_by_id(smart_id) or nil
-        if smart_name then
-            inst:_mark_target_dirty(smart_name, "server_unregister")
-        end
-    end)
-end
-
 inst.on_first_update = function() return inst:_on_first_update() end
 inst.reset_runtime = function(reason) return inst:_reset_runtime(reason) end
 inst.save_state = function(m_data) return inst:_save_state(m_data) end
 inst.load_state = function(m_data) return inst:_load_state(m_data) end
+inst.on_load_state = function() return inst:_reactivate_runtime("load_state") end
+inst.on_option_change = function() return inst:_reactivate_runtime("option_change") end
+inst.on_smart_terrain_update = function(smart) return inst:_mark_dirty_from_smart(smart, "smart_update") end
+inst.on_server_entity_unregister = function(se_obj, type_name)
+    local smart_name = object_name(se_obj)
+    if inst:_is_target_smart(smart_name) then
+        inst:_remove_target(smart_name)
+        return
+    end
+    if type(type_name) == "string" and type_name == "sim_squad_scripted" then
+        inst:_mark_dirty_from_squad(se_obj, "server_unregister")
+        return
+    end
+    local smart_id = tonumber(se_obj and se_obj.smart_id) or nil
+    smart_name = smart_id and zhopa.board_index and zhopa.board_index.get_smart_name_by_id and zhopa.board_index.get_smart_name_by_id(smart_id) or nil
+    if smart_name then
+        inst:_mark_target_dirty(smart_name, "server_unregister")
+    end
+end
 inst.get_runtime_stats = function() return inst:_get_runtime_stats() end
 inst.is_service_section = function(section) return is_service_section(section) end
 inst.get_task_proxy_seed = function(npc) return inst:_get_task_proxy_seed(npc) end
@@ -26074,12 +24572,6 @@ local function cfg_bool(key, default)
     return default == true
 end
 
-local function payload_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
 
 local LOOT_CFG_SNAPSHOT_TTL_MS = 1000
 local LOOT_OVERRIDE_THROTTLE_MS = 1500
@@ -26696,71 +25188,6 @@ sync_protected_corpse_lootability = function(id)
     return changed
 end
 
-local function can_mark_quest_corpse(corpse)
-    if not quest_corpse_protection_enabled() then
-        return false
-    end
-    if not corpse then
-        return false
-    end
-
-    local id = object_id(corpse)
-    if not id or id <= 0 or id == 65535 then
-        return false
-    end
-
-    local name = object_name(corpse)
-    local save_flagged = corpse_save_flagged(id)
-    local loaded_flagged = name and se_load_var(id, name, QUEST_CORPSE_FLAG) == true
-    local death_dropped = corpse_has_death_dropped_flag(id, name)
-    local live_quest_item = corpse_has_quest_item(corpse)
-
-    if save_flagged or loaded_flagged then
-        apply_corpse_valuable_loot(id, false)
-        return true
-    end
-
-    if death_dropped then
-        return mark_protected_corpse(corpse, "death_dropped")
-    end
-
-    if live_quest_item then
-        return mark_protected_corpse(corpse, "quest_item")
-    end
-
-    return false
-end
-
-local function mark_quest_item_parent(item)
-    if not quest_corpse_protection_enabled() then
-        return false
-    end
-    if not item then
-        return false
-    end
-
-    if not is_quest_item_object(item) then
-        return false
-    end
-
-    local item_id = object_id(item)
-    local item_name = object_name(item)
-    local item_section = object_section(item)
-    local parent_id = tonumber(item.parent_id) or 65535
-    if parent_id <= 0 or parent_id == 65535 then
-        return false
-    end
-
-    local corpse = get_server_object(parent_id)
-    if corpse then
-        if is_dead_object(corpse) or corpse_has_quest_item(corpse) or corpse_has_death_dropped_flag(parent_id, object_name(corpse)) then
-            return mark_protected_corpse(corpse, "quest_item_parent")
-        end
-    end
-
-    return sync_protected_corpse_lootability(parent_id)
-end
-
 local function patch_recover_item_on_corpse()
     if inst.RUNTIME.rioc_patch_applied == true then
         return true
@@ -27270,42 +25697,27 @@ function inst.on_actor_item_drop(item)
 end
 
 function inst.on_game_start()
-    if zhopa.bus and zhopa.bus.subscribe then
-        zhopa.bus.subscribe("npc_on_death_callback", "zhopa_loot", function(payload)
-            local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-            inst.on_npc_death(args[1], args[2])
-        end)
-        zhopa.bus.subscribe("server_entity_on_register", "zhopa_loot", function(payload)
-            local args = payload_args(payload)
-            inst.on_server_entity_register(args[1], args[2])
-        end)
-        zhopa.bus.subscribe("npc_on_item_drop", "zhopa_loot", function(payload)
-            local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-            inst.on_npc_item_drop(args[1], args[2])
-        end)
-        zhopa.bus.subscribe("actor_on_item_drop", "zhopa_loot", function(payload)
-            local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-            inst.on_actor_item_drop(args[1])
-        end)
-        zhopa.bus.subscribe("load_state", "zhopa_loot", function()
-            patch_recover_item_on_corpse()
-            inst.RUNTIME.quest_corpse_full_sync = true
-        end)
-        zhopa.bus.subscribe("npc_on_update", "zhopa_loot", function()
-            if inst.RUNTIME.rioc_patch_applied ~= true then
-                patch_recover_item_on_corpse()
-            end
-            service_quest_corpse_candidates(tg())
-            if has_pending_events() then
-                maybe_cleanup_runtime(tg(), false)
-            end
-        end)
-        zhopa.bus.subscribe("on_option_change", "zhopa_loot", function()
-            maybe_cleanup_runtime(tg(), true)
-            inst.RUNTIME.quest_corpse_full_sync = true
-        end)
-    end
     patch_recover_item_on_corpse()
+    maybe_cleanup_runtime(tg(), true)
+    inst.RUNTIME.quest_corpse_full_sync = true
+end
+
+function inst.on_load_state()
+    patch_recover_item_on_corpse()
+    inst.RUNTIME.quest_corpse_full_sync = true
+end
+
+function inst.on_npc_update()
+    if inst.RUNTIME.rioc_patch_applied ~= true then
+        patch_recover_item_on_corpse()
+    end
+    service_quest_corpse_candidates(tg())
+    if has_pending_events() then
+        maybe_cleanup_runtime(tg(), false)
+    end
+end
+
+function inst.on_option_change()
     maybe_cleanup_runtime(tg(), true)
     inst.RUNTIME.quest_corpse_full_sync = true
 end
@@ -27318,37 +25730,12 @@ function inst.has_corpse_event_id(id)
     return inst.RUNTIME.corpse_events[id] ~= nil
 end
 
-function inst.has_item_event_id(id)
-    return inst.RUNTIME.item_events[id] ~= nil
-end
-
-function inst.iter_corpse_event_ids()
-    return pairs(inst.RUNTIME.corpse_events)
-end
-
-function inst.iter_item_event_ids()
-    return pairs(inst.RUNTIME.item_events)
-end
-
 function inst.get_corpse_event_ids()
     return inst.RUNTIME.corpse_ids
 end
 
 function inst.get_item_event_ids()
     return inst.RUNTIME.item_ids
-end
-
-function inst.get_event_stats()
-    local cap_total, cap_corpses, cap_items = event_caps()
-    local corpses, items, total = event_counts()
-    return {
-        corpses = corpses,
-        items = items,
-        total = total,
-        cap_total = cap_total,
-        cap_corpses = cap_corpses,
-        cap_items = cap_items,
-    }
 end
 
 function inst.is_protected_corpse(corpse)
@@ -27418,12 +25805,6 @@ local function log_debug(fmt, ...)
     end
 end
 
-local function payload_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
 
 local function should_skip_event_scan(loot)
     if not loot then return true end
@@ -27886,25 +26267,25 @@ local function maybe_retry_apply()
 end
 
 function LootPatch.on_game_start()
-    if not (zhopa.bus and zhopa.bus.subscribe) then
-        return
-    end
+    return true
+end
 
-    zhopa.bus.subscribe("actor_on_first_update", "zhopa_loot_patch", function()
+function LootPatch.on_actor_first_update()
+    return maybe_retry_apply()
+end
+
+function LootPatch.on_load_state()
+    return maybe_retry_apply()
+end
+
+function LootPatch.on_server_entity_register(se_obj)
+    if se_obj ~= nil then
         maybe_retry_apply()
-    end)
-    zhopa.bus.subscribe("load_state", "zhopa_loot_patch", function()
-        maybe_retry_apply()
-    end)
-    zhopa.bus.subscribe("server_entity_on_register", "zhopa_loot_patch", function(payload)
-        local args = payload_args(payload)
-        if args[1] ~= nil then
-            maybe_retry_apply()
-        end
-    end)
-    zhopa.bus.subscribe("npc_on_update", "zhopa_loot_patch", function()
-        maybe_retry_apply()
-    end)
+    end
+end
+
+function LootPatch.on_npc_update()
+    return maybe_retry_apply()
 end
 
 zhopa.loot_patch = LootPatch
@@ -28413,18 +26794,15 @@ function fast_trading.consume_pending_trigger(squad_id)
 end
 
 function fast_trading.on_game_start()
-    if zhopa and zhopa.bus and zhopa.bus.subscribe then
-        zhopa.bus.subscribe("npc_on_item_take", "zhopa_fast_trading", function(payload)
-            local args = type(payload) == "table" and type(payload.args) == "table" and payload.args or {}
-            fast_trading.on_npc_item_take(args[1], args[2], args[3])
-        end)
-        zhopa.bus.subscribe("load_state", "zhopa_fast_trading", function()
-            fast_trading.reset_cache()
-        end)
-        zhopa.bus.subscribe("on_option_change", "zhopa_fast_trading", function()
-            fast_trading.reset_cache()
-        end)
-    end
+    return true
+end
+
+function fast_trading.on_load_state()
+    fast_trading.reset_cache()
+end
+
+function fast_trading.on_option_change()
+    fast_trading.reset_cache()
 end
 
 function fast_trading.get_runtime_stats()
@@ -28473,7 +26851,6 @@ zhopa = zhopa or {}
 
 local type = _G.type
 local pcall = _G.pcall
-local require = _G.require
 local setmetatable = _G.setmetatable
 local tonumber = _G.tonumber
 local tostring = _G.tostring
@@ -28482,47 +26859,6 @@ local pairs = _G.pairs
 local next = _G.next
 local alife = _G.alife
 
-local function ensure_class()
-    local type = type
-    if type(zhopa.class) == "function" then
-        local ok, probe = pcall(zhopa.class, "_probe")
-        if ok and type(probe) == "table" then
-            return
-        end
-    end
-
-    if require then
-        -- monolith: zhopa_oop is loaded earlier
-    end
-
-    local function define()
-        function zhopa.class(name)
-            local cls = {}
-            cls.__index = cls
-            cls.__name = name or "class"
-            function cls.new(...)
-                local self = setmetatable({}, cls)
-                if self.__init then
-                    self:__init(...)
-                end
-                return self
-            end
-            return cls
-        end
-    end
-
-    if type(zhopa.class) ~= "function" then
-        define()
-        return
-    end
-
-    local ok2, probe2 = pcall(zhopa.class, "_probe")
-    if not (ok2 and type(probe2) == "table") then
-        define()
-    end
-end
-
-ensure_class()
 
 local DebugHud = zhopa.class("DebugHud")
 DebugHud.__index = DebugHud
@@ -28944,44 +27280,8 @@ end
 inst.on_load_state = function() return inst:_on_load_state() end
 inst.on_save_state = function() return inst:_on_save_state() end
 
-local function bus_args(payload)
-    if type(payload) ~= "table" then
-        return {}
-    end
-    return type(payload.args) == "table" and payload.args or {}
-end
-
 local function hud_hot_enabled()
     return inst.RUNTIME and inst.RUNTIME.enabled_cached == true
-end
-
-if zhopa and zhopa.bus and zhopa.bus.subscribe then
-    zhopa.bus.subscribe("actor_on_first_update", "zhopa_debug_hud", function()
-        inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
-        inst:_refresh_all_from_memory("first_update")
-    end)
-    zhopa.bus.subscribe("load_state", "zhopa_debug_hud", function()
-        inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
-        inst:_refresh_all_from_memory("load_state")
-    end)
-    zhopa.bus.subscribe("on_option_change", "zhopa_debug_hud", function()
-        inst:_on_option_change()
-    end)
-    zhopa.bus.subscribe("memory_task_changed", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local squad_id = payload and payload.squad_id or nil
-        inst:_refresh_spot_for_id(squad_id, nil)
-    end)
-    zhopa.bus.subscribe("server_entity_on_unregister", "zhopa_debug_hud", function(payload)
-        if not hud_hot_enabled() then
-            return
-        end
-        local args = bus_args(payload)
-        local se_obj = args[1]
-        inst:_remove_spot(se_obj and se_obj.id or nil)
-    end)
 end
 
 local function refresh_squad_spot_if_hot(squad)
@@ -28991,6 +27291,28 @@ local function refresh_squad_spot_if_hot(squad)
     inst:_refresh_spot_for_id(squad and squad.id or nil, nil)
 end
 
+inst.on_actor_first_update = function()
+    inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
+    inst:_refresh_all_from_memory("first_update")
+end
+inst.on_load_state = function()
+    inst.RUNTIME.enabled_prev = inst:_refresh_enabled_cache() == true
+    inst:_refresh_all_from_memory("load_state")
+end
+inst.on_option_change = function() return inst:_on_option_change() end
+inst.on_task_current_changed = function(payload)
+    if not hud_hot_enabled() then
+        return
+    end
+    local squad_id = payload and payload.squad_id or nil
+    inst:_refresh_spot_for_id(squad_id, nil)
+end
+inst.on_server_entity_unregister = function(se_obj)
+    if not hud_hot_enabled() then
+        return
+    end
+    inst:_remove_spot(se_obj and se_obj.id or nil)
+end
 inst.on_squad_first_update = function(squad) return refresh_squad_spot_if_hot(squad) end
 inst.on_squad_update = function(squad) return refresh_squad_spot_if_hot(squad) end
 inst.on_squad_after_level_change = function(squad) return refresh_squad_spot_if_hot(squad) end
@@ -29014,7 +27336,6 @@ local time_global = _G.time_global
 local io = _G.io
 local math_floor = math.floor
 local table_sort = table.sort
-local RegisterScriptCallback = _G.RegisterScriptCallback
 local db = _G.db
 local level = _G.level
 local alife = _G.alife
@@ -29101,7 +27422,6 @@ local resolve_issue_with_flush
 local arm_post_tech_watch
 
 local RUNTIME = {
-    callbacks_registered = false,
     ready = false,
     smart_next_scan_tg = {},
     smart_diag_next_tg = {},
@@ -29521,17 +27841,6 @@ local function build_smart_snapshot(smart)
     end
 
     return snapshot
-end
-
-local function count_table_entries(t)
-    if type(t) ~= "table" then
-        return 0
-    end
-    local n = 0
-    for _ in pairs(t) do
-        n = n + 1
-    end
-    return n
 end
 
 local function get_service_rule_by_active_section(active_section)
@@ -30621,28 +28930,17 @@ local function on_npc_update(npc)
     clear_post_tech_watch(npc_id)
 end
 
-local function register_callbacks_once()
-    if RUNTIME.callbacks_registered == true then
-        return
-    end
-    RUNTIME.callbacks_registered = true
-    RegisterScriptCallback("actor_on_first_update", on_actor_first_update)
-    RegisterScriptCallback("load_state", on_load_state)
-    RegisterScriptCallback("server_entity_on_unregister", on_server_entity_unregister)
-    RegisterScriptCallback("smart_terrain_on_update", on_smart_terrain_update)
-    RegisterScriptCallback("npc_on_update", on_npc_update)
-end
-
-local function smart_service_slot_doctor_on_game_start()
-    register_callbacks_once()
-end
-
 function inst.on_axr_service_result(npc, smart, kind, status, reason)
     arm_completed_watch(npc, smart, kind, status, reason)
     arm_post_tech_unknown_watch(npc, smart, kind, status, reason)
 end
 
-inst.on_game_start = smart_service_slot_doctor_on_game_start
+inst.on_actor_first_update = on_actor_first_update
+inst.on_load_state = on_load_state
+inst.on_server_entity_unregister = on_server_entity_unregister
+inst.on_smart_terrain_update = on_smart_terrain_update
+inst.on_npc_update = on_npc_update
+zhopa.smart_service_slot_doctor = inst
 end; zhopa_bundle_module(); zhopa_bundle_module = nil
 -- END module smart_service_slot_doctor
 
@@ -30671,10 +28969,6 @@ function zhopa.on_game_start()
 
     if zhopa.board_index and zhopa.board_index.on_game_start then
         zhopa.board_index.on_game_start()
-    end
-
-    if smart_service_slot_doctor and smart_service_slot_doctor.on_game_start then
-        smart_service_slot_doctor.on_game_start()
     end
 
     if axr_trade_manager and axr_trade_manager.on_game_start then
