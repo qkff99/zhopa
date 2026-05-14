@@ -2645,6 +2645,11 @@ local DEFAULTS = {
     surge_check_cache_ms = 250,
     smart_enemy_cache_ttl_ms = 1000,
 
+    story_events_enabled = true,
+    story_events_north_migration_enabled = true,
+    story_events_north_migration_percent = 33,
+    story_psy_watchdog_enabled = true,
+
     explore_enabled = true,
     artefact_enabled = true,
     populate_enabled = true,
@@ -2666,6 +2671,14 @@ local DEFAULTS = {
     mutant_rest_duration_game_hours = 0.25,
     mutant_patrol_duration_game_hours = 1.0,
 
+    base_filler_enabled = false,
+    base_filler_npc_min = 5,
+    base_filler_npc_max = 8,
+    base_filler_daily_respawn_game_hours = 24,
+    dynamic_bases_enabled = true,
+    service_filler_enabled = true,
+    service_filler_respawn_game_hours = 6,
+
     rest_duration_game_hours = 0.25,
     rest_fallback_stay_min_sec = 900,
     rest_fallback_stay_max_sec = 1800,
@@ -2674,6 +2687,11 @@ local DEFAULTS = {
     target_sync_enabled = true,
     online_intent_enforce_enabled = true,
 
+    fast_trading_enabled = true,
+    fast_trading_delay_ms = 500,
+    fast_trading_cooldown_ms = 60000,
+
+    loot_enabled = true,
     loot_items_enabled = true,
     loot_items_detect_dist_m = 35,
     loot_scan_radius_m = 35,
@@ -6479,7 +6497,9 @@ function Memory:_should_manage_squad(se_squad)
 
     local is_mutant = is_monster_squad_live(se_squad)
     local mutant_sim_enabled = true
-    if zhopa.config and zhopa.config.get then
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        mutant_sim_enabled = zhopa.runtime_cfg.get("mutant_sim_enabled", true) ~= false
+    elseif zhopa.config and zhopa.config.get then
         mutant_sim_enabled = zhopa.config.get("mutant_sim_enabled", true) ~= false
     end
     local section = nil
@@ -6889,7 +6909,9 @@ local function invalidate_runtime_caches()
 end
 
 local function get_cfg_value(key, fallback)
-    if zhopa.config and zhopa.config.get then
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get(key, fallback)
+    elseif zhopa.config and zhopa.config.get then
         local value = zhopa.config.get(key, fallback)
         if value ~= nil then
             return value
@@ -7895,7 +7917,9 @@ local function is_story_mode_active()
 end
 
 local function get_cfg_bool(key, fallback)
-    if zhopa.config and zhopa.config.get then
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.bool then
+        return zhopa.runtime_cfg.bool(key, fallback)
+    elseif zhopa.config and zhopa.config.get then
         local value = zhopa.config.get(key, fallback)
         if value ~= nil then
             return value == true
@@ -8343,7 +8367,12 @@ local function sync_story_task_live_state(se_squad, task)
 end
 
 local function get_arrive_dist_cap_m()
-    local value = tonumber(zhopa.config and zhopa.config.get and zhopa.config.get("task_arrive_dist_cap_m", 5) or 5) or 5
+    local value = 5
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        value = zhopa.runtime_cfg.num("task_arrive_dist_cap_m", value, 0)
+    else
+        value = tonumber(zhopa.config and zhopa.config.get and zhopa.config.get("task_arrive_dist_cap_m", value) or value) or value
+    end
     if value < 0 then
         value = 0
     end
@@ -8592,9 +8621,14 @@ local function is_surge_active_now()
         return RUNTIME.surge_cache_active == true
     end
     local active = surge_active_uncached() == true
-    local cache_ms = tonumber(zhopa.config and zhopa.config.get and zhopa.config.get("surge_check_cache_ms", 250) or 250) or 250
-    if cache_ms < 0 then
-        cache_ms = 0
+    local cache_ms = 250
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        cache_ms = zhopa.runtime_cfg.num("surge_check_cache_ms", cache_ms, 0)
+    else
+        cache_ms = tonumber(zhopa.config and zhopa.config.get and zhopa.config.get("surge_check_cache_ms", cache_ms) or cache_ms) or cache_ms
+        if cache_ms < 0 then
+            cache_ms = 0
+        end
     end
     RUNTIME.surge_cache_active = active
     RUNTIME.surge_cache_next_tg = now + cache_ms
@@ -9461,6 +9495,30 @@ local function tg()
     return (time_global and time_global()) or 0
 end
 
+local function cfg_bool(key, default)
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.bool then
+        return zhopa.runtime_cfg.bool(key, default)
+    end
+    if zhopa.config and zhopa.config.get then
+        return zhopa.config.get(key, default) ~= false
+    end
+    return default ~= false
+end
+
+local function cfg_num(key, default, min_v)
+    local value = tonumber(default) or 0
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, value, min_v)
+    end
+    if zhopa.config and zhopa.config.get then
+        value = tonumber(zhopa.config.get(key, value)) or value
+    end
+    if min_v ~= nil and value < min_v then
+        value = min_v
+    end
+    return value
+end
+
 local function trim(value)
     if type(value) ~= "string" then
         return nil
@@ -9708,17 +9766,11 @@ local function normalize_section_key(name)
 end
 
 local function is_target_sync_enabled()
-    if not (zhopa.config and zhopa.config.get) then
-        return true
-    end
-    return zhopa.config.get("target_sync_enabled", true) ~= false
+    return cfg_bool("target_sync_enabled", true)
 end
 
 local function get_online_intent_enforce_enabled()
-    if not (zhopa.config and zhopa.config.get) then
-        return true
-    end
-    return zhopa.config.get("online_intent_enforce_enabled", true) ~= false
+    return cfg_bool("online_intent_enforce_enabled", true)
 end
 
 local function set_squad_always_arrived(se_squad, should_hold)
@@ -9909,10 +9961,7 @@ local function clear_live_task_state(se_squad)
 end
 
 local function get_arrive_dist_cap_m()
-    if not (zhopa.config and zhopa.config.get) then return 5 end
-    local value = tonumber(zhopa.config.get("task_arrive_dist_cap_m", 5)) or 5
-    if value < 0 then value = 0 end
-    return value
+    return cfg_num("task_arrive_dist_cap_m", 5, 0)
 end
 
 local function vanilla_am_i_reached(se_squad, smart)
@@ -10057,13 +10106,7 @@ local function is_surge_active()
     end
 
     local active, fallback_used = is_surge_active_now()
-    local cache_ms = 250
-    if zhopa.config and zhopa.config.get then
-        cache_ms = tonumber(zhopa.config.get("surge_check_cache_ms", 250)) or 250
-        if cache_ms < 0 then
-            cache_ms = 0
-        end
-    end
+    local cache_ms = cfg_num("surge_check_cache_ms", 250, 0)
     RUNTIME.surge_cache_active = active == true
     RUNTIME.surge_cache_next_tg = now + cache_ms
 
@@ -10079,13 +10122,10 @@ local function smart_tasks_enabled_now()
     if not switches or switches.core ~= true or switches.smart_tasks ~= true then
         return false
     end
-    if not (zhopa.config and zhopa.config.get) then
-        return true
-    end
-    if zhopa.config.get("enabled", true) == false then
+    if cfg_bool("enabled", true) == false then
         return false
     end
-    return zhopa.config.get("smart_tasks_enabled", true) ~= false
+    return cfg_bool("smart_tasks_enabled", true)
 end
 
 local function is_tasktype_enabled(tasktype)
@@ -10095,21 +10135,11 @@ local function is_tasktype_enabled(tasktype)
     if not smart_tasks_enabled_now() then
         return false
     end
-    if not (zhopa.config and zhopa.config.get) then
-        return true
-    end
-    return zhopa.config.get("smart_tasks_control_enabled", true) ~= false
+    return cfg_bool("smart_tasks_control_enabled", true)
 end
 
 local function get_control_cap()
-    if not (zhopa.config and zhopa.config.get) then
-        return 1
-    end
-    local value = tonumber(zhopa.config.get("smart_tasks_control_max_squads_per_faction", 1)) or 1
-    if value < 1 then
-        value = 1
-    end
-    return value
+    return cfg_num("smart_tasks_control_max_squads_per_faction", 1, 1)
 end
 
 local function is_level_globally_blacklisted(level_name)
@@ -11612,6 +11642,9 @@ end
 
 local function cfg_num(key, default, min_v)
     local v = tonumber(default) or 0
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, v, min_v)
+    end
     if zhopa.config and zhopa.config.get then
         local x = zhopa.config.get(key, default)
         if tonumber(x) then
@@ -12470,6 +12503,9 @@ end
 
 local function cfg_num(key, default, min_v)
     local v = tonumber(default) or 0
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, v, min_v)
+    end
     if zhopa.config and zhopa.config.get then
         local x = zhopa.config.get(key, default)
         if tonumber(x) then
@@ -12480,6 +12516,16 @@ local function cfg_num(key, default, min_v)
         v = min_v
     end
     return v
+end
+
+local function cfg_bool(key, default)
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.bool then
+        return zhopa.runtime_cfg.bool(key, default)
+    end
+    if zhopa.config and zhopa.config.get then
+        return zhopa.config.get(key, default) ~= false
+    end
+    return default ~= false
 end
 
 function tasks._should_enforce_online_intent(task, now, entry)
@@ -12762,16 +12808,13 @@ local function smart_task_control_populate_enabled()
     if switches and (switches.core ~= true or switches.smart_tasks ~= true) then
         return false
     end
-    if not (zhopa.config and zhopa.config.get) then
+    if cfg_bool("enabled", true) == false then
         return false
     end
-    if zhopa.config.get("enabled", true) == false then
+    if cfg_bool("smart_tasks_enabled", true) == false then
         return false
     end
-    if zhopa.config.get("smart_tasks_enabled", true) == false then
-        return false
-    end
-    return zhopa.config.get("smart_tasks_control_enabled", true) ~= false
+    return cfg_bool("smart_tasks_control_enabled", true)
 end
 
 local function faction_level_blacklists_rule(community)
@@ -13318,14 +13361,7 @@ local function task_state_delay_ms(entry, task, now, se_squad)
             return due_delay_ms(arrived_at_tg + arrived_timeout_ms, now), "trade_arrived_timeout"
         end
 
-        local travel_ms = 600000
-        if zhopa.config and zhopa.config.get then
-            local v = zhopa.config.get("trade_travel_timeout_ms", travel_ms)
-            if tonumber(v) then
-                travel_ms = tonumber(v)
-            end
-        end
-        if travel_ms < 30000 then travel_ms = 30000 end
+        local travel_ms = cfg_num("trade_travel_timeout_ms", 600000, 30000)
         local started_tg = tonumber(p.started_at_tg) or now
         if started_tg > now then
             started_tg = now
@@ -14984,12 +15020,7 @@ local function pick_next_patrol_target(task, level_name, community, section_name
 end
 
 local function get_arrive_dist_cap_m()
-    if not (zhopa.config and zhopa.config.get) then return 5 end
-    local v = zhopa.config.get("task_arrive_dist_cap_m", 5)
-    v = tonumber(v)
-    if not v then return 5 end
-    if v < 0 then v = 0 end
-    return v
+    return cfg_num("task_arrive_dist_cap_m", 5, 0)
 end
 
 local function vanilla_am_i_reached(se_squad, sm)
@@ -15123,13 +15154,11 @@ local function is_target_task(task)
 end
 
 local function get_target_sync_enabled()
-    if not (zhopa.config and zhopa.config.get) then return true end
-    return zhopa.config.get("target_sync_enabled", true) ~= false
+    return cfg_bool("target_sync_enabled", true)
 end
 
 local function get_online_intent_enforce_enabled()
-    if not (zhopa.config and zhopa.config.get) then return true end
-    return zhopa.config.get("online_intent_enforce_enabled", true) ~= false
+    return cfg_bool("online_intent_enforce_enabled", true)
 end
 
 local function resolve_target_smart_id(smart_name)
@@ -15325,23 +15354,13 @@ end
 
 local function build_rest_task(se_squad)
     local tonumber = tonumber
-    local rest_hours = 1
-    if zhopa.config and zhopa.config.get then
-        local v = zhopa.config.get("rest_duration_game_hours", rest_hours)
-        if tonumber(v) then rest_hours = tonumber(v) end
-    end
+    local rest_hours = cfg_num("rest_duration_game_hours", 1, nil)
     if rest_hours <= 0 then rest_hours = 1 end
     local duration_game_sec = math.floor(rest_hours * 3600)
     if duration_game_sec < 1 then duration_game_sec = 1 end
     do
-        local min_s = 0
-        local max_s = 0
-        if zhopa.config and zhopa.config.get then
-            local vmin = zhopa.config.get("rest_fallback_stay_min_sec", 900)
-            local vmax = zhopa.config.get("rest_fallback_stay_max_sec", 1800)
-            min_s = tonumber(vmin) or 0
-            max_s = tonumber(vmax) or 0
-        end
+        local min_s = cfg_num("rest_fallback_stay_min_sec", 900, 0)
+        local max_s = cfg_num("rest_fallback_stay_max_sec", 1800, 0)
         if min_s < 0 then min_s = 0 end
         if max_s < 0 then max_s = 0 end
         if max_s > 0 and min_s > 0 and max_s < min_s then
@@ -16302,11 +16321,7 @@ build_base_camping_task = function(se_squad, entry, cur_level, community, sectio
     local smart_name = pick_base_camping_target_smart(cur_level, community, section_name, ctx)
     if not smart_name then return nil end
 
-    local camp_hours = 2
-    if zhopa.config and zhopa.config.get then
-        local v = zhopa.config.get("base_camping_duration_game_hours", camp_hours)
-        if tonumber(v) then camp_hours = tonumber(v) end
-    end
+    local camp_hours = cfg_num("base_camping_duration_game_hours", 2, nil)
     if camp_hours <= 0 then camp_hours = 1 end
 
     local duration_game_sec = math.floor(camp_hours * 3600)
@@ -16516,12 +16531,7 @@ RUNTIME.pick_trade_target_on_level = function(se_squad, level_name, community, s
     local ok_sid, sid = pcall(function() return se_squad.id end)
     sid = ok_sid and tonumber(sid) or nil
 
-    local max_per_smart = 1
-    if zhopa.config and zhopa.config.get then
-        local v = zhopa.config.get("trade_max_squads_per_smart", max_per_smart)
-        if tonumber(v) then max_per_smart = tonumber(v) end
-    end
-    if max_per_smart < 0 then max_per_smart = 0 end
+    local max_per_smart = cfg_num("trade_max_squads_per_smart", 1, 0)
 
     local taken = nil
     if max_per_smart > 0 and ignore_cap ~= true then
@@ -16746,7 +16756,7 @@ local function ensure_current_task(se_squad, entry)
         end
     end
 
-    local night_rest_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("night_rest_enabled", false) ~= false
+    local night_rest_enabled = cfg_bool("night_rest_enabled", false)
     if night_rest_enabled and is_night_now() then
         task = build_night_rest_task(se_squad, entry, cur_level, community, section_name, ctx)
     end
@@ -16845,12 +16855,7 @@ local function is_task_completed(se_squad, entry, task)
                     tostring(target or "-")
                 )
             end
-            local travel_ms = 600000
-            if zhopa.config and zhopa.config.get then
-                local v = zhopa.config.get("trade_travel_timeout_ms", travel_ms)
-                if tonumber(v) then travel_ms = tonumber(v) end
-            end
-            if travel_ms < 30000 then travel_ms = 30000 end
+            local travel_ms = cfg_num("trade_travel_timeout_ms", 600000, 30000)
             local started = tonumber(p.started_at_tg) or now
             if started > now then started = now end
             if now >= (started + travel_ms) then
@@ -17364,7 +17369,7 @@ function tasks.update_squad_tasks(se_squad, ctx)
         end
     end
 
-    local night_rest_enabled = zhopa.config and zhopa.config.get and zhopa.config.get("night_rest_enabled", false) ~= false
+    local night_rest_enabled = cfg_bool("night_rest_enabled", false)
     if current and night_rest_enabled and is_night_now() and should_preempt_for_night_rest(current) then
         local night_task = build_night_rest_task(se_squad, entry, cur_level, community, section_name, build_ctx)
         if night_task then
@@ -17727,6 +17732,30 @@ Mutants.__index = Mutants
 
 local function tg()
     return (time_global and time_global()) or 0
+end
+
+local function cfg_bool(key, default)
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.bool then
+        return zhopa.runtime_cfg.bool(key, default)
+    end
+    if zhopa.config and zhopa.config.get then
+        return zhopa.config.get(key, default) ~= false
+    end
+    return default ~= false
+end
+
+local function cfg_num(key, default, min_v)
+    local value = tonumber(default) or 0
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, value, min_v)
+    end
+    if zhopa.config and zhopa.config.get then
+        value = tonumber(zhopa.config.get(key, value)) or value
+    end
+    if min_v ~= nil and value < min_v then
+        value = min_v
+    end
+    return value
 end
 
 local function has_game_time()
@@ -18371,16 +18400,7 @@ local function make_task(task_type, target, params, priority)
 end
 
 local function build_rest_task()
-    local rest_hours = 1
-    if zhopa.config and zhopa.config.get then
-        local v = zhopa.config.get("mutant_rest_duration_game_hours", nil)
-        if v == nil then
-            v = zhopa.config.get("rest_duration_game_hours", rest_hours)
-        end
-        if tonumber(v) then
-            rest_hours = tonumber(v)
-        end
-    end
+    local rest_hours = cfg_num("mutant_rest_duration_game_hours", cfg_num("rest_duration_game_hours", 1, nil), nil)
     if rest_hours <= 0 then rest_hours = 1 end
 
     local duration_game_sec = math_floor(rest_hours * 3600)
@@ -19278,14 +19298,10 @@ function Mutants:_build_patrol_task(se_squad, entry)
     end
     shuffle_in_place(order)
 
-    local duration_game_sec = 3600
-    if zhopa.config and zhopa.config.get then
-        local patrol_hours = zhopa.config.get("mutant_patrol_duration_game_hours", 1.0)
-        patrol_hours = tonumber(patrol_hours) or 1.0
-        if patrol_hours <= 0 then patrol_hours = 1.0 end
-        duration_game_sec = math_floor(patrol_hours * 3600)
-        if duration_game_sec < 1 then duration_game_sec = 1 end
-    end
+    local patrol_hours = cfg_num("mutant_patrol_duration_game_hours", 1.0, nil)
+    if patrol_hours <= 0 then patrol_hours = 1.0 end
+    local duration_game_sec = math_floor(patrol_hours * 3600)
+    if duration_game_sec < 1 then duration_game_sec = 1 end
 
     local tf = (level and level.get_time_factor and level.get_time_factor()) or 10
     if tf <= 0 then tf = 10 end
@@ -19315,12 +19331,8 @@ end
 
 function Mutants:_pick_day_roam_task(se_squad, entry, exclude_type)
     local hunt_enabled = is_hunt_enabled()
-    local explore_enabled = true
-    local patrol_enabled = true
-    if zhopa.config and zhopa.config.get then
-        explore_enabled = zhopa.config.get("mutant_explore_enabled", true) ~= false
-        patrol_enabled = zhopa.config.get("mutant_patrol_enabled", true) ~= false
-    end
+    local explore_enabled = cfg_bool("mutant_explore_enabled", true)
+    local patrol_enabled = cfg_bool("mutant_patrol_enabled", true)
 
     local builders = {}
     if hunt_enabled then
@@ -20492,6 +20504,9 @@ end
 
 function BaseFiller:_num_cfg(key, default, min_v)
     local value = default
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, value, min_v)
+    end
     if zhopa.config and zhopa.config.get then
         local read = zhopa.config.get(key, default)
         if tonumber(read) then
@@ -20505,9 +20520,11 @@ function BaseFiller:_num_cfg(key, default, min_v)
 end
 
 function BaseFiller:_is_enabled()
-    if not (zhopa.config and zhopa.config.get) then
-        return true
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get("enabled", true) == true
+            and zhopa.runtime_cfg.get("base_filler_enabled", false) ~= false
     end
+    if not (zhopa.config and zhopa.config.get) then return true end
     if zhopa.config.get("enabled", true) ~= true then
         return false
     end
@@ -22038,9 +22055,11 @@ function DynamicBases:__init()
 end
 
 function DynamicBases:_is_enabled()
-    if not (zhopa.config and zhopa.config.get) then
-        return false
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get("enabled", true) == true
+            and zhopa.runtime_cfg.get("dynamic_bases_enabled", false) == true
     end
+    if not (zhopa.config and zhopa.config.get) then return false end
     if zhopa.config.get("enabled", true) ~= true then
         return false
     end
@@ -22049,6 +22068,9 @@ end
 
 function DynamicBases:_num_cfg(key, default, min_v)
     local value = default
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, value, min_v)
+    end
     if zhopa.config and zhopa.config.get then
         local read = zhopa.config.get(key, default)
         if tonumber(read) then
@@ -23266,9 +23288,11 @@ function ServiceFiller:__init()
 end
 
 function ServiceFiller:_is_enabled()
-    if not (zhopa.config and zhopa.config.get) then
-        return false
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get("enabled", true) == true
+            and zhopa.runtime_cfg.get("service_filler_enabled", false) == true
     end
+    if not (zhopa.config and zhopa.config.get) then return false end
     if zhopa.config.get("enabled", true) ~= true then
         return false
     end
@@ -23277,6 +23301,9 @@ end
 
 function ServiceFiller:_num_cfg(key, default, min_v)
     local value = default
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.num then
+        return zhopa.runtime_cfg.num(key, value, min_v)
+    end
     if zhopa.config and zhopa.config.get then
         local read = zhopa.config.get(key, default)
         if tonumber(read) then
@@ -23352,7 +23379,13 @@ function ServiceFiller:_resolve_owner_alias(smart)
     if not smart then
         return nil, "no_smart", 0, "-", nil
     end
-    if zhopa.config and zhopa.config.get and zhopa.config.get("dynamic_bases_enabled", false) == true then
+    local dynamic_enabled = false
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        dynamic_enabled = zhopa.runtime_cfg.get("dynamic_bases_enabled", false) == true
+    elseif zhopa.config and zhopa.config.get then
+        dynamic_enabled = zhopa.config.get("dynamic_bases_enabled", false) == true
+    end
+    if dynamic_enabled == true then
         if zhopa.dynamic_bases and zhopa.dynamic_bases.get_effective_owner then
             return zhopa.dynamic_bases.get_effective_owner(smart)
         end
@@ -27002,6 +27035,9 @@ function DebugHud:__init()
 end
 
 function DebugHud:_read_enabled()
+    if zhopa.runtime_cfg and zhopa.runtime_cfg.get then
+        return zhopa.runtime_cfg.get("debug_hud_enabled", false) == true
+    end
     if not (zhopa.config and zhopa.config.get) then return false end
     return zhopa.config.get("debug_hud_enabled", false) == true
 end
