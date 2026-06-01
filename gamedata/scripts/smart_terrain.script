@@ -33,6 +33,21 @@ local squads_by_faction = {
 
 local s_find = string.find
 
+local function zhopa2_debug_print_enabled()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function zhopa2_debug_printf(fmt, ...)
+	if zhopa2_debug_print_enabled() and type(printf) == "function" then
+		printf(fmt, ...)
+	end
+end
+
 local _mej = {
 	['logic@bar_zastava_guard_1_walk'] = "logic@duty_guard1",
 	['logic@bar_zastava_guard_2_walk'] = "logic@duty_guard2",
@@ -404,12 +419,14 @@ function se_smart_terrain:fill_npc_info(obj)
 	--utils_data.debug_write(strformat("%s:%s:fill_npc_info %s",self:name(),self.id,obj and obj:name()))
 	local cls = obj.clsid and obj:clsid()
 	if not (cls) then 
-		return printf("fill_npc_info invalid clsid for %s",obj and obj:name())
+		zhopa2_debug_printf("fill_npc_info invalid clsid for %s",obj and obj:name())
+		return
 	end
 	
 	local stype = IsStalker(nil,cls) and 0 or IsMonster(nil,cls) and 1 or IsHelicopter(nil,cls) and 3 or nil
 	if not (stype) then 
-		return printf("fill_npc_info invalid stype for %s [clsid=%s]",obj and obj:name(),cls)
+		zhopa2_debug_printf("fill_npc_info invalid stype for %s [clsid=%s]",obj and obj:name(),cls)
+		return
 	end 
 	
 	local npc_info 			= {}
@@ -442,7 +459,8 @@ function se_smart_terrain:register_npc(obj)
 	
 	local cls = obj.clsid and obj:clsid()
 	if not (cls) then 
-		return printf("register_npc no clsid! %s",obj and obj:name())
+		zhopa2_debug_printf("register_npc no clsid! %s",obj and obj:name())
+		return
 	end 
 	
 	-- dynamic companions cannot register
@@ -537,7 +555,7 @@ local function validate_patrol_path(path_name,gg)
 		local cnt = p:count()
 		for i=0,cnt-1 do
 			if not (gg:valid_vertex_id(p:game_vertex_id(i))) then 
-				printf("validate_patrol_path WARNING: %s: invalid game_vertex_id for point %s",path_name,i)
+				zhopa2_debug_printf("validate_patrol_path WARNING: %s: invalid game_vertex_id for point %s",path_name,i)
 				ret = false
 			end
 		end
@@ -748,7 +766,8 @@ function se_smart_terrain:select_npc_job(npc_info,now,surge_started)
 	--utils_data.debug_write(strformat("%s:select_npc_job %s",self:name()))
 	
 	if not (npc_info and npc_info.se_obj and npc_info.stype) then 
-		return printf("%s no npc_info!",self:name())
+		zhopa2_debug_printf("%s no npc_info!",self:name())
+		return
 	end
 
 	if zhopa2_targeted_gather_blocks_job(self, npc_info) then
@@ -758,7 +777,8 @@ function se_smart_terrain:select_npc_job(npc_info,now,surge_started)
 	-- reference job table according to race
 	local jobs = npc_info.stype == 0 and self.stalker_jobs or npc_info.stype == 1 and self.monster_jobs or npc_info.stype == 3 and self.heli_jobs
 	if not (jobs) then 
-		return printf("%s no job table for %s [stype = %s]",self:name(),npc_info.se_obj:name(),npc_info.stype)
+		zhopa2_debug_printf("%s no job table for %s [stype = %s]",self:name(),npc_info.se_obj:name(),npc_info.stype)
+		return
 	end
 	
 	local new_job
@@ -1126,7 +1146,7 @@ function se_smart_terrain:STATE_Read(packet, size)
 	end
 
 	if (self.load_info[65535]) then
-		printf("%s:STATE_Read: invalid id in npc_info table. Check for save corruption or error in smart_terrain job system.")
+		zhopa2_debug_printf("%s:STATE_Read: invalid id in npc_info table. Check for save corruption or error in smart_terrain job system.", self:name())
 		self.load_info[65535] = nil
 	end
 
@@ -1483,18 +1503,18 @@ function se_smart_terrain:setup_logic(npc)
 
 	local npc_info = self.npc_info[npc:id()]
 	if not (npc_info) then
-		printf("%s.setup_logic: npc_info is nil! for id=%s",self:name(),npc:id())
+		zhopa2_debug_printf("%s.setup_logic: npc_info is nil! for id=%s",self:name(),npc:id())
 		return
 	end
 	
 	if not (npc_info.se_obj) then
-		printf("%s.setup_logic: npc_info.se_obj is nil! for id=%s",self:name(),npc:id())
+		zhopa2_debug_printf("%s.setup_logic: npc_info.se_obj is nil! for id=%s",self:name(),npc:id())
 		return 
 	end
 
 	local job = npc_info.job
 	if not (job) then
-		printf("%s.setup_logic: npc_info has no job! for id=%s",self:name(),npc:id())
+		zhopa2_debug_printf("%s.setup_logic: npc_info has no job! for id=%s",self:name(),npc:id())
 		self:unregister_npc(npc_info.se_obj)
 		self:register_npc(npc_info.se_obj)
 		return

@@ -34,8 +34,19 @@ local ZHOPA2_APPROACH_CHECK_MS = 1500
 local ZHOPA2_APPROACH_BAD_TICKS = 3
 local ZHOPA2_APPROACH_PROGRESS_EPS_SQR = 0.25
 local ZHOPA2_APPROACH_FORWARD_STEPS = {4, 8, 12, 18, 25, 35, 50}
+local ZHOPA2_ARTIFACT_SCAN_MS = 3500
+local ZHOPA2_ARTIFACT_SCAN_STAGE = 5
 
 -- ZHOPA2 BEGIN: optional looting extension over vanilla item gathering.
+local function zhopa2_debug_print_enabled()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function zhopa2_loot_mod()
 	local mod = rawget(_G, "zhopa2_loot")
 	if not mod and require then
@@ -360,6 +371,16 @@ local function get_best_detector(npc)
 	end
 end
 
+local function zhopa2_clear_artifact_scan(st)
+	if not st then
+		return
+	end
+	st.zhopa2_artifact_visible_item_id = nil
+	st.zhopa2_artifact_scan_item_id = nil
+	st.zhopa2_artifact_scan_until = nil
+	st.zhopa2_artifact_scan_state = nil
+end
+
 local function get_rand_vertex(npc,vo)
 	local dir = npc:position():sub(vo:position())
 	dir = vector_rotate_y(dir,math.random(5,45))
@@ -408,6 +429,8 @@ function gather_item(npc)
 	local selected_id = st.selected_id
 	local zhopa2_was_targeted = st.zhopa2_targeted_item_id ~= nil
 	--printf("selected_id = %s",selected_id)
+
+	zhopa2_clear_artifact_scan(st)
 
 	-- reset all scheme dependent variables
 	if (st.selected_id) then
@@ -787,6 +810,62 @@ local function zhopa2_safe_look_position(npc, pos)
 	return nil
 end
 
+local function zhopa2_artifact_scan_state(npc, st)
+	local look_pos = st and (st.nearest_pos or st.vid_pos)
+	local npc_pos = npc and npc:position()
+	if npc_pos and look_pos and npc_pos:distance_to_sqr(look_pos) < 100 then
+		return "probe_crouch"
+	end
+	return "probe_stand"
+end
+
+local function zhopa2_start_artifact_scan(npc, st, item, now)
+	if not (npc and st and item and st.selected_id) then
+		return false
+	end
+	local item_id = tonumber(st.selected_id)
+	if not item_id then
+		return false
+	end
+	st.zhopa2_artifact_visible_item_id = item_id
+	st.zhopa2_artifact_scan_item_id = item_id
+	st.zhopa2_artifact_scan_until = (now or time_global()) + ZHOPA2_ARTIFACT_SCAN_MS
+	st.zhopa2_artifact_scan_state = zhopa2_artifact_scan_state(npc, st)
+	st.stage = ZHOPA2_ARTIFACT_SCAN_STAGE
+	st.__stimer = nil
+	return true
+end
+
+local function zhopa2_update_artifact_scan(npc, st, item, now)
+	if not (npc and st and item) then
+		return false
+	end
+	local item_id = tonumber(st.selected_id)
+	if not (item_id and st.stage == ZHOPA2_ARTIFACT_SCAN_STAGE and tonumber(st.zhopa2_artifact_scan_item_id) == item_id) then
+		return false
+	end
+	local look_pos = zhopa2_safe_look_position(npc, item:position())
+	local scan_state = st.zhopa2_artifact_scan_state or "probe_crouch"
+	if state_mgr.get_state(npc) ~= scan_state then
+		state_mgr.set_state(npc, scan_state, nil, nil, look_pos and {look_position = look_pos} or nil)
+	end
+	npc:set_movement_type(move.stand)
+	if now and st.zhopa2_artifact_scan_until and now > st.zhopa2_artifact_scan_until then
+		zhopa2_clear_artifact_scan(st)
+		state_mgr.set_state(npc, "pickup_crouch")
+		st.stage = 2
+	end
+	return true
+end
+
+local function zhopa2_begin_artifact_pickup(npc, st, item, now)
+	if zhopa2_start_artifact_scan(npc, st, item, now) and zhopa2_update_artifact_scan(npc, st, item, now) then
+		return
+	end
+	state_mgr.set_state(npc, "pickup_crouch")
+	st.stage = 2
+end
+
 function zhopa2_prepare_targeted_gather(npc, item_id)
 	if not (npc and item_id and db and db.storage) then
 		return false, "prepare_bad_args"
@@ -882,6 +961,7 @@ function zhopa2_force_gather_item(npc, item_id)
 		end
 		Items[item_id] = nil
 	end
+	zhopa2_clear_artifact_scan(st)
 	st.selected_id = item_id
 	st.vid = vid
 	st.vid_pos = pos
@@ -922,6 +1002,7 @@ function zhopa2_clear_gather_item(npc, item_id, reason)
 		Items[item_id] = nil
 	end
 	if tonumber(st.selected_id) == item_id then
+		zhopa2_clear_artifact_scan(st)
 		st.selected_id = nil
 		st.vid = nil
 		st.vid_pos = nil
@@ -948,7 +1029,9 @@ end
 
 function eva_gather_itm:find_valid_item()
 	if (self.st.cstackprevent) then
-		printf("C Stack Overflow Prevention: warning xr_gather_items scheme making repeated calls without return; save now and reload!")
+		if zhopa2_debug_print_enabled() then
+			printf("C Stack Overflow Prevention: warning xr_gather_items scheme making repeated calls without return; save now and reload!")
+		end
 		return false
 	end
 	
@@ -1278,10 +1361,12 @@ local function execute_gather_item(npc,self)
 	if (itm and IsArtefact(nil,item_cls)) then
 		local tg = time_global()
 		if zhopa2_targeted then
+			if zhopa2_update_artifact_scan(npc, self.st, itm, tg) then
+				return
+			end
 			local approach_reached = zhopa2_artifact_approach_reached(npc, self.st)
 			if zhopa2_artifact_pickup_ready(npc, self.st) then
-				state_mgr.set_state(npc, "pickup_crouch")
-				self.st.stage = 2
+				zhopa2_begin_artifact_pickup(npc, self.st, itm, tg)
 			else
 				if (npc:path_type() ~= game_object.level_path) then
 					npc:set_path_type(game_object.level_path)
@@ -1293,8 +1378,7 @@ local function execute_gather_item(npc,self)
 				else
 					local progress_ok = zhopa2_artifact_approach_progress_ok(npc, self.st)
 					if not progress_ok then
-						state_mgr.set_state(npc, "pickup_crouch")
-						self.st.stage = 2
+						zhopa2_begin_artifact_pickup(npc, self.st, itm, tg)
 						return
 					end
 				end
@@ -1375,6 +1459,7 @@ function act_gather_itm:finalize()
 	--state_mgr.set_state(self.object, "idle")
 	local st = self.st
 	local zhopa2_was_targeted = st.zhopa2_targeted_item_id ~= nil
+	zhopa2_clear_artifact_scan(st)
 	if (st.selected_id) then
 		Items[st.selected_id] = nil
 		st.selected_id = nil
@@ -1506,6 +1591,7 @@ function reset_generic_scheme(npc,scheme,section,stype,st)
 		Items[st.gather_items.selected_id] = nil
 	end
 
+	zhopa2_clear_artifact_scan(st.gather_items)
 	st.gather_items.selected_id = nil
 	st.gather_items.vid = nil
 	st.gather_items.vid_pos = nil

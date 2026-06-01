@@ -1789,7 +1789,7 @@ function M.pick_artifact_target(squad, opts)
 	for i = 1, #(candidates or {}) do
 		local entry = candidates[i]
 		local smart = entry and entry.smart or nil
-		if entry and entry.artifact_id and smart and idx.smart_artefact_available and idx.smart_artefact_available(smart) and valid_smart_cached(squad, smart, options, signature) then
+		if entry and entry.artifact_id and smart and valid_smart_cached(squad, smart, options, signature) then
 			local dist = squad_distance(squad, smart) or 100000000
 			if not best_dist or dist < best_dist then
 				best = entry

@@ -56,6 +56,10 @@ local function cfg_num(key, default)
 	return default
 end
 
+local function debug_print_enabled()
+	return cfg_bool("debug_hud_enabled", false) == true
+end
+
 local function now_ms()
 	return time_global and time_global() or 0
 end
@@ -225,11 +229,14 @@ local function mark_artifact_cargo_for_squad(squad, item, section, value, artifa
 	value = tonumber(value) or item_cost(item or section)
 	local artifact_id = tonumber(artifact_id) or object_id(item)
 	local mem = memory_mod()
+	local added = false
 	if mem and type(mem.add_artifact_cargo) == "function" then
-		mem.add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_loot")
+		added = mem.add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_loot") == true
 	end
 	local idx = index_mod()
-	if idx and type(idx.add_artifact_cargo) == "function" then
+	if idx and added and type(idx.sync_artifact_cargo) == "function" then
+		idx.sync_artifact_cargo(squad)
+	elseif idx and type(idx.add_artifact_cargo) == "function" then
 		idx.add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_loot")
 	end
 	return true
@@ -767,6 +774,73 @@ local function npc_squad(se_npc)
 	return alife_object(group_id)
 end
 
+local function squad_npc_count(squad)
+	if not squad then
+		return 0
+	end
+	if type(squad.npc_count) == "function" then
+		local ok, count = pcall(squad.npc_count, squad)
+		return ok and (tonumber(count) or 0) or 0
+	end
+	return 0
+end
+
+local function split_artifact_sections(sections)
+	local out = {}
+	for sec in tostring(sections or ""):gmatch("[^,]+") do
+		out[#out + 1] = sec
+	end
+	return out
+end
+
+local function consume_artifact_cargo_from_squad(squad, count, value, reason)
+	if not (squad and (tonumber(squad.zhopa2_artifact_cargo_count) or 0) > 0) then
+		return false
+	end
+	local idx = index_mod()
+	if idx and type(idx.consume_artifact_cargo) == "function" then
+		return idx.consume_artifact_cargo(squad, count, value, reason or "artifact_cargo_looted")
+	end
+	count = math.max(1, tonumber(count) or 1)
+	value = math.max(0, tonumber(value) or 0)
+	local next_count = math.max(0, (tonumber(squad.zhopa2_artifact_cargo_count) or 0) - count)
+	if next_count <= 0 then
+		squad.zhopa2_artifact_cargo_count = 0
+		squad.zhopa2_artifact_cargo_value = 0
+		squad.zhopa2_artifact_cargo_sections = nil
+		squad.zhopa2_artifact_cargo_last_id = nil
+	else
+		squad.zhopa2_artifact_cargo_count = next_count
+		squad.zhopa2_artifact_cargo_value = math.max(0, (tonumber(squad.zhopa2_artifact_cargo_value) or 0) - value)
+	end
+	squad.zhopa2_last_result = reason or "artifact_cargo_looted"
+	return true
+end
+
+local function transfer_remaining_artifact_cargo(attacker_squad, victim_squad, reason)
+	local count = math.floor(tonumber(victim_squad and victim_squad.zhopa2_artifact_cargo_count) or 0)
+	if not (attacker_squad and victim_squad and count > 0) then
+		return false
+	end
+	local total_value = math.max(0, tonumber(victim_squad.zhopa2_artifact_cargo_value) or 0)
+	local sections = split_artifact_sections(victim_squad.zhopa2_artifact_cargo_sections)
+	local value_each = count > 0 and (total_value / count) or 0
+	local last_id = tonumber(victim_squad.zhopa2_artifact_cargo_last_id)
+	for i = 1, count do
+		local section = sections[i] or sections[#sections]
+		if section then
+			mark_artifact_cargo_for_squad(attacker_squad, nil, section, value_each, i == count and last_id or nil, reason or "offline_artifact_cargo_loot")
+		end
+	end
+	local idx = index_mod()
+	if idx and type(idx.clear_artifact_cargo) == "function" then
+		idx.clear_artifact_cargo(victim_squad, reason or "offline_artifact_cargo_looted")
+	else
+		consume_artifact_cargo_from_squad(victim_squad, count, total_value, reason or "offline_artifact_cargo_looted")
+	end
+	return true
+end
+
 local function death_community(se_npc)
 	local squad = npc_squad(se_npc)
 	local player_id = squad and squad.player_id
@@ -1033,6 +1107,10 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 		return false
 	end
 
+	if artifact_count > 0 then
+		consume_artifact_cargo_from_squad(npc_squad(se_victim), artifact_count, artifact_value, reason or "offline_artifact_loot")
+	end
+
 	local mem = memory_mod()
 	local generic_value = math.max(0, moved_value - artifact_value)
 	if moved_count > artifact_count or generic_value > 0 then
@@ -1044,7 +1122,7 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 		end
 	end
 	attacker_squad.zhopa2_last_result = (reason or "offline_real_loot") .. ":" .. moved_count
-	if printf then
+	if printf and debug_print_enabled() then
 		printf("~ ZHOPA2 offline loot | squad [%s:%s] looter [%s:%s] victim [%s:%s] level [%s] items [%s] value [%s] loot [%s] reason [%s]",
 			tostring(object_name(attacker_squad)),
 			tostring(object_id(attacker_squad) or "-"),
@@ -1380,13 +1458,8 @@ local function record_targeted_artifact_pickup(npc, item, request, reason)
 	local section = object_section(item)
 	local amount = item_cost(item)
 	local source_id = tonumber(request.item_id) or object_id(item)
-	local mem = memory_mod()
-	if mem and type(mem.add_artifact_cargo) == "function" then
-		mem.add_artifact_cargo(squad, section, amount, source_id, reason or request.reason or "artifact_pickup")
-	end
-	local idx = index_mod()
-	if idx and type(idx.add_artifact_cargo) == "function" then
-		idx.add_artifact_cargo(squad, section, amount, source_id, reason or request.reason or "artifact_pickup")
+	if not mark_artifact_cargo_for_squad(squad, item, section, amount, source_id, reason or request.reason or "artifact_pickup") then
+		return false
 	end
 	forget_targeted_item_request(object_id(item))
 	return true
@@ -1434,6 +1507,9 @@ function M.record_offline_combat_loot(squad, target, killed_count, reason)
 	end
 	-- Real offline loot is handled before sim_offline_combat calls on_death().
 	if cfg_bool("loot_offline_real_enabled", true) == true then
+		if target and squad_npc_count(target) <= 0 then
+			return transfer_remaining_artifact_cargo(squad, target, reason or "offline_artifact_cargo_loot")
+		end
 		return false
 	end
 	killed_count = math.max(1, tonumber(killed_count) or 1)

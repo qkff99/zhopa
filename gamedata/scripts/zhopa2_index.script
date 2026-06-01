@@ -3,6 +3,11 @@ local M = {}
 local BASE_PULL_RADIUS = 50
 local BASE_PULL_RADIUS_SQR = BASE_PULL_RADIUS * BASE_PULL_RADIUS
 local BASE_PULL_COOLDOWN_MS = 5000
+local ANOMALY_ZONE_SECTION = "anomal_zone"
+local VIRTUAL_ARTIFACT_ID_BASE = 100000000
+local VIRTUAL_ARTIFACT_SLOT_MULT = 1000
+local VIRTUAL_SPAWN_COOLDOWN_MS = 300000
+local VIRTUAL_STATE_KEY = "zhopa2_virtual_artifacts"
 
 M.smart_ownership = {}
 M.base_pull_squad = {}
@@ -19,6 +24,10 @@ M.zone_artifacts = {}
 M.smart_artifacts = {}
 M.artifact_reserved_by = {}
 M.squad_artifact_reservation = {}
+M.virtual_artifacts = {}
+M.virtual_zones = {}
+M.virtual_zones_by_level = {}
+M.virtual_zone_counts = {}
 M.smart_task_flags = {}
 M.squad_artifact_cargo = {}
 M.artifact_revision = 0
@@ -202,6 +211,9 @@ end
 
 local function artifact_is_valid(id)
 	local artifact_id = tonumber(id) or id
+	if artifact_id and M.virtual_artifacts[artifact_id] then
+		return true
+	end
 	local art = artifact_id and alife_object and alife_object(artifact_id) or nil
 	if art then
 		if tonumber(art.parent_id) ~= 65535 then
@@ -216,8 +228,222 @@ local function artifact_is_valid(id)
 	return object_is_artifact(art)
 end
 
+local artifact_settings_ini = nil
+local artifact_group_cache = {}
+
+local function section_exists(section)
+	return type(section) == "string" and section ~= "" and ini_sys and ini_sys.section_exist and ini_sys:section_exist(section) == true
+end
+
+local function section_is_artifact(section)
+	if not section_exists(section) then
+		return false
+	end
+	local cls = ini_sys.r_string_ex and ini_sys:r_string_ex(section, "class") or nil
+	return cls == "ARTEFACT"
+end
+
+local function artefact_settings()
+	if artifact_settings_ini ~= nil then
+		return artifact_settings_ini or nil
+	end
+	if not ini_file then
+		artifact_settings_ini = false
+		return nil
+	end
+	local ok, ini = pcall(ini_file, "items\\settings\\artefacts.ltx")
+	artifact_settings_ini = ok and ini or false
+	return artifact_settings_ini or nil
+end
+
+local function name_list(value)
+	if type(value) ~= "string" or value == "" then
+		return {}
+	end
+	if type(parse_names) == "function" then
+		return parse_names(value) or {}
+	end
+	local out = {}
+	for name in string.gmatch(value, "([%w_%-.\\]+)%p*") do
+		out[#out + 1] = name
+	end
+	return out
+end
+
+local function num_list(value)
+	if type(value) ~= "string" or value == "" then
+		return {}
+	end
+	if type(parse_nums) == "function" then
+		return parse_nums(value) or {}
+	end
+	local out = {}
+	for num in string.gmatch(value, "([%-%d%.]+)%,*") do
+		out[#out + 1] = tonumber(num)
+	end
+	return out
+end
+
+local function artifact_sections_for_token(token)
+	if section_is_artifact(token) then
+		return { token }
+	end
+	if artifact_group_cache[token] ~= nil then
+		return artifact_group_cache[token] or {}
+	end
+	local ini = artefact_settings()
+	local out = {}
+	if ini and token and ini.section_exist and ini:section_exist(token) then
+		local count = ini:line_count(token) or 0
+		for i = 0, count - 1 do
+			local _, id = ini:r_line_ex(token, i, "", "")
+			if section_is_artifact(id) then
+				out[#out + 1] = id
+			end
+		end
+	end
+	artifact_group_cache[token] = out
+	return out
+end
+
+local function anomaly_cfg_from_spawn_ini(obj)
+	if not (obj and type(obj.spawn_ini) == "function") then
+		return nil
+	end
+	local ok, spawn_ini = pcall(obj.spawn_ini, obj)
+	if not (ok and spawn_ini and spawn_ini.r_string_ex) then
+		return nil
+	end
+	local ok_cfg, cfg = pcall(spawn_ini.r_string_ex, spawn_ini, ANOMALY_ZONE_SECTION, "cfg")
+	return ok_cfg and cfg or nil
+end
+
+local function zone_level_bucket(level_name)
+	if type(level_name) ~= "string" or level_name == "" then
+		return nil
+	end
+	local bucket = M.virtual_zones_by_level[level_name]
+	if not bucket then
+		bucket = {}
+		M.virtual_zones_by_level[level_name] = bucket
+	end
+	return bucket
+end
+
+local function remove_virtual_zone_from_level(zkey, level_name)
+	local bucket = level_name and M.virtual_zones_by_level[level_name] or nil
+	if bucket then
+		bucket[zkey] = nil
+		if next(bucket) == nil then
+			M.virtual_zones_by_level[level_name] = nil
+		end
+	end
+end
+
+local function virtual_storage_state()
+	if not (alife_storage_manager and type(alife_storage_manager.get_state) == "function") then
+		return nil
+	end
+	local state = alife_storage_manager.get_state()
+	if not state then
+		return nil
+	end
+	if type(state[VIRTUAL_STATE_KEY]) ~= "table" then
+		state[VIRTUAL_STATE_KEY] = {}
+	end
+	local store = state[VIRTUAL_STATE_KEY]
+	if type(store.artifacts) ~= "table" then
+		store.artifacts = {}
+	end
+	return store
+end
+
+local function persist_virtual_artifact(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	local virtual = artifact_id and M.virtual_artifacts[artifact_id] or nil
+	local store = virtual and virtual_storage_state() or nil
+	if not store then
+		return false
+	end
+	store.artifacts[tostring(artifact_id)] = {
+		zone = virtual.zone,
+		level = virtual.level,
+		smart = virtual.smart,
+		section = virtual.section,
+		cfg_file = virtual.cfg_file,
+		reserved_by = tonumber(M.artifact_reserved_by[artifact_id]),
+	}
+	return true
+end
+
+local function remove_persisted_virtual_artifact(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	local store = artifact_id and virtual_storage_state() or nil
+	if not store then
+		return false
+	end
+	store.artifacts[tostring(artifact_id)] = nil
+	return true
+end
+
 local function keep_artifact_reservation_on_unregister(reason)
 	return reason == "artifact_unregister" or reason == "artifact_reregister"
+end
+
+local function clear_artifact_reservation_owner(artifact_id, squad_id)
+	artifact_id = tonumber(artifact_id)
+	squad_id = tonumber(squad_id)
+	if artifact_id and (not squad_id or tonumber(M.artifact_reserved_by[artifact_id]) == squad_id) then
+		M.artifact_reserved_by[artifact_id] = nil
+	end
+	if artifact_id and squad_id and tonumber(M.squad_artifact_reservation[squad_id]) == artifact_id then
+		M.squad_artifact_reservation[squad_id] = nil
+	end
+end
+
+local function artifact_reservation_live(artifact_id, squad_id)
+	artifact_id = tonumber(artifact_id)
+	squad_id = tonumber(squad_id)
+	if not (artifact_id and squad_id) then
+		return false
+	end
+	local squad = alife_object and alife_object(squad_id) or nil
+	if not squad then
+		if M.virtual_artifacts[artifact_id] and M.unregister_artifact then
+			M.unregister_artifact(artifact_id, "artifact_reservation_dead_squad")
+		else
+			clear_artifact_reservation_owner(artifact_id, squad_id)
+		end
+		return false
+	end
+	local reserved = tonumber(M.squad_artifact_reservation[squad_id]) or tonumber(squad.zhopa2_artifact_id)
+	if reserved == artifact_id then
+		return true
+	end
+	if M.virtual_artifacts[artifact_id] and M.unregister_artifact then
+		M.unregister_artifact(artifact_id, "virtual_artifact_reservation_released")
+		return false
+	end
+	clear_artifact_reservation_owner(artifact_id, squad_id)
+	return false
+end
+
+local function artifact_reserved(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	local squad_id = artifact_id and tonumber(M.artifact_reserved_by[artifact_id]) or nil
+	return artifact_reservation_live(artifact_id, squad_id)
+end
+
+local function artifact_reserved_for_other_squad(artifact_id, squad)
+	artifact_id = tonumber(artifact_id)
+	local squad_id = artifact_id and tonumber(M.artifact_reserved_by[artifact_id]) or nil
+	if not squad_id then
+		return false
+	end
+	if not artifact_reservation_live(artifact_id, squad_id) then
+		return false
+	end
+	return squad_id ~= tonumber(squad and squad.id)
 end
 
 local function smart_is_base(smart)
@@ -670,7 +896,7 @@ local function recalc_smart_artefact_flag(smart_id)
 	local bucket = M.smart_artifacts[smart_id]
 	if bucket then
 		for artifact_id in pairs(bucket) do
-			if artifact_is_valid(artifact_id) then
+			if artifact_is_valid(artifact_id) and not artifact_reserved(artifact_id) then
 				flags.artefact_available = true
 				break
 			end
@@ -721,6 +947,71 @@ local function add_artifact_to_bucket(bucket_table, key, artifact_id)
 	bucket[artifact_id] = true
 end
 
+local function restore_persisted_virtual_artifacts()
+	local store = virtual_storage_state()
+	local artifacts = store and store.artifacts or nil
+	if not artifacts then
+		return 0
+	end
+
+	local restored = 0
+	local changed = false
+	for key, data in pairs(artifacts) do
+		local artifact_id = tonumber(key) or tonumber(type(data) == "table" and data.artifact_id)
+		if not (artifact_id and artifact_id < 0 and type(data) == "table" and section_is_artifact(data.section)) then
+			artifacts[key] = nil
+			changed = true
+		elseif not M.virtual_artifacts[artifact_id] then
+			local smart_id = tonumber(data.smart)
+			if not (smart_id and alife_object and alife_object(smart_id)) then
+				artifacts[key] = nil
+				changed = true
+			else
+				local zkey = data.zone or ("restored:" .. tostring(artifact_id))
+				M.virtual_artifacts[artifact_id] = {
+					zone = zkey,
+					level = data.level,
+					smart = smart_id,
+					section = data.section,
+					cfg_file = data.cfg_file,
+				}
+				M.virtual_zone_counts[zkey] = (tonumber(M.virtual_zone_counts[zkey]) or 0) + 1
+				M.artifacts[artifact_id] = true
+				M.artifact_zone[artifact_id] = zkey
+				M.artifact_level[artifact_id] = data.level
+				M.artifact_section[artifact_id] = data.section
+				M.artifact_smart[artifact_id] = smart_id
+				add_artifact_to_bucket(M.zone_artifacts, zkey, artifact_id)
+				add_artifact_to_bucket(M.smart_artifacts, smart_id, artifact_id)
+
+				local squad_id = tonumber(data.reserved_by)
+				local squad = squad_id and alife_object and alife_object(squad_id) or nil
+				if not squad_id then
+					recalc_smart_artefact_flag(smart_id)
+					restored = restored + 1
+				elseif not squad then
+					M.unregister_artifact(artifact_id, "artifact_reservation_dead_squad")
+				elseif squad.zhopa2_task ~= "ARTEFACT" or tonumber(squad.zhopa2_artifact_id) ~= artifact_id then
+					M.unregister_artifact(artifact_id, "virtual_artifact_reservation_released")
+				else
+					M.artifact_reserved_by[artifact_id] = squad_id
+					M.squad_artifact_reservation[squad_id] = artifact_id
+					squad.zhopa2_artifact_smart = smart_id
+					squad.zhopa2_artifact_zone = zkey
+					squad.zhopa2_artifact_section = data.section
+					recalc_smart_artefact_flag(smart_id)
+					restored = restored + 1
+				end
+				changed = true
+			end
+		end
+	end
+	if changed then
+		mark_artifact_registry_changed()
+	end
+	return restored
+end
+
 local function resolve_artifact_smart(artifact_id, artifact_obj, level_name, zone)
 	local current = M.artifact_smart[artifact_id]
 	if current and alife_object and alife_object(current) then
@@ -745,6 +1036,314 @@ local function resolve_artifact_smart(artifact_id, artifact_obj, level_name, zon
 		end
 	end
 	return best and best.id or nil
+end
+
+local function virtual_artifact_id(zone_id, slot)
+	zone_id = math.abs(math.floor(tonumber(zone_id) or 0))
+	slot = math.max(1, math.floor(tonumber(slot) or 1))
+	return -1 * (VIRTUAL_ARTIFACT_ID_BASE + zone_id * VIRTUAL_ARTIFACT_SLOT_MULT + slot)
+end
+
+local function virtual_artifact_zone_key(artifact_id)
+	artifact_id = math.abs(math.floor(tonumber(artifact_id) or 0))
+	if artifact_id <= VIRTUAL_ARTIFACT_ID_BASE then
+		return nil
+	end
+	local zone_id = math.floor((artifact_id - VIRTUAL_ARTIFACT_ID_BASE) / VIRTUAL_ARTIFACT_SLOT_MULT)
+	return zone_id > 0 and ("id:" .. tostring(zone_id)) or nil
+end
+
+local function virtual_spawn_chance()
+	local chance = 0.25
+	if game_difficulties and type(game_difficulties.get_eco_factor) == "function" then
+		local ok, value = pcall(game_difficulties.get_eco_factor, "arty_chance")
+		if ok and value then
+			chance = tonumber(value) or chance
+		end
+	end
+	chance = chance * 100
+	if game_achievements and type(game_achievements.has_achievement) == "function" then
+		local ok, has_geologist = pcall(game_achievements.has_achievement, "geologist")
+		if ok and has_geologist then
+			chance = chance + 5
+		end
+	end
+	return chance
+end
+
+local function read_virtual_zone_entry(zone, cfg_file, source)
+	local obj = zone_object(zone)
+	local zkey = zone_key(zone)
+	cfg_file = cfg_file or anomaly_cfg_from_spawn_ini(obj)
+	if not (zkey and cfg_file and ini_file) then
+		return nil
+	end
+	local ok, cfg_ini = pcall(ini_file, cfg_file)
+	if not (ok and cfg_ini) then
+		return nil
+	end
+
+	local old = M.virtual_zones[zkey]
+	local level_name = obj_level(obj) or (old and old.level)
+	local layers_count = math.max(1, math.floor(tonumber(cfg_ini:r_float_ex(ANOMALY_ZONE_SECTION, "layers_count")) or 1))
+	local layer = old and old.layer or nil
+	if zone and type(zone) == "table" and zone.cur_layer then
+		layer = zone.cur_layer
+	end
+	if not layer then
+		layer = "layer_" .. tostring(math.random(1, layers_count))
+	end
+
+	local def_respawn_tries = cfg_ini:r_float_ex(ANOMALY_ZONE_SECTION, "respawn_tries") or 1
+	local def_max_artefacts = cfg_ini:r_float_ex(ANOMALY_ZONE_SECTION, "max_artefacts") or 1
+	local def_arts = cfg_ini:r_string_ex(ANOMALY_ZONE_SECTION, "artefacts")
+	local def_coeff = cfg_ini:r_string_ex(ANOMALY_ZONE_SECTION, "coeff")
+	local coeff_name = cfg_ini:r_string_ex(layer, "coeffs_section") or cfg_ini:r_string_ex(ANOMALY_ZONE_SECTION, "coeffs_section") or "coeff"
+	local arts = cfg_ini:r_string_ex(layer, "artefacts") or def_arts
+	local artefacts = name_list(arts)
+	if #artefacts <= 0 then
+		return nil
+	end
+
+	local entry = old or {}
+	entry.key = zkey
+	entry.zone_id = tonumber(object_id(obj)) or tonumber(entry.zone_id) or 0
+	entry.zone = zone
+	entry.cfg_file = cfg_file
+	entry.level = level_name
+	entry.smart_id = resolve_artifact_smart(zkey, obj, level_name, zone)
+	entry.layer = layer
+	entry.artefacts = artefacts
+	entry.coeffs = num_list(cfg_ini:r_string_ex(layer, coeff_name) or def_coeff)
+	entry.respawn_tries = math.max(1, math.floor(tonumber(cfg_ini:r_float_ex(layer, "respawn_tries") or cfg_ini:r_float_ex(layer, "artefact_count") or def_respawn_tries) or 1))
+	entry.max_artefacts = math.max(1, math.floor(tonumber(cfg_ini:r_float_ex(layer, "max_artefacts") or def_max_artefacts) or 1))
+	entry.next_slot = tonumber(entry.next_slot) or 0
+	entry.source = source or entry.source or "spawn_ini"
+	return entry
+end
+
+local function choose_virtual_artifact_section(entry)
+	local artefacts = entry and entry.artefacts or nil
+	if not (artefacts and #artefacts > 0) then
+		return nil
+	end
+	local attempts = #artefacts
+	local start = math.random(attempts)
+	for offset = 0, attempts - 1 do
+		local idx = ((start + offset - 1) % attempts) + 1
+		local token = artefacts[idx]
+		local sections = artifact_sections_for_token(token)
+		if sections and #sections > 0 then
+			return sections[math.random(#sections)]
+		end
+	end
+	return nil
+end
+
+local function register_virtual_artifact(entry, section)
+	if not (entry and entry.key and section and section_is_artifact(section)) then
+		return nil
+	end
+	local smart_id = entry.smart_id
+	if not (smart_id and alife_object and alife_object(smart_id)) then
+		smart_id = resolve_artifact_smart(entry.key, zone_object(entry.zone), entry.level, entry.zone)
+		entry.smart_id = smart_id
+	end
+	if not smart_id then
+		return nil
+	end
+
+	entry.next_slot = (tonumber(entry.next_slot) or 0) + 1
+	local artifact_id = virtual_artifact_id(entry.zone_id, entry.next_slot)
+	while M.artifacts[artifact_id] do
+		entry.next_slot = entry.next_slot + 1
+		artifact_id = virtual_artifact_id(entry.zone_id, entry.next_slot)
+	end
+
+	M.virtual_artifacts[artifact_id] = {
+		zone = entry.key,
+		level = entry.level,
+		smart = smart_id,
+		section = section,
+		cfg_file = entry.cfg_file,
+	}
+	M.virtual_zone_counts[entry.key] = (tonumber(M.virtual_zone_counts[entry.key]) or 0) + 1
+	M.artifacts[artifact_id] = true
+	M.artifact_zone[artifact_id] = entry.key
+	M.artifact_level[artifact_id] = entry.level
+	M.artifact_section[artifact_id] = section
+	M.artifact_smart[artifact_id] = smart_id
+	add_artifact_to_bucket(M.zone_artifacts, entry.key, artifact_id)
+	add_artifact_to_bucket(M.smart_artifacts, smart_id, artifact_id)
+	recalc_smart_artefact_flag(smart_id)
+	persist_virtual_artifact(artifact_id)
+	mark_artifact_registry_changed()
+	return artifact_id
+end
+
+local function try_spawn_virtual_artifacts(entry)
+	if not (entry and entry.key and entry.level) then
+		return 0
+	end
+	local count = tonumber(M.virtual_zone_counts[entry.key]) or 0
+	if count >= entry.max_artefacts then
+		return 0
+	end
+	local now = now_ms()
+	if entry.next_spawn_attempt and now > 0 and now < entry.next_spawn_attempt then
+		return 0
+	end
+
+	local tries = math.min(entry.respawn_tries, entry.max_artefacts - count)
+	local spawned = 0
+	local chance = virtual_spawn_chance()
+	for _ = 1, tries do
+		if math.random(1, 100) <= chance then
+			local section = choose_virtual_artifact_section(entry)
+			if register_virtual_artifact(entry, section) then
+				spawned = spawned + 1
+			end
+		end
+	end
+	entry.next_spawn_attempt = now > 0 and (now + VIRTUAL_SPAWN_COOLDOWN_MS) or nil
+	return spawned
+end
+
+local function ensure_virtual_artifacts_for_levels(level_set)
+	for level_name in pairs(level_set or {}) do
+		local bucket = M.virtual_zones_by_level[level_name]
+		for zkey in pairs(bucket or {}) do
+			local entry = M.virtual_zones[zkey]
+			if entry then
+				try_spawn_virtual_artifacts(entry)
+			end
+		end
+	end
+end
+
+local function restore_virtual_artifact_for_squad(squad, artifact_id)
+	artifact_id = tonumber(artifact_id)
+	if not (squad and artifact_id and artifact_id < 0) then
+		return false
+	end
+	if M.virtual_artifacts[artifact_id] then
+		return true
+	end
+	local smart_id = tonumber(squad.zhopa2_artifact_smart) or tonumber(squad.zhopa2_target)
+	local smart = smart_id and alife_object and alife_object(smart_id) or nil
+	local section = squad.zhopa2_artifact_section
+	if not (smart and section_is_artifact(section)) then
+		return false
+	end
+	local zkey = squad.zhopa2_artifact_zone
+	if type(zkey) ~= "string" or zkey == "" or string.sub(zkey, 1, 9) == "restored:" then
+		zkey = virtual_artifact_zone_key(artifact_id) or zkey
+	end
+	if type(zkey) ~= "string" or zkey == "" then
+		zkey = "restored:" .. tostring(artifact_id)
+	end
+	local zone_entry = M.virtual_zones[zkey]
+	local level_name = (zone_entry and zone_entry.level) or obj_level(smart)
+	M.virtual_artifacts[artifact_id] = {
+		zone = zkey,
+		level = level_name,
+		smart = smart_id,
+		section = section,
+		cfg_file = (zone_entry and zone_entry.cfg_file) or "restored",
+	}
+	M.artifacts[artifact_id] = true
+	M.artifact_zone[artifact_id] = zkey
+	M.artifact_level[artifact_id] = level_name
+	M.artifact_section[artifact_id] = section
+	M.artifact_smart[artifact_id] = smart_id
+	add_artifact_to_bucket(M.zone_artifacts, zkey, artifact_id)
+	add_artifact_to_bucket(M.smart_artifacts, smart_id, artifact_id)
+	recalc_smart_artefact_flag(smart_id)
+	persist_virtual_artifact(artifact_id)
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.register_anomaly_zone(zone, cfg_file, source)
+	local entry = read_virtual_zone_entry(zone, cfg_file, source)
+	if not entry then
+		return false
+	end
+	local old = M.virtual_zones[entry.key]
+	if old and old.level ~= entry.level then
+		remove_virtual_zone_from_level(entry.key, old.level)
+	end
+	M.virtual_zones[entry.key] = entry
+	local bucket = zone_level_bucket(entry.level)
+	if bucket then
+		bucket[entry.key] = true
+	end
+	mark_artifact_registry_changed()
+	return true
+end
+
+function M.is_virtual_artifact(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	return artifact_id ~= nil and M.virtual_artifacts[artifact_id] ~= nil
+end
+
+function M.virtual_artifact_data(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	return artifact_id and M.virtual_artifacts[artifact_id] or nil
+end
+
+function M.virtual_artifacts_for_zone(zone, only_reserved)
+	local zkey = zone_key(zone)
+	local bucket = zkey and M.zone_artifacts[zkey] or nil
+	if not bucket then
+		return {}
+	end
+	local out = {}
+	for artifact_id in pairs(bucket) do
+		local virtual = M.virtual_artifacts[artifact_id]
+		if virtual and (only_reserved ~= true or artifact_reserved(artifact_id)) then
+			out[#out + 1] = {
+				artifact_id = artifact_id,
+				section = virtual.section,
+				level = virtual.level,
+				smart = virtual.smart,
+				zone = virtual.zone,
+			}
+		end
+	end
+	return out
+end
+
+function M.materialize_virtual_artifact(virtual_id, real_id, zone, section)
+	virtual_id = tonumber(virtual_id)
+	real_id = tonumber(real_id)
+	if not (virtual_id and virtual_id < 0 and real_id and real_id > 0 and M.virtual_artifacts[virtual_id]) then
+		return false
+	end
+	local squad_id = tonumber(M.artifact_reserved_by[virtual_id])
+	local old_smart_id = M.artifact_smart[virtual_id]
+	local virtual_section = section or M.artifact_section[virtual_id]
+	local squad = squad_id and alife_object and alife_object(squad_id) or nil
+
+	M.unregister_artifact(virtual_id, "virtual_artifact_materialized")
+	M.register_artifact(real_id, zone, virtual_section)
+
+	if squad_id then
+		M.squad_artifact_reservation[squad_id] = real_id
+		M.artifact_reserved_by[real_id] = squad_id
+	end
+	if squad then
+		squad.zhopa2_artifact_id = real_id
+		squad.zhopa2_artifact_smart = M.artifact_smart[real_id]
+		squad.zhopa2_artifact_zone = M.artifact_zone[real_id]
+		squad.zhopa2_artifact_section = M.artifact_section[real_id]
+		squad.zhopa2_artifact_collect_started = nil
+		squad.zhopa2_artifact_pickup_npc_id = nil
+	end
+	recalc_smart_artefact_flag(old_smart_id)
+	recalc_smart_artefact_flag(M.artifact_smart[real_id])
+	mark_artifact_registry_changed()
+	return true
 end
 
 function M.register_artifact(artifact_id, zone, section)
@@ -781,9 +1380,17 @@ function M.unregister_artifact(artifact_id, reason)
 	end
 	local smart_id = M.artifact_smart[artifact_id]
 	local zkey = M.artifact_zone[artifact_id]
+	local virtual = M.virtual_artifacts[artifact_id]
 	M.artifact_reserved_by[artifact_id] = nil
 	remove_artifact_from_zone_bucket(artifact_id, zkey)
 	remove_artifact_from_smart_bucket(artifact_id, smart_id)
+	if virtual then
+		M.virtual_artifacts[artifact_id] = nil
+		remove_persisted_virtual_artifact(artifact_id)
+		if zkey and M.virtual_zone_counts[zkey] then
+			M.virtual_zone_counts[zkey] = math.max(0, (tonumber(M.virtual_zone_counts[zkey]) or 0) - 1)
+		end
+	end
 	M.artifact_zone[artifact_id] = nil
 	M.artifact_smart[artifact_id] = nil
 	M.artifact_level[artifact_id] = nil
@@ -817,15 +1424,33 @@ end
 
 function M.reserve_artifact_for_squad(squad, artifact_id)
 	artifact_id = tonumber(artifact_id)
-	if not (squad and squad.id and artifact_id and artifact_is_valid(artifact_id)) then
+	local squad_id = squad and tonumber(squad.id) or nil
+	if artifact_id and artifact_id < 0 and not artifact_is_valid(artifact_id) then
+		restore_virtual_artifact_for_squad(squad, artifact_id)
+	end
+	if not (squad_id and artifact_id and artifact_is_valid(artifact_id)) then
 		return false
 	end
-	local old = M.squad_artifact_reservation[squad.id]
-	M.squad_artifact_reservation[squad.id] = artifact_id
+	if artifact_reserved_for_other_squad(artifact_id, squad) then
+		return false
+	end
+	local old = tonumber(M.squad_artifact_reservation[squad_id]) or tonumber(squad.zhopa2_artifact_id)
+	if old and old ~= artifact_id and tonumber(M.artifact_reserved_by[old]) == squad_id then
+		if M.virtual_artifacts[old] then
+			M.unregister_artifact(old, "virtual_artifact_reservation_released")
+		else
+			M.artifact_reserved_by[old] = nil
+		end
+	end
+	M.squad_artifact_reservation[squad_id] = artifact_id
+	M.artifact_reserved_by[artifact_id] = squad_id
 	squad.zhopa2_artifact_id = artifact_id
 	squad.zhopa2_artifact_smart = M.artifact_smart[artifact_id]
 	squad.zhopa2_artifact_zone = M.artifact_zone[artifact_id]
 	squad.zhopa2_artifact_section = M.artifact_section[artifact_id]
+	if M.virtual_artifacts[artifact_id] then
+		persist_virtual_artifact(artifact_id)
+	end
 	if old and old ~= artifact_id then
 		recalc_smart_artefact_flag(M.artifact_smart[old])
 	end
@@ -843,17 +1468,47 @@ function M.release_artifact_reservation(squad_or_id, reason)
 	local squad = type(squad_or_id) == "table" and squad_or_id or (alife_object and alife_object(squad_id) or nil)
 	local artifact_id = M.squad_artifact_reservation[squad_id] or (squad and tonumber(squad.zhopa2_artifact_id) or nil)
 	M.squad_artifact_reservation[squad_id] = nil
+	if artifact_id and tonumber(M.artifact_reserved_by[artifact_id]) == squad_id then
+		M.artifact_reserved_by[artifact_id] = nil
+	end
 	if squad then
 		squad.zhopa2_artifact_id = nil
 		squad.zhopa2_artifact_smart = nil
 		squad.zhopa2_artifact_zone = nil
 		squad.zhopa2_artifact_section = nil
 	end
+	if artifact_id and M.virtual_artifacts[artifact_id] then
+		M.unregister_artifact(artifact_id, reason or "virtual_artifact_reservation_released")
+		return true
+	end
 	if artifact_id then
 		recalc_smart_artefact_flag(M.artifact_smart[artifact_id])
 	end
 	mark_artifact_registry_changed()
 	return true
+end
+
+local function restore_virtual_artifact_reservations_from_squads()
+	local board = simboard()
+	if board and type(board.zhopa2_ensure_buckets) == "function" then
+		board:zhopa2_ensure_buckets()
+	end
+	local squads = board and board.squads or nil
+	if not squads then
+		return 0
+	end
+	local restored = 0
+	for squad_id, stored_squad in pairs(squads) do
+		local squad = alife_object and alife_object(squad_id) or stored_squad
+		local real_squad_id = tonumber(squad and squad.id) or tonumber(squad_id)
+		local artifact_id = tonumber(squad and squad.zhopa2_artifact_id)
+		if squad and real_squad_id and squad.zhopa2_task == "ARTEFACT" and artifact_id and artifact_id < 0 then
+			if M.reserve_artifact_for_squad(squad, artifact_id) then
+				restored = restored + 1
+			end
+		end
+	end
+	return restored
 end
 
 function M.artifact_candidate_smarts_on_levels(levels, squad)
@@ -864,7 +1519,7 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 			return false
 		end)
 		for artifact_id in pairs(M.artifacts) do
-			if not M.artifact_smart[artifact_id] and artifact_is_valid(artifact_id) and level_set[M.artifact_level[artifact_id]] then
+			if not M.virtual_artifacts[artifact_id] and not M.artifact_smart[artifact_id] and artifact_is_valid(artifact_id) and level_set[M.artifact_level[artifact_id]] then
 				local art = alife_object and alife_object(artifact_id) or nil
 				local smart_id = resolve_artifact_smart(artifact_id, art, M.artifact_level[artifact_id], M.artifact_zone[artifact_id])
 				if smart_id then
@@ -881,7 +1536,7 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 			local smart_level = smart and obj_level(smart) or nil
 			if smart and level_set[smart_level] then
 				for artifact_id in pairs(bucket) do
-					if artifact_is_valid(artifact_id) then
+					if not M.virtual_artifacts[artifact_id] and artifact_is_valid(artifact_id) and not artifact_reserved_for_other_squad(artifact_id, squad) then
 						out[#out + 1] = {
 							smart = smart,
 							artifact_id = artifact_id,
@@ -898,6 +1553,30 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 		end
 		for i = 1, #stale do
 			M.unregister_artifact(stale[i], "artifact_stale")
+		end
+		if #out > 0 then
+			return out
+		end
+
+		ensure_virtual_artifacts_for_levels(level_set)
+		for smart_id, bucket in pairs(M.smart_artifacts) do
+			local smart = alife_object and alife_object(smart_id) or nil
+			local smart_level = smart and obj_level(smart) or nil
+			if smart and level_set[smart_level] then
+				for artifact_id in pairs(bucket) do
+					if M.virtual_artifacts[artifact_id] and artifact_is_valid(artifact_id) and not artifact_reserved_for_other_squad(artifact_id, squad) then
+						out[#out + 1] = {
+							smart = smart,
+							artifact_id = artifact_id,
+							zone = M.artifact_zone[artifact_id],
+							section = M.artifact_section[artifact_id],
+							level = M.artifact_level[artifact_id] or smart_level,
+							virtual = true,
+						}
+						break
+					end
+				end
+			end
 		end
 		return out
 	end)
@@ -916,6 +1595,45 @@ function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
 	M.squad_artifact_cargo[squad.id] = { count = count, value = amount, sections = squad.zhopa2_artifact_cargo_sections, last_id = squad.zhopa2_artifact_cargo_last_id }
 	squad.zhopa2_last_result = reason or "artifact_cargo"
 	return true
+end
+
+function M.sync_artifact_cargo(squad)
+	if not (squad and squad.id) then
+		return false
+	end
+	local count = tonumber(squad.zhopa2_artifact_cargo_count) or 0
+	if count <= 0 then
+		M.squad_artifact_cargo[squad.id] = nil
+		return true
+	end
+	M.squad_artifact_cargo[squad.id] = {
+		count = count,
+		value = tonumber(squad.zhopa2_artifact_cargo_value) or 0,
+		sections = squad.zhopa2_artifact_cargo_sections,
+		last_id = tonumber(squad.zhopa2_artifact_cargo_last_id),
+	}
+	return true
+end
+
+function M.consume_artifact_cargo(squad, count, value, reason)
+	if not (squad and squad.id) then
+		return false
+	end
+	count = math.max(1, tonumber(count) or 1)
+	value = math.max(0, tonumber(value) or 0)
+	local current_count = tonumber(squad.zhopa2_artifact_cargo_count) or 0
+	if current_count <= 0 then
+		M.squad_artifact_cargo[squad.id] = nil
+		return false
+	end
+	local next_count = math.max(0, current_count - count)
+	if next_count <= 0 then
+		return M.clear_artifact_cargo(squad, reason or "artifact_cargo_consumed")
+	end
+	squad.zhopa2_artifact_cargo_count = next_count
+	squad.zhopa2_artifact_cargo_value = math.max(0, (tonumber(squad.zhopa2_artifact_cargo_value) or 0) - value)
+	squad.zhopa2_last_result = reason or "artifact_cargo_consumed"
+	return M.sync_artifact_cargo(squad)
 end
 
 function M.clear_artifact_cargo(squad, reason)
@@ -1167,6 +1885,12 @@ function M.on_smart_update(smart)
 	end
 end
 
+local function server_entity_on_register(se_obj, type_name)
+	if type_name == "se_zone_anom" or type_name == "se_zone_visual" or anomaly_cfg_from_spawn_ini(se_obj) then
+		M.register_anomaly_zone(se_obj, nil, type_name or "server_entity")
+	end
+end
+
 local function server_entity_on_unregister(se_obj, type_name)
 	local is_artifact = false
 	if type_name == "se_artefact" then
@@ -1184,16 +1908,32 @@ local function server_entity_on_unregister(se_obj, type_name)
 	end
 end
 
+function M.on_game_load()
+	restore_persisted_virtual_artifacts()
+	restore_virtual_artifact_reservations_from_squads()
+end
+
+function M.actor_on_first_update()
+	restore_persisted_virtual_artifacts()
+	restore_virtual_artifact_reservations_from_squads()
+end
+
 function M.on_game_start()
 	if not RegisterScriptCallback then
 		return
 	end
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "smart_terrain_on_update", M.on_smart_update)
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
 		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
 	end
 	RegisterScriptCallback("smart_terrain_on_update", M.on_smart_update)
+	RegisterScriptCallback("server_entity_on_register", server_entity_on_register)
 	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+	RegisterScriptCallback("on_game_load", M.on_game_load)
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
 end
 
 function on_game_start()

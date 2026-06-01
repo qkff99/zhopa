@@ -92,6 +92,10 @@ local function zhopa2_cfg_num(key, default)
 	return default
 end
 
+local function zhopa2_debug_print_enabled()
+	return zhopa2_cfg_bool("debug_hud_enabled", false) == true
+end
+
 local function zhopa2_is_monster_squad(squad)
 	local perception = zhopa2_perception_mod()
 	if perception and type(perception.is_monster_squad) == "function" then
@@ -465,7 +469,7 @@ function sim_squad_scripted:zhopa2_assign_task(task, target_id, duration_sec, re
 	self:zhopa2_sync_base_camping_registry()
 	self:zhopa2_sync_task_rush()
 
-	if self.assigned_target_id ~= self.zhopa2_target then
+	if self.assigned_target_id ~= self.zhopa2_target or task == ZHOPA2_TASK_ARTEFACT then
 		self.assigned_target_id = nil
 		self.current_target_id = nil
 		self.current_action = 0
@@ -1298,7 +1302,9 @@ function sim_squad_scripted:create_npc(spawn_smart,pos,lvid,gvid)
 			local faction = ini_sys:r_string_ex(settings_id, "faction")
 			if (warfare_options.options.factions[faction]) then
 				if (warfare_options.options.factions[faction].random_squad_count) then
-					printf("!!! GETTING RANDOM COUNT FOR "..faction.." | " .. g_tonumber(warfare_options.options.factions[faction].min_random_squad_count) .. " - " .. g_tonumber(warfare_options.options.factions[faction].max_random_squad_count) .. " !!!!")
+					if zhopa2_debug_print_enabled() then
+						printf("!!! GETTING RANDOM COUNT FOR "..faction.." | " .. g_tonumber(warfare_options.options.factions[faction].min_random_squad_count) .. " - " .. g_tonumber(warfare_options.options.factions[faction].max_random_squad_count) .. " !!!!")
+					end
 					count[1] = g_tonumber(warfare_options.options.factions[faction].min_random_squad_count)
 					count[2] = g_tonumber(warfare_options.options.factions[faction].max_random_squad_count)
 				end
@@ -1444,7 +1450,7 @@ end
 
 function sim_squad_scripted:get_squad_community()
 	local squad_community = squad_community_by_behaviour[self.player_id]
-	if squad_community == nil then
+	if squad_community == nil and zhopa2_debug_print_enabled() then
 		printf("squad community is 'nil' for player_id [%s]", self.player_id)
 	end
 	return squad_community

@@ -32,6 +32,15 @@ function set_valuable_loot(id,val)
 end
 
 -- ZHOPA2 BEGIN: optional looting extension over vanilla corpse detection.
+local function zhopa2_debug_print_enabled()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function zhopa2_loot_mod()
 	local mod = rawget(_G, "zhopa2_loot")
 	if not mod and require then
@@ -475,7 +484,9 @@ end
 
 function evaluator_corpse:find_valid_target()
 	if (self.a.cstackprevent) then
-		printf("C Stack Overflow Prevention: warning xr_corpse_detection scheme making repeated calls without return; save now and reload!")
+		if zhopa2_debug_print_enabled() then
+			printf("C Stack Overflow Prevention: warning xr_corpse_detection scheme making repeated calls without return; save now and reload!")
+		end
 		return false
 	end
 

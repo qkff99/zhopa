@@ -57,6 +57,68 @@ local function zhopa2_unregister_zone_artifacts(zone, reason)
 		pcall(idx.unregister_zone_artifacts, zone, reason or "zone_cleanup")
 	end
 end
+
+local function zhopa2_register_anomaly_zone(zone, cfg_file, source)
+	local idx = zhopa2_index_mod()
+	if idx and type(idx.register_anomaly_zone) == "function" then
+		pcall(idx.register_anomaly_zone, zone, cfg_file, source or "bind_anomaly_zone")
+	end
+end
+
+local function zhopa2_virtual_artifacts_for_zone(zone)
+	local idx = zhopa2_index_mod()
+	if idx and type(idx.virtual_artifacts_for_zone) == "function" then
+		local ok, list = pcall(idx.virtual_artifacts_for_zone, zone, true)
+		return ok and list or {}
+	end
+	return {}
+end
+
+local function zhopa2_materialize_virtual_artifact(virtual_id, real_id, zone, section)
+	local idx = zhopa2_index_mod()
+	if idx and type(idx.materialize_virtual_artifact) == "function" then
+		pcall(idx.materialize_virtual_artifact, virtual_id, real_id, zone, section)
+	end
+end
+
+local function zhopa2_object_id(obj)
+	if not obj then
+		return nil
+	end
+	if obj.id ~= nil and type(obj.id) ~= "function" then
+		return obj.id
+	end
+	if type(obj.id) == "function" then
+		local ok, id = pcall(obj.id, obj)
+		return ok and id or nil
+	end
+	return nil
+end
+
+local function zhopa2_zone_key(zone)
+	local obj = zone and (zone.object or zone)
+	local id = zhopa2_object_id(obj)
+	return id and ("id:" .. tostring(id)) or nil
+end
+
+function zhopa2_materialize_virtual_artifact_online(virtual_id)
+	local idx = zhopa2_index_mod()
+	local virtual = idx and type(idx.virtual_artifact_data) == "function" and idx.virtual_artifact_data(virtual_id) or nil
+	if not (virtual and virtual.zone and virtual.section and db and db.anomaly_by_name) then
+		return nil, "virtual_materialize_no_data"
+	end
+	for _, zone in pairs(db.anomaly_by_name) do
+		if zone and zhopa2_zone_key(zone) == virtual.zone and type(zone.zhopa2_spawn_artefact_section) == "function" then
+			local real_id = zone:zhopa2_spawn_artefact_section(virtual.section)
+			if real_id then
+				zhopa2_materialize_virtual_artifact(virtual_id, real_id, zone, virtual.section)
+				return real_id, "virtual_materialized_online"
+			end
+			return nil, "virtual_materialize_spawn_failed"
+		end
+	end
+	return nil, "virtual_materialize_zone_offline"
+end
 -- ZHOPA2 END
 
 local function actor_on_first_update()
@@ -285,6 +347,9 @@ function anomaly_zone_binder:__init(obj) super(obj)
 	self.max_artefacts = self.max_artefacts_table[self.cur_layer]
 	self.applying_force_xz = self.forces_table[self.cur_layer].xz
 	self.applying_force_y = self.forces_table[self.cur_layer].y
+	-- ZHOPA2 BEGIN: expose anomaly cfg to offline virtual artifact economy.
+	zhopa2_register_anomaly_zone(self, filename, "bind_anomaly_zone")
+	-- ZHOPA2 END
 end
 
 function anomaly_zone_binder:disable_anomaly_fields()
@@ -430,14 +495,23 @@ function anomaly_zone_binder:spawn_artefact_randomly()
 	
 	local size_c = #arty_collection[rnd_artefact_typ]
 	rnd_artefact = arty_collection[rnd_artefact_typ][math_random(size_c)]
-	print_debug("artefact [%s] spawned at: %s", rnd_artefact, self.ini:r_string_ex("anomal_zone","field_name") or "")
+	return self:zhopa2_spawn_artefact_section(rnd_artefact)
+end
 
+function anomaly_zone_binder:zhopa2_spawn_artefact_section(rnd_artefact)
+	if not rnd_artefact then
+		return nil
+	end
+	print_debug("artefact [%s] spawned at: %s", rnd_artefact, self.ini:r_string_ex("anomal_zone","field_name") or "")
 	local rnd_path_name			= self:get_artefact_path()
 	local rnd_path				= patrol(rnd_path_name)
-	local rnd_path_point		= math_random(0, rnd_path:count() - 1)
+	local rnd_path_point		= math.random(0, rnd_path:count() - 1)
 	local pos = rnd_path:point(rnd_path_point)
 	pos.y = pos.y + 1 -- spawn artefacts 1 meter above the point
 	local artefact_obj			= alife_create_item( rnd_artefact , { pos , self.object:level_vertex_id() , self.object:game_vertex_id() })
+	if not artefact_obj then
+		return nil
+	end
 
 	artefact_ways_by_id[artefact_obj.id] = rnd_path_name
 	artefact_points_by_id[artefact_obj.id] = rnd_path_point
@@ -448,7 +522,22 @@ function anomaly_zone_binder:spawn_artefact_randomly()
 	zhopa2_register_artifact(artefact_obj.id, self, rnd_artefact)
 	-- ZHOPA2 END
 	self.spawned_count = self.spawned_count + 1
+	return artefact_obj.id
+end
 
+function anomaly_zone_binder:zhopa2_materialize_virtual_artifacts()
+	local virtuals = zhopa2_virtual_artifacts_for_zone(self)
+	for i = 1, #virtuals do
+		local entry = virtuals[i]
+		local virtual_id = entry and tonumber(entry.artifact_id)
+		local section = entry and entry.section
+		if virtual_id and section then
+			local real_id = self:zhopa2_spawn_artefact_section(section)
+			if real_id then
+				zhopa2_materialize_virtual_artifact(virtual_id, real_id, self, section)
+			end
+		end
+	end
 end
 
 function anomaly_zone_binder:refresh(from) -- new
@@ -522,6 +611,7 @@ function anomaly_zone_binder:net_spawn(se_abstract)
 	end
 	db.add_anomaly(self)
 	db.add_obj(self.object)
+	self:zhopa2_materialize_virtual_artifacts()
 	self:refresh()
 	return true
 end

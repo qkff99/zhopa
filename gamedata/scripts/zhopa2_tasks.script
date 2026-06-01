@@ -596,7 +596,9 @@ local function build_stalker_artefact(squad)
 	if not (cfg_bool("artefact_enabled", false) and artifacts and type(artifacts.pick_target) == "function") then
 		return nil
 	end
-	local target = artifacts.pick_target(squad, { level_mode = "current_or_neighbor", fallback_level_mode = "nearby", exclude_current = true })
+	local target = artifacts.pick_target(squad, { level_mode = "same", exclude_current = true })
+		or artifacts.pick_target(squad, { level_mode = "neighbor", exclude_current = true })
+		or artifacts.pick_target(squad, { level_mode = "nearby", exclude_current = true })
 	local smart = target and target.smart or nil
 	if not smart then
 		return nil
@@ -1039,6 +1041,23 @@ local function same_smart_or_close(squad, target)
 		return squad.position:distance_to_sqr(target.position)
 	end)
 	return ok and tonumber(dist) and dist <= max_dist * max_dist
+end
+
+local function artefact_offline_collect_ready(squad)
+	if not (squad and squad.zhopa2_task == M.TASK_ARTEFACT and squad.online ~= true) then
+		return false
+	end
+	local target_id = tonumber(squad.zhopa2_target) or squad.zhopa2_target
+	local target = target_id and alife_object(target_id) or nil
+	if not target then
+		return false
+	end
+	local squad_level_id = game_vertex_level_id(squad)
+	local target_level_id = game_vertex_level_id(target)
+	if not (squad_level_id and target_level_id and squad_level_id == target_level_id) then
+		return false
+	end
+	return type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target() == true
 end
 
 local function factions_hostile(community_1, community_2)
@@ -1622,7 +1641,8 @@ function M.update_squad(squad, memory)
 	end
 
 	if squad.zhopa2_task == M.TASK_ARTEFACT then
-		if type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target() then
+		local reached_artifact_target = type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target()
+		if reached_artifact_target or artefact_offline_collect_ready(squad) then
 			local artifacts = artifacts_mod()
 			if artifacts and type(artifacts.try_collect) == "function" then
 				local done, artifact_reason = artifacts.try_collect(squad)

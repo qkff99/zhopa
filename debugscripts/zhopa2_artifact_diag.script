@@ -1,0 +1,329 @@
+local M = {}
+
+local dumped = false
+
+local function debug_print_enabled()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if type(printf) == "function" then
+		printf("~ ZHOPA2 artifact diag | " .. fmt, ...)
+	else
+		print(string.format("~ ZHOPA2 artifact diag | " .. fmt, ...))
+	end
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return nil
+	end
+	local ok_fn, fn = pcall(function()
+		return obj[fn_name]
+	end)
+	if not (ok_fn and type(fn) == "function") then
+		return nil
+	end
+	local ok, result = pcall(fn, obj, ...)
+	return ok and result or nil
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	if ok and type(value) ~= "function" then
+		return value
+	end
+	return nil
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	local id = safe_field(obj, "id")
+	if id ~= nil then
+		return id
+	end
+	return safe_call(obj, "id")
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local name = safe_field(obj, "name")
+	if name then
+		return name
+	end
+	return safe_call(obj, "name")
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	local section_name = safe_field(obj, "section_name")
+	if section_name then
+		return section_name
+	end
+	local section = safe_field(obj, "section")
+	if section then
+		return section
+	end
+	section_name = safe_call(obj, "section_name")
+	if section_name then
+		return section_name
+	end
+	return safe_call(obj, "section")
+end
+
+local function named_id(obj_or_id)
+	local value_type = type(obj_or_id)
+	local obj
+	local id
+	if value_type == "table" or value_type == "userdata" then
+		obj = obj_or_id
+		id = object_id(obj)
+	else
+		id = tonumber(obj_or_id)
+		obj = id and alife_object and alife_object(id) or nil
+	end
+	id = object_id(obj) or id or obj_or_id
+	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id or "-"))
+end
+
+local function table_count(t)
+	local n = 0
+	for _ in pairs(t or {}) do
+		n = n + 1
+	end
+	return n
+end
+
+local function sorted_keys(t)
+	local out = {}
+	for key in pairs(t or {}) do
+		out[#out + 1] = key
+	end
+	table.sort(out, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	return out
+end
+
+local function obj_level(obj)
+	local p = rawget(_G, "zhopa2_perception")
+	if p and type(p.obj_level) == "function" then
+		return p.obj_level(obj)
+	end
+	if not (obj and obj.m_game_vertex_id and game_graph and alife) then
+		return nil
+	end
+	local gg = game_graph()
+	local sim = alife()
+	if not (gg and sim and gg:valid_vertex_id(obj.m_game_vertex_id)) then
+		return nil
+	end
+	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+end
+
+local function artifact_valid(idx, artifact_id)
+	if not idx then
+		return false
+	end
+	if idx.virtual_artifacts and idx.virtual_artifacts[artifact_id] then
+		return true
+	end
+	local obj = alife_object and alife_object(artifact_id) or nil
+	return obj ~= nil and tonumber(obj.parent_id) == 65535
+end
+
+local function dump_storage()
+	local state = alife_storage_manager and alife_storage_manager.get_state and alife_storage_manager.get_state() or nil
+	local store = state and state.zhopa2_virtual_artifacts or nil
+	local artifacts = store and store.artifacts or nil
+	log("storage present=%s virtual_store=%s artifacts=%s", tostring(state ~= nil), tostring(store ~= nil), tostring(table_count(artifacts)))
+	for _, key in ipairs(sorted_keys(artifacts)) do
+		local row = artifacts[key]
+		if type(row) == "table" then
+			log(
+				"storage artifact id=%s section=%s level=%s smart=%s zone=%s reserved_by=%s cfg=%s",
+				tostring(key),
+				tostring(row.section or "-"),
+				tostring(row.level or "-"),
+				tostring(row.smart or "-"),
+				tostring(row.zone or "-"),
+				tostring(row.reserved_by or "-"),
+				tostring(row.cfg_file or "-")
+			)
+		else
+			log("storage artifact id=%s malformed=%s", tostring(key), tostring(row))
+		end
+	end
+end
+
+local function dump_virtual_zones(idx)
+	log(
+		"virtual zones total=%s levels=%s zone_counts=%s",
+		tostring(table_count(idx.virtual_zones)),
+		tostring(table_count(idx.virtual_zones_by_level)),
+		tostring(table_count(idx.virtual_zone_counts))
+	)
+	for _, level_name in ipairs(sorted_keys(idx.virtual_zones_by_level)) do
+		local bucket = idx.virtual_zones_by_level[level_name]
+		log("virtual level level=%s zones=%s", tostring(level_name), tostring(table_count(bucket)))
+	end
+	for _, zkey in ipairs(sorted_keys(idx.virtual_zones)) do
+		local z = idx.virtual_zones[zkey]
+		local art_tokens = z and z.artefacts and table.concat(z.artefacts, ",") or "-"
+		local coeffs = z and z.coeffs and table.concat(z.coeffs, ",") or "-"
+		log(
+			"virtual zone key=%s level=%s smart=%s zone_id=%s cfg=%s source=%s layer=%s max=%s tries=%s next_slot=%s count=%s arts=[%s] coeffs=[%s]",
+			tostring(zkey),
+			tostring(z and z.level or "-"),
+			tostring(z and z.smart_id or "-"),
+			tostring(z and z.zone_id or "-"),
+			tostring(z and z.cfg_file or "-"),
+			tostring(z and z.source or "-"),
+			tostring(z and z.layer or "-"),
+			tostring(z and z.max_artefacts or "-"),
+			tostring(z and z.respawn_tries or "-"),
+			tostring(z and z.next_slot or "-"),
+			tostring(idx.virtual_zone_counts and idx.virtual_zone_counts[zkey] or 0),
+			art_tokens,
+			coeffs
+		)
+	end
+end
+
+local function dump_artifacts(idx)
+	log(
+		"artifact index revision=%s artifacts=%s virtual=%s smart_buckets=%s zone_buckets=%s reservations=%s",
+		tostring(idx.artifact_revision or "-"),
+		tostring(table_count(idx.artifacts)),
+		tostring(table_count(idx.virtual_artifacts)),
+		tostring(table_count(idx.smart_artifacts)),
+		tostring(table_count(idx.zone_artifacts)),
+		tostring(table_count(idx.artifact_reserved_by))
+	)
+	for _, artifact_id in ipairs(sorted_keys(idx.artifacts)) do
+		local art = alife_object and alife_object(artifact_id) or nil
+		log(
+			"artifact id=%s virtual=%s valid=%s section=%s real_section=%s level=%s smart=%s zone=%s reserved_by=%s obj=%s parent=%s",
+			tostring(artifact_id),
+			tostring(idx.virtual_artifacts and idx.virtual_artifacts[artifact_id] ~= nil),
+			tostring(artifact_valid(idx, artifact_id)),
+			tostring(idx.artifact_section and idx.artifact_section[artifact_id] or "-"),
+			tostring(object_section(art) or "-"),
+			tostring(idx.artifact_level and idx.artifact_level[artifact_id] or "-"),
+			tostring(idx.artifact_smart and idx.artifact_smart[artifact_id] or "-"),
+			tostring(idx.artifact_zone and idx.artifact_zone[artifact_id] or "-"),
+			tostring(idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
+			named_id(art or artifact_id),
+			tostring(art and art.parent_id or "-")
+		)
+	end
+	for _, smart_id in ipairs(sorted_keys(idx.smart_artifacts)) do
+		local flags = idx.smart_task_flags and idx.smart_task_flags[smart_id] or nil
+		log(
+			"smart bucket smart=%s count=%s available=%s",
+			named_id(smart_id),
+			tostring(table_count(idx.smart_artifacts[smart_id])),
+			tostring(flags and flags.artefact_available == true)
+		)
+	end
+	for _, artifact_id in ipairs(sorted_keys(idx.artifact_reserved_by)) do
+		local squad_id = idx.artifact_reserved_by[artifact_id]
+		log("reservation artifact=%s squad=%s reverse=%s", tostring(artifact_id), named_id(squad_id), tostring(idx.squad_artifact_reservation and idx.squad_artifact_reservation[squad_id] or "-"))
+	end
+end
+
+local function dump_simboard_tasks(idx)
+	local board = rawget(_G, "SIMBOARD")
+	log(
+		"simboard present=%s smarts=%s squads=%s squad_levels=%s",
+		tostring(board ~= nil),
+		tostring(table_count(board and board.smarts)),
+		tostring(table_count(board and board.squads)),
+		tostring(table_count(board and board.zhopa2_squads_by_level))
+	)
+	for _, squad_id in ipairs(sorted_keys(board and board.squads)) do
+		local squad = alife_object and alife_object(squad_id) or board.squads[squad_id]
+		if squad and squad.zhopa2_task == "ARTEFACT" then
+			local artifact_id = tonumber(squad.zhopa2_artifact_id) or (idx.squad_artifact_reservation and tonumber(idx.squad_artifact_reservation[squad_id]))
+			log(
+				"squad artifact task squad=%s online=%s level=%s target=%s current_smart=%s assigned_artifact=%s artifact_smart=%s artifact_zone=%s artifact_section=%s reserved_by=%s",
+				named_id(squad),
+				tostring(squad.online),
+				tostring(obj_level(squad) or "-"),
+				tostring(squad.zhopa2_target or "-"),
+				tostring(squad.current_smart_id or "-"),
+				tostring(artifact_id or "-"),
+				tostring(squad.zhopa2_artifact_smart or "-"),
+				tostring(squad.zhopa2_artifact_zone or "-"),
+				tostring(squad.zhopa2_artifact_section or "-"),
+				tostring(artifact_id and idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-")
+			)
+		end
+	end
+end
+
+function M.dump()
+	if not debug_print_enabled() then
+		return false
+	end
+	local idx = rawget(_G, "zhopa2_index")
+	log("begin actor_level=%s actor=%s idx=%s", tostring(obj_level(db and db.actor) or (level and level.name and level.name() or "-")), named_id(db and db.actor), tostring(idx ~= nil))
+	dump_storage()
+	if not idx then
+		log("end no_index")
+		return false
+	end
+	dump_virtual_zones(idx)
+	dump_artifacts(idx)
+	dump_simboard_tasks(idx)
+	log("end")
+	return true
+end
+
+function M.actor_on_first_update()
+	if dumped then
+		return
+	end
+	dumped = true
+	M.dump()
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_artifact_diag = M
+return M
