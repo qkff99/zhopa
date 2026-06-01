@@ -26,6 +26,8 @@ local RunDist
 local MaxDetectDistance
 local UseCorpseLootTable
 local LootTable
+
+-- ZHOPA2 BEGIN: targeted artifact gather tuning constants.
 local ZHOPA2_ARTIFACT_PICKUP_DIST = 2
 local ZHOPA2_ARTIFACT_APPROACH_MAX_DIST = 12
 local ZHOPA2_ARTIFACT_APPROACH_REACHED_DIST_SQR = 2.25
@@ -36,6 +38,7 @@ local ZHOPA2_APPROACH_PROGRESS_EPS_SQR = 0.25
 local ZHOPA2_APPROACH_FORWARD_STEPS = {4, 8, 12, 18, 25, 35, 50}
 local ZHOPA2_ARTIFACT_SCAN_MS = 3500
 local ZHOPA2_ARTIFACT_SCAN_STAGE = 5
+-- ZHOPA2 END
 
 -- ZHOPA2 BEGIN: optional looting extension over vanilla item gathering.
 local function zhopa2_debug_print_enabled()
@@ -1029,6 +1032,7 @@ end
 
 function eva_gather_itm:find_valid_item()
 	if (self.st.cstackprevent) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		if zhopa2_debug_print_enabled() then
 			printf("C Stack Overflow Prevention: warning xr_gather_items scheme making repeated calls without return; save now and reload!")
 		end

@@ -33,6 +33,7 @@ local squads_by_faction = {
 
 local s_find = string.find
 
+-- ZHOPA2 BEGIN: debug-gated vanilla diagnostic prints.
 local function zhopa2_debug_print_enabled()
 	local cfg = rawget(_G, "zhopa2_cfg")
 	if not cfg and require then
@@ -47,6 +48,7 @@ local function zhopa2_debug_printf(fmt, ...)
 		printf(fmt, ...)
 	end
 end
+-- ZHOPA2 END
 
 local _mej = {
 	['logic@bar_zastava_guard_1_walk'] = "logic@duty_guard1",
@@ -419,12 +421,14 @@ function se_smart_terrain:fill_npc_info(obj)
 	--utils_data.debug_write(strformat("%s:%s:fill_npc_info %s",self:name(),self.id,obj and obj:name()))
 	local cls = obj.clsid and obj:clsid()
 	if not (cls) then 
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("fill_npc_info invalid clsid for %s",obj and obj:name())
 		return
 	end
 	
 	local stype = IsStalker(nil,cls) and 0 or IsMonster(nil,cls) and 1 or IsHelicopter(nil,cls) and 3 or nil
 	if not (stype) then 
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("fill_npc_info invalid stype for %s [clsid=%s]",obj and obj:name(),cls)
 		return
 	end 
@@ -459,6 +463,7 @@ function se_smart_terrain:register_npc(obj)
 	
 	local cls = obj.clsid and obj:clsid()
 	if not (cls) then 
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("register_npc no clsid! %s",obj and obj:name())
 		return
 	end 
@@ -555,6 +560,7 @@ local function validate_patrol_path(path_name,gg)
 		local cnt = p:count()
 		for i=0,cnt-1 do
 			if not (gg:valid_vertex_id(p:game_vertex_id(i))) then 
+				-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 				zhopa2_debug_printf("validate_patrol_path WARNING: %s: invalid game_vertex_id for point %s",path_name,i)
 				ret = false
 			end
@@ -766,6 +772,7 @@ function se_smart_terrain:select_npc_job(npc_info,now,surge_started)
 	--utils_data.debug_write(strformat("%s:select_npc_job %s",self:name()))
 	
 	if not (npc_info and npc_info.se_obj and npc_info.stype) then 
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s no npc_info!",self:name())
 		return
 	end
@@ -777,6 +784,7 @@ function se_smart_terrain:select_npc_job(npc_info,now,surge_started)
 	-- reference job table according to race
 	local jobs = npc_info.stype == 0 and self.stalker_jobs or npc_info.stype == 1 and self.monster_jobs or npc_info.stype == 3 and self.heli_jobs
 	if not (jobs) then 
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s no job table for %s [stype = %s]",self:name(),npc_info.se_obj:name(),npc_info.stype)
 		return
 	end
@@ -1146,6 +1154,7 @@ function se_smart_terrain:STATE_Read(packet, size)
 	end
 
 	if (self.load_info[65535]) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s:STATE_Read: invalid id in npc_info table. Check for save corruption or error in smart_terrain job system.", self:name())
 		self.load_info[65535] = nil
 	end
@@ -1503,17 +1512,20 @@ function se_smart_terrain:setup_logic(npc)
 
 	local npc_info = self.npc_info[npc:id()]
 	if not (npc_info) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s.setup_logic: npc_info is nil! for id=%s",self:name(),npc:id())
 		return
 	end
 	
 	if not (npc_info.se_obj) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s.setup_logic: npc_info.se_obj is nil! for id=%s",self:name(),npc:id())
 		return 
 	end
 
 	local job = npc_info.job
 	if not (job) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		zhopa2_debug_printf("%s.setup_logic: npc_info has no job! for id=%s",self:name(),npc:id())
 		self:unregister_npc(npc_info.se_obj)
 		self:register_npc(npc_info.se_obj)

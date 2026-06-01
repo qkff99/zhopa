@@ -484,6 +484,7 @@ end
 
 function evaluator_corpse:find_valid_target()
 	if (self.a.cstackprevent) then
+		-- ZHOPA2 hook: gate vanilla diagnostic print behind debug mode.
 		if zhopa2_debug_print_enabled() then
 			printf("C Stack Overflow Prevention: warning xr_corpse_detection scheme making repeated calls without return; save now and reload!")
 		end
