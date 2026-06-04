@@ -19,8 +19,8 @@ local C = {
 	AMMO_BUY_MIN = 3,
 }
 M.TRADE_EVENT_BUFFER_MAX = 50
-M.TRADE_ROUTE_VALUE_WEIGHT_STEP = 5000
-M.TRADE_ROUTE_MAX_VALUE_BONUS = 75
+M.TRADE_ROUTE_VALUE_WEIGHT_STEP = 1500
+M.TRADE_ROUTE_MAX_VALUE_BONUS = 180
 local OFFLINE_MONEY_DENOMS = {
 	{ section = "money_5000", value = 5000 },
 	{ section = "money_1000", value = 1000 },
@@ -1271,7 +1271,33 @@ local function spawn_trade_item_to_npc(npc, section)
 	return ok and item ~= nil
 end
 
-local function buy_missing_section(npc, trader, section, target_count, counts, payer)
+local function dynamic_news_nearby_activity_enabled()
+	if not (ui_options and type(ui_options.get) == "function") then
+		return false
+	end
+	local ok, enabled = pcall(ui_options.get, "alife/dynamic_news/nearby_activity_news")
+	return ok and enabled == true
+end
+
+local function emit_bought_items_news(npc, trader, bought_items)
+	if not (npc and trader and type(bought_items) == "table" and #bought_items > 0) then
+		return false
+	end
+	if not (dynamic_news_manager and type(dynamic_news_manager.get_dynamic_news) == "function") then
+		return false
+	end
+	if not dynamic_news_nearby_activity_enabled() then
+		return false
+	end
+	local ok_news, news = pcall(dynamic_news_manager.get_dynamic_news)
+	if not (ok_news and news and type(news.BoughtItems) == "function") then
+		return false
+	end
+	local ok = pcall(news.BoughtItems, news, npc, trader, bought_items)
+	return ok == true
+end
+
+local function buy_missing_section(npc, trader, section, target_count, counts, payer, bought_items)
 	payer = payer or npc
 	local have = counts[section] or 0
 	local target = tonumber(target_count) or 0
@@ -1289,6 +1315,9 @@ local function buy_missing_section(npc, trader, section, target_count, counts, p
 		end
 		have = have + 1
 		counts[section] = have
+		if bought_items then
+			bought_items[#bought_items + 1] = section
+		end
 		bought = true
 		M.print_trade_event("- NPC Trade | %s bought [%s] from %s for %s RU", object_name(npc), section, object_name(trader), price)
 	end
@@ -1315,20 +1344,22 @@ function M.execute_online_buy(npc, trader, opts)
 
 	local counts = inventory_section_counts(npc)
 	local bought_any = false
+	local bought_items = {}
 	local needed_ammo = needed_ammo_for_npc(npc)
 	if needed_ammo then
 		for section in pairs(needed_ammo) do
 			local bs = buy_sell_params(section)
 			local target = ammo_buy_target(bs)
 			if target and target > 0 then
-				local bought = buy_missing_section(npc, trader, section, target, counts, payer)
+				local bought = buy_missing_section(npc, trader, section, target, counts, payer, bought_items)
 				bought_any = bought or bought_any
 			end
 		end
 	end
 
-	bought_any = buy_missing_section(npc, trader, "bandage", C.MED_BANDAGE_KEEP, counts, payer) or bought_any
-	bought_any = buy_missing_section(npc, trader, "medkit", C.MEDKIT_KEEP, counts, payer) or bought_any
+	bought_any = buy_missing_section(npc, trader, "bandage", C.MED_BANDAGE_KEEP, counts, payer, bought_items) or bought_any
+	bought_any = buy_missing_section(npc, trader, "medkit", C.MEDKIT_KEEP, counts, payer, bought_items) or bought_any
+	emit_bought_items_news(npc, trader, bought_items)
 	return bought_any
 end
 

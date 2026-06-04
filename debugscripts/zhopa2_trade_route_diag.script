@@ -1,0 +1,773 @@
+local M = {}
+
+-- Copy this file to gamedata/scripts only for focused TRADE route diagnostics.
+local AUTO_PATCH_ENABLED = true
+local AUTO_DUMP_ON_FIRST_UPDATE = false
+local DUMP_DELAY_MS = 2000
+local RETRY_MS = 2000
+local MAX_ATTEMPTS = 20
+local MAX_EVENTS = 120
+local MAX_MANUAL_SQUADS = 20
+local MAX_MEMBERS_PER_SQUAD = 6
+local MAX_ITEMS_PER_MEMBER = 10
+local MAX_ROUTE_SMARTS_PER_DUMP = 30
+
+-- Optional filters for noisy saves. Leave nil to watch all squads.
+local TARGET_SQUAD_ID = nil
+local TARGET_NAME_CONTAINS = nil
+
+local installed = false
+local scheduled = false
+local dumped = false
+local next_dump_tg = nil
+local attempts = 0
+local event_count = 0
+local diag_internal = false
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function safe_mod(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function debug_print_enabled()
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 trade route diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 trade route diag | " .. fmt, ...))
+	end
+end
+
+local function can_log()
+	if event_count >= MAX_EVENTS then
+		return false
+	end
+	event_count = event_count + 1
+	return true
+end
+
+local function tg()
+	return type(time_global) == "function" and time_global() or 0
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return false, nil
+	end
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result, extra = pcall(fn, obj, ...)
+	return ok, result, extra
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return obj
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return id
+	end
+	ok, id = safe_call(obj, "id")
+	return ok and id or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return name
+	end
+	ok, name = safe_call(obj, "name")
+	return ok and name or nil
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	local ok, section = safe_call(obj, "section")
+	if ok and section then
+		return section
+	end
+	ok, section = safe_call(obj, "section_name")
+	if ok and section then
+		return section
+	end
+	ok, section = safe_field(obj, "section")
+	if ok and section ~= nil and type(section) ~= "function" then
+		return section
+	end
+	ok, section = safe_field(obj, "section_name")
+	return ok and section or nil
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if obj then
+		return obj
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, value = pcall(level.object_by_id, id)
+		if ok and value then
+			return value
+		end
+	end
+	return nil
+end
+
+local function item_price(item)
+	if item and type(item.cost) == "function" then
+		local ok, cost = pcall(item.cost, item)
+		if ok and cost then
+			return tonumber(cost) or 0
+		end
+	end
+	if item and type(item.Cost) == "function" then
+		local ok, cost = pcall(item.Cost, item)
+		if ok and cost then
+			return tonumber(cost) or 0
+		end
+	end
+	local section = object_section(item)
+	if ini_sys and section and type(ini_sys.r_float_ex) == "function" then
+		local ok, cost = pcall(ini_sys.r_float_ex, ini_sys, section, "cost")
+		if ok and cost then
+			return tonumber(cost) or 0
+		end
+	end
+	return 0
+end
+
+local function section_has_prefix(section, prefix)
+	return type(section) == "string" and string.sub(section, 1, string.len(prefix)) == prefix
+end
+
+local function is_artifact_item(item, section)
+	section = section or object_section(item)
+	if section_has_prefix(section, "af_") then
+		return true
+	end
+	if type(IsItem) == "function" then
+		local ok, value = pcall(IsItem, "artefact", section, item)
+		return ok and value ~= nil
+	end
+	return false
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_num) == "function" then
+		return tonumber(cfg.get_num(key, default)) or default
+	end
+	return default
+end
+
+local function join(list, limit)
+	if type(list) ~= "table" then
+		return "-"
+	end
+	limit = limit or #list
+	local out = {}
+	for i = 1, #list do
+		if i > limit then
+			out[#out + 1] = "..."
+			break
+		end
+		out[#out + 1] = tostring(list[i])
+	end
+	return #out > 0 and table.concat(out, ",") or "-"
+end
+
+local function table_count(t)
+	local n = 0
+	for _ in pairs(t or {}) do
+		n = n + 1
+	end
+	return n
+end
+
+local function sorted_keys(t)
+	local keys = {}
+	for k in pairs(t or {}) do
+		keys[#keys + 1] = k
+	end
+	table.sort(keys, function(a, b)
+		return tostring(a) < tostring(b)
+	end)
+	return keys
+end
+
+local function squad_matches(squad)
+	if not squad then
+		return false
+	end
+	local squad_id = tonumber(object_id(squad))
+	if TARGET_SQUAD_ID and squad_id ~= tonumber(TARGET_SQUAD_ID) then
+		return false
+	end
+	if TARGET_NAME_CONTAINS then
+		local name = tostring(object_name(squad) or "")
+		return string.find(name, TARGET_NAME_CONTAINS, 1, true) ~= nil
+	end
+	return true
+end
+
+local function is_post_rest_reason(reason)
+	return reason == "after_REST" or reason == "after_NIGHT_REST"
+end
+
+local function current_level_for_squad(squad)
+	local economy = safe_mod("zhopa2_economy")
+	local board = rawget(_G, "SIMBOARD")
+	if economy and type(economy._trade_route_current_level) == "function" then
+		local ok, level_name = pcall(economy._trade_route_current_level, squad, board)
+		if ok and level_name then
+			return level_name
+		end
+	end
+	local p = safe_mod("zhopa2_perception")
+	if p and type(p.obj_level) == "function" then
+		local ok, level_name = pcall(p.obj_level, squad)
+		if ok then
+			return level_name
+		end
+	end
+	return board and board.zhopa2_squad_level and board.zhopa2_squad_level[object_id(squad)] or nil
+end
+
+local function route_levels_for_squad(squad)
+	local economy = safe_mod("zhopa2_economy")
+	local board = rawget(_G, "SIMBOARD")
+	local current_level = current_level_for_squad(squad)
+	if economy and type(economy._trade_route_levels) == "function" then
+		local ok, levels = pcall(economy._trade_route_levels, current_level, { level_mode = "current_or_neighbor" })
+		if ok and type(levels) == "table" then
+			return current_level, levels
+		end
+	end
+	return current_level, current_level and { current_level } or {}
+end
+
+local function smart_brief(smart)
+	if not smart then
+		return "-"
+	end
+	return string.format("%s:%s", tostring(object_name(smart) or "-"), tostring(object_id(smart) or "-"))
+end
+
+local function squad_brief(squad)
+	if not squad then
+		return "-"
+	end
+	return string.format("%s:%s", tostring(object_name(squad) or "-"), tostring(object_id(squad) or "-"))
+end
+
+local function member_ids(squad)
+	local ids = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return ids
+	end
+	pcall(function()
+		for member in squad:squad_members() do
+			if member and member.id then
+				ids[#ids + 1] = tonumber(member.id) or member.id
+			end
+		end
+	end)
+	return ids
+end
+
+local function online_members(squad)
+	local economy = safe_mod("zhopa2_economy")
+	if economy and type(economy._online_squad_members) == "function" then
+		local ok, members = pcall(economy._online_squad_members, squad)
+		if ok and type(members) == "table" then
+			return members
+		end
+	end
+	local out = {}
+	local ids = member_ids(squad)
+	for i = 1, #ids do
+		local obj = online_object_by_id(ids[i])
+		if obj then
+			out[#out + 1] = obj
+		end
+	end
+	return out
+end
+
+local function inventory_scan(npc)
+	local data = {
+		total = 0,
+		artifacts = 0,
+		artifact_value = 0,
+		artifact_sections = {},
+	}
+	if not (npc and type(npc.iterate_inventory) == "function") then
+		return data
+	end
+	local function scan(_, item)
+		local section = object_section(item)
+		data.total = data.total + 1
+		if is_artifact_item(item, section) then
+			data.artifacts = data.artifacts + 1
+			data.artifact_value = data.artifact_value + item_price(item)
+			if #data.artifact_sections < MAX_ITEMS_PER_MEMBER then
+				data.artifact_sections[#data.artifact_sections + 1] = tostring(section or "-")
+			end
+		end
+	end
+	pcall(npc.iterate_inventory, npc, scan, npc)
+	return data
+end
+
+local function sell_plan_summary(npc)
+	local economy = safe_mod("zhopa2_economy")
+	local data = { ok = false, count = 0, value = 0, entries = {}, error = nil }
+	if not (economy and type(economy.build_online_sell_plan) == "function") then
+		data.error = "no_build_online_sell_plan"
+		return data
+	end
+	local ok, plan = pcall(economy.build_online_sell_plan, npc, nil)
+	if not ok then
+		data.error = tostring(plan)
+		return data
+	end
+	data.ok = true
+	if type(plan) ~= "table" then
+		return data
+	end
+	data.count = #plan
+	for i = 1, #plan do
+		local entry = plan[i]
+		local item = entry and entry.item
+		local section = entry and entry.section or object_section(item)
+		local price = 0
+		if type(economy.online_trade_sell_item_price) == "function" then
+			local ok_price, value = pcall(economy.online_trade_sell_item_price, npc, nil, item)
+			price = ok_price and tonumber(value) or 0
+		end
+		data.value = data.value + price
+		if #data.entries < MAX_ITEMS_PER_MEMBER then
+			data.entries[#data.entries + 1] = string.format("%s:%s:%s", tostring(section or "-"), tostring(entry and entry.reason or "-"), tostring(price))
+		end
+	end
+	return data
+end
+
+local function dump_members(squad)
+	local members = online_members(squad)
+	log("members squad [%s] online_members [%s] member_ids [%s]", squad_brief(squad), tostring(#members), join(member_ids(squad), 12))
+	for i = 1, math.min(#members, MAX_MEMBERS_PER_SQUAD) do
+		local npc = members[i]
+		local inv = inventory_scan(npc)
+		local plan = sell_plan_summary(npc)
+		log(
+			"member [%s/%s] npc [%s:%s] inventory total [%s] artifacts [%s] artifact_value [%s] artifact_sections [%s] sell_plan ok [%s] count [%s] value [%s] entries [%s] error [%s]",
+			tostring(i),
+			tostring(#members),
+			tostring(object_name(npc) or "-"),
+			tostring(object_id(npc) or "-"),
+			tostring(inv.total),
+			tostring(inv.artifacts),
+			tostring(inv.artifact_value),
+			join(inv.artifact_sections, MAX_ITEMS_PER_MEMBER),
+			tostring(plan.ok),
+			tostring(plan.count),
+			tostring(plan.value),
+			join(plan.entries, MAX_ITEMS_PER_MEMBER),
+			tostring(plan.error or "-")
+		)
+	end
+end
+
+local function registry_weight(entry, squad, context)
+	if not entry then
+		return 0
+	end
+	if entry.enabled_key and not cfg_bool(entry.enabled_key, entry.enabled_default ~= false) then
+		return 0
+	end
+	local value = entry.weight_key and cfg_num(entry.weight_key, entry.weight_default or 1) or entry.weight_default or 1
+	value = tonumber(value) or 0
+	if value < 0 then
+		value = 0
+	end
+	if type(entry.weight_fn) == "function" then
+		diag_internal = true
+		local ok, dynamic_value = pcall(function()
+			return entry.weight_fn(squad, context, value)
+		end)
+		diag_internal = false
+		value = ok and tonumber(dynamic_value) or 0
+	end
+	return value
+end
+
+local function dump_registry_weights(squad, reason)
+	local tasks = safe_mod("zhopa2_tasks")
+	local list = tasks and tasks.task_registry and tasks.task_registry.stalker or nil
+	if type(list) ~= "table" then
+		log("registry squad [%s] no stalker task registry", squad_brief(squad))
+		return
+	end
+	local context = { assignment_reason = reason or "after_REST" }
+	local entries = {}
+	for i = 1, #list do
+		local entry = list[i]
+		entries[#entries + 1] = tostring(entry and entry.name or "?") .. "=" .. tostring(registry_weight(entry, squad, context))
+	end
+	log("registry squad [%s] context [%s] weights [%s]", squad_brief(squad), tostring(context.assignment_reason), join(entries, #entries))
+end
+
+local function dump_trade_profile(squad, reason)
+	local economy = safe_mod("zhopa2_economy")
+	if not economy then
+		log("profile squad [%s] economy missing", squad_brief(squad))
+		return
+	end
+	local ok_profile, has_work, work_reason, value = pcall(economy.squad_trade_route_profile, squad)
+	if not ok_profile then
+		log("profile squad [%s] profile_error [%s]", squad_brief(squad), tostring(has_work))
+	else
+		log("profile squad [%s] has_work [%s] reason [%s] value [%s]", squad_brief(squad), tostring(has_work), tostring(work_reason), tostring(value))
+	end
+	if type(economy.trade_route_task_weight) == "function" then
+		diag_internal = true
+		local ok_weight, weight, weight_reason, weight_value = pcall(economy.trade_route_task_weight, squad, cfg_num("stalker_trade_weight", 10), { level_mode = "current_or_neighbor", assignment_reason = reason or "after_REST" })
+		diag_internal = false
+		log("weight squad [%s] ok [%s] weight [%s] reason [%s] value [%s]", squad_brief(squad), tostring(ok_weight), tostring(weight), tostring(weight_reason), tostring(weight_value))
+	end
+	if type(economy.pick_trade_route_smart) == "function" then
+		local ok_pick, smart, pick_reason = pcall(economy.pick_trade_route_smart, squad, { level_mode = "current_or_neighbor" })
+		log("route_pick squad [%s] ok [%s] smart [%s] reason [%s]", squad_brief(squad), tostring(ok_pick), smart_brief(smart), tostring(pick_reason))
+	end
+end
+
+local function dump_route_candidates(squad)
+	local economy = safe_mod("zhopa2_economy")
+	local board = rawget(_G, "SIMBOARD")
+	local current_level, levels = route_levels_for_squad(squad)
+	log("route_levels squad [%s] current [%s] levels [%s] trade_bucket_levels [%s] flags [%s]", squad_brief(squad), tostring(current_level), join(levels, #levels), tostring(table_count(board and board.zhopa2_trade_smarts_by_level)), tostring(table_count(board and board.zhopa2_trade_smart_flags)))
+	if not (board and board.zhopa2_trade_smarts_by_level) then
+		return
+	end
+	local total = 0
+	local allowed = 0
+	for i = 1, #levels do
+		local level_name = levels[i]
+		local bucket = board.zhopa2_trade_smarts_by_level[level_name] or {}
+		for _, smart in pairs(bucket) do
+			total = total + 1
+			local flags = board.zhopa2_trade_smart_flags and board.zhopa2_trade_smart_flags[object_id(smart)] or nil
+			local ok_allowed, is_allowed = false, false
+			if economy and type(economy._trade_route_smart_allowed) == "function" then
+				ok_allowed, is_allowed = pcall(economy._trade_route_smart_allowed, squad, smart, level_name)
+			end
+			if ok_allowed and is_allowed then
+				allowed = allowed + 1
+			end
+			if total <= MAX_ROUTE_SMARTS_PER_DUMP then
+				log(
+					"route_candidate [%s] level [%s] smart [%s] allowed [%s/%s] flags provider [%s] customer [%s] route [%s]",
+					tostring(total),
+					tostring(level_name),
+					smart_brief(smart),
+					tostring(ok_allowed),
+					tostring(is_allowed),
+					tostring(flags and flags.provider),
+					tostring(flags and flags.customer),
+					tostring(flags and flags.trade_route)
+				)
+			end
+		end
+	end
+	log("route_candidates squad [%s] total [%s] allowed [%s]", squad_brief(squad), tostring(total), tostring(allowed))
+end
+
+function M.dump_squad(squad, reason)
+	if not squad then
+		log("dump_squad nil reason [%s]", tostring(reason))
+		return false
+	end
+	if not squad_matches(squad) then
+		return false
+	end
+	local current_smart = safe_alife_object(squad.smart_id)
+	local target = safe_alife_object(squad.zhopa2_target)
+	log(
+		"dump_start reason [%s] squad [%s] faction [%s] level [%s] task [%s] target [%s] smart [%s] action [%s] last_reason [%s] last_result [%s] trade_last [%s] trade_detail [%s]",
+		tostring(reason or "-"),
+		squad_brief(squad),
+		tostring(squad.player_id or "-"),
+		tostring(current_level_for_squad(squad) or "-"),
+		tostring(squad.zhopa2_task or "-"),
+		smart_brief(target),
+		smart_brief(current_smart),
+		tostring(squad.current_action or "-"),
+		tostring(squad.zhopa2_last_reason or "-"),
+		tostring(squad.zhopa2_last_result or "-"),
+		tostring(squad.zhopa2_last_trade_result or "-"),
+		tostring(squad.zhopa2_trade_detail or "-")
+	)
+	dump_registry_weights(squad, is_post_rest_reason(reason) and reason or "after_REST")
+	dump_trade_profile(squad, is_post_rest_reason(reason) and reason or "after_REST")
+	dump_route_candidates(squad)
+	dump_members(squad)
+	log("dump_end reason [%s] squad [%s]", tostring(reason or "-"), squad_brief(squad))
+	return true
+end
+
+function M.dump_squad_id(squad_id, reason)
+	local squad = safe_alife_object(squad_id)
+	if not squad then
+		log("dump_squad_id missing squad [%s]", tostring(squad_id))
+		return false
+	end
+	return M.dump_squad(squad, reason or "manual_squad_id")
+end
+
+local function squad_from_board(id, stored)
+	if stored and object_id(stored) then
+		return stored
+	end
+	return safe_alife_object(id)
+end
+
+function M.dump_all(reason)
+	local board = rawget(_G, "SIMBOARD")
+	if not (board and board.squads) then
+		log("dump_all no SIMBOARD.squads")
+		return false
+	end
+	local dumped_count = 0
+	for squad_id, stored in pairs(board.squads) do
+		if dumped_count >= MAX_MANUAL_SQUADS then
+			break
+		end
+		local squad = squad_from_board(squad_id, stored)
+		if squad and squad_matches(squad) then
+			local economy = safe_mod("zhopa2_economy")
+			local ok, has_work = false, false
+			if economy and type(economy.squad_trade_route_profile) == "function" then
+				ok, has_work = pcall(function()
+					local work = economy.squad_trade_route_profile(squad)
+					return work == true
+				end)
+			end
+			if squad.zhopa2_task == "REST" or squad.zhopa2_task == "NIGHT_REST" or squad.zhopa2_task == "TRADE" or (ok and has_work) then
+				dumped_count = dumped_count + 1
+				M.dump_squad(squad, reason or "manual_all")
+			end
+		end
+	end
+	log("dump_all end reason [%s] dumped [%s]", tostring(reason or "-"), tostring(dumped_count))
+	return dumped_count > 0
+end
+
+local function patch_tasks()
+	local tasks = safe_mod("zhopa2_tasks")
+	if not (tasks and type(tasks.assign_next_task) == "function") then
+		return false, "tasks_missing"
+	end
+	if tasks.zhopa2_trade_route_diag_original_assign_next_task then
+		return true
+	end
+	local original = tasks.assign_next_task
+	tasks.zhopa2_trade_route_diag_original_assign_next_task = original
+	tasks.assign_next_task = function(squad, reason, ...)
+		if not diag_internal and is_post_rest_reason(reason) and squad_matches(squad) and can_log() then
+			M.dump_squad(squad, "before_" .. tostring(reason))
+		end
+		local result = { original(squad, reason, ...) }
+		if not diag_internal and is_post_rest_reason(reason) and squad_matches(squad) and can_log() then
+			log(
+				"after_assign reason [%s] squad [%s] selected_task [%s] selected_target [%s] selected_reason [%s] selected_result [%s]",
+				tostring(reason),
+				squad_brief(squad),
+				tostring(squad and squad.zhopa2_task or "-"),
+				tostring(squad and squad.zhopa2_target or "-"),
+				tostring(squad and squad.zhopa2_last_reason or "-"),
+				tostring(squad and squad.zhopa2_last_result or "-")
+			)
+		end
+		return unpack(result)
+	end
+	return true
+end
+
+local function patch_economy()
+	local economy = safe_mod("zhopa2_economy")
+	if not (economy and type(economy.trade_route_task_weight) == "function") then
+		return false, "economy_missing"
+	end
+	if economy.zhopa2_trade_route_diag_original_trade_route_task_weight then
+		return true
+	end
+	local original = economy.trade_route_task_weight
+	economy.zhopa2_trade_route_diag_original_trade_route_task_weight = original
+	economy.trade_route_task_weight = function(squad, base_weight, opts, ...)
+		local result = { original(squad, base_weight, opts, ...) }
+		local reason = opts and opts.assignment_reason or nil
+		if not diag_internal and is_post_rest_reason(reason) and squad_matches(squad) and can_log() then
+			log(
+				"weight_call context [%s] squad [%s] base [%s] result_weight [%s] result_reason [%s] result_value [%s]",
+				tostring(reason),
+				squad_brief(squad),
+				tostring(base_weight),
+				tostring(result[1]),
+				tostring(result[2]),
+				tostring(result[3])
+			)
+		end
+		return unpack(result)
+	end
+	return true
+end
+
+function M.install()
+	local ok_tasks, reason_tasks = patch_tasks()
+	local ok_economy, reason_economy = patch_economy()
+	installed = ok_tasks == true and ok_economy == true
+	if installed then
+		log("installed target_squad [%s] target_name [%s] max_events [%s]", tostring(TARGET_SQUAD_ID or "-"), tostring(TARGET_NAME_CONTAINS or "-"), tostring(MAX_EVENTS))
+	else
+		log("install_wait tasks [%s:%s] economy [%s:%s]", tostring(ok_tasks), tostring(reason_tasks or "-"), tostring(ok_economy), tostring(reason_economy or "-"))
+	end
+	return installed
+end
+
+local function unregister_update()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+	end
+end
+
+function M.actor_on_update()
+	if installed then
+		unregister_update()
+		return
+	end
+	if next_dump_tg and tg() > 0 and tg() < next_dump_tg then
+		return
+	end
+	attempts = attempts + 1
+	if M.install() then
+		unregister_update()
+		if AUTO_DUMP_ON_FIRST_UPDATE and not dumped then
+			dumped = true
+			M.dump_all("auto_after_install")
+		end
+		return
+	end
+	if attempts >= MAX_ATTEMPTS then
+		log("install_failed attempts [%s]", tostring(attempts))
+		unregister_update()
+		return
+	end
+	next_dump_tg = tg() > 0 and (tg() + RETRY_MS) or nil
+end
+
+function M.actor_on_first_update()
+	if scheduled then
+		return
+	end
+	scheduled = true
+	next_dump_tg = tg() > 0 and (tg() + DUMP_DELAY_MS) or nil
+	if RegisterScriptCallback then
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	else
+		M.actor_on_update()
+	end
+end
+
+function M.on_game_start()
+	if not AUTO_PATCH_ENABLED then
+		return
+	end
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function actor_on_update()
+	return M.actor_on_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_trade_route_diag = M
+
+return M
