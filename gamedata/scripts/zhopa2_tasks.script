@@ -28,9 +28,16 @@ local surge_cache_active = false
 local surge_cache_next = 0
 local now_ms
 local trade_debug_throttle = {}
+local cfg_require_attempted = false
 
 local function cfg()
-	return rawget(_G, "zhopa2_cfg")
+	local c = rawget(_G, "zhopa2_cfg")
+	if not c and not cfg_require_attempted and require then
+		cfg_require_attempted = true
+		pcall(require, "zhopa2_cfg")
+		c = rawget(_G, "zhopa2_cfg")
+	end
+	return c
 end
 
 local function perception()
@@ -207,7 +214,21 @@ local function mutant_time_active(start_hour, end_hour)
 end
 
 local function squad_section_name(squad)
-	return squad and squad.zhopa2_section_name or nil
+	if not squad then
+		return nil
+	end
+	if squad.zhopa2_section_name ~= nil then
+		return squad.zhopa2_section_name
+	end
+	if type(squad.section_name) ~= "function" then
+		return nil
+	end
+	local ok, section = pcall(squad.section_name, squad)
+	if ok and section then
+		squad.zhopa2_section_name = section
+		return section
+	end
+	return nil
 end
 
 local function config_faction_for_section(section)
@@ -1437,6 +1458,13 @@ local function game_vertex_level_id(obj)
 end
 
 local function squad_community(squad)
+	local p = perception()
+	if p and type(p.squad_relation_faction) == "function" then
+		local faction = p.squad_relation_faction(squad)
+		if faction then
+			return faction
+		end
+	end
 	if squad and type(squad.get_squad_community) == "function" then
 		local ok, community = pcall(squad.get_squad_community, squad)
 		if ok and community then

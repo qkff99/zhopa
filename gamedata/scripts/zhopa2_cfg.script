@@ -67,10 +67,56 @@ local aliases = {
 	killer = "merc",
 	mutant = "monster",
 	mutants = "monster",
+	monster_predatory = "monster",
+	monster_predatory_day = "monster",
+	monster_predatory_night = "monster",
+	monster_vegetarian = "monster",
+	monster_special = "monster",
+	monster_zombied = "monster",
+	monster_zombied_day = "monster",
+	monster_zombied_night = "monster",
+	zombied = "monster",
 }
 
+local function section_faction(section)
+	if not (section and ini_sys and ini_sys.r_string_ex) then
+		return nil
+	end
+	local ok, faction = pcall(ini_sys.r_string_ex, ini_sys, section, "faction")
+	return ok and faction or nil
+end
+
+local function squad_section_name(squad)
+	if not squad then
+		return nil
+	end
+	if squad.zhopa2_section_name ~= nil then
+		return squad.zhopa2_section_name
+	end
+	if type(squad.section_name) ~= "function" then
+		return nil
+	end
+	local ok, section = pcall(squad.section_name, squad)
+	if ok and section then
+		squad.zhopa2_section_name = section
+		return section
+	end
+	return nil
+end
+
+local function squad_faction(squad)
+	local player_id = squad and squad.player_id or nil
+	if player_id == "monster" or player_id == "monster_predatory" or player_id == "monster_zombied" or player_id == nil then
+		local faction = section_faction(squad_section_name(squad))
+		if faction and faction ~= "" then
+			return faction
+		end
+	end
+	return player_id
+end
+
 local function is_monster_or_zombied(squad)
-	local player_id = squad and squad.player_id
+	local player_id = squad_faction(squad)
 	return player_id ~= nil and (
 		player_id == "monster"
 		or player_id == "monster_predatory"
@@ -83,10 +129,6 @@ local function is_monster_or_zombied(squad)
 		or player_id == "zombied"
 		or (is_squad_monster and is_squad_monster[player_id] == true)
 	)
-end
-
-local function squad_section_name(squad)
-	return squad and squad.zhopa2_section_name or nil
 end
 
 local function bool_from_value(v, default)
@@ -278,7 +320,7 @@ function is_level_blacklisted_for_squad(squad, level_name)
 		return true
 	end
 
-	local faction = get_faction_alias(squad.player_id)
+	local faction = get_faction_alias(squad_faction(squad))
 	if section_has("zhopa2_faction_level_blacklists", faction, level_name) then
 		return true
 	end
@@ -307,7 +349,7 @@ function is_smart_blacklisted_for_squad(squad, smart, level_name)
 		return true
 	end
 
-	local faction = get_faction_alias(squad.player_id)
+	local faction = get_faction_alias(squad_faction(squad))
 	if section_has("zhopa2_faction_smart_blacklists", faction, smart_name) then
 		return true
 	end
@@ -327,3 +369,17 @@ function reload()
 	blacklists_ini = ini_file_ex("zhopa2_smart_blacklists.ltx")
 	reset_blacklist_cache()
 end
+
+_G.zhopa2_cfg = {
+	get = get,
+	get_bool = get_bool,
+	get_num = get_num,
+	get_string = get_string,
+	get_faction_alias = get_faction_alias,
+	is_global_level_blacklisted = is_global_level_blacklisted,
+	is_level_blacklisted_for_squad = is_level_blacklisted_for_squad,
+	is_smart_blacklisted_for_squad = is_smart_blacklisted_for_squad,
+	reload = reload,
+}
+
+return _G.zhopa2_cfg

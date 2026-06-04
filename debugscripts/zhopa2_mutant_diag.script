@@ -1,0 +1,756 @@
+local M = {}
+
+local AUTO_DUMP_ENABLED = true
+local DUMP_DELAY_MS = 3000
+local RETRY_MS = 2000
+local MAX_ATTEMPTS = 4
+local MAX_MUTANT_SQUADS = 40
+local MAX_SMARTS_PER_SQUAD = 12
+local MAX_PREY_PER_SQUAD = 12
+local MAX_BUCKET_LEVELS = 20
+
+local scheduled = false
+local dumped = false
+local next_dump_tg = nil
+local attempts = 0
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function debug_print_enabled()
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 mutant diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 mutant diag | " .. fmt, ...))
+	end
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return false, nil
+	end
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result, extra = pcall(fn, obj, ...)
+	return ok, result, extra
+end
+
+local function safe_mod(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" or type(obj) == "string" then
+		return tonumber(obj) or obj
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return tonumber(id) or id
+	end
+	ok, id = safe_call(obj, "id")
+	return ok and (tonumber(id) or id) or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" or type(obj) == "string" then
+		local se = safe_alife_object(obj)
+		return se and object_name(se) or tostring(obj)
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "name")
+	if ok and name ~= nil then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "section_name")
+	return ok and name and tostring(name) or nil
+end
+
+local function named_id(obj_or_id)
+	local id = object_id(obj_or_id)
+	local name = object_name(obj_or_id)
+	return string.format("%s:%s", tostring(name or "-"), tostring(id or "-"))
+end
+
+local function table_count(t)
+	local n = 0
+	if type(t) == "table" then
+		for _ in pairs(t) do
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function sorted_keys(t)
+	local out = {}
+	if type(t) == "table" then
+		for k in pairs(t) do
+			out[#out + 1] = k
+		end
+	end
+	table.sort(out, function(a, b) return tostring(a) < tostring(b) end)
+	return out
+end
+
+local function join_ids(list, limit)
+	local out = {}
+	limit = limit or 8
+	for i = 1, math.min(#(list or {}), limit) do
+		out[#out + 1] = named_id(list[i])
+	end
+	if #(list or {}) > limit then
+		out[#out + 1] = "..."
+	end
+	return table.concat(out, ",")
+end
+
+local function prop_num(props, key)
+	return props and tonumber(props[key]) or 0
+end
+
+local function smart_mutant_props(smart)
+	local props = smart and smart.props or nil
+	return prop_num(props, "lair") > 0
+		or prop_num(props, "territory") > 0
+		or prop_num(props, "all_monster") > 0
+		or prop_num(props, "monster") > 0
+end
+
+local function smart_flags(smart)
+	local props = smart and smart.props or nil
+	return string.format(
+		"lair=%s territory=%s all_monster=%s monster=%s all=%s base=%s resource=%s",
+		tostring(prop_num(props, "lair")),
+		tostring(prop_num(props, "territory")),
+		tostring(prop_num(props, "all_monster")),
+		tostring(prop_num(props, "monster")),
+		tostring(prop_num(props, "all")),
+		tostring(prop_num(props, "base")),
+		tostring(prop_num(props, "resource"))
+	)
+end
+
+local function obj_level(obj)
+	local p = safe_mod("zhopa2_perception")
+	if p and type(p.obj_level) == "function" then
+		local ok, level_name = pcall(p.obj_level, obj)
+		if ok and level_name then
+			return level_name
+		end
+	end
+	if not (obj and obj.m_game_vertex_id and game_graph and alife) then
+		return nil
+	end
+	local ok, level_name = pcall(function()
+		local sim = alife()
+		return sim:level_name(game_graph():vertex(obj.m_game_vertex_id):level_id())
+	end)
+	return ok and level_name or nil
+end
+
+local function squad_section_name(squad)
+	local section = squad and squad.zhopa2_section_name or nil
+	if section then
+		return section
+	end
+	local ok, value = safe_call(squad, "section_name")
+	return ok and value or nil
+end
+
+local function squad_player_id(squad)
+	local p = safe_mod("zhopa2_perception")
+	if p and type(p.squad_player_id) == "function" then
+		local ok, player_id = pcall(p.squad_player_id, squad)
+		if ok and player_id then
+			return player_id
+		end
+	end
+	return squad and squad.player_id or nil
+end
+
+local function squad_relation_faction(squad)
+	local p = safe_mod("zhopa2_perception")
+	if p and type(p.squad_relation_faction) == "function" then
+		local ok, faction = pcall(p.squad_relation_faction, squad)
+		if ok and faction then
+			return faction
+		end
+	end
+	return squad_player_id(squad)
+end
+
+local function is_monster_squad(squad)
+	local p = safe_mod("zhopa2_perception")
+	if p and type(p.is_monster_squad) == "function" then
+		local ok, result = pcall(p.is_monster_squad, squad)
+		if ok then
+			return result == true
+		end
+	end
+	local player_id = squad_player_id(squad)
+	return player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_predatory_day"
+		or player_id == "monster_predatory_night"
+		or player_id == "monster_vegetarian"
+		or player_id == "monster_zombied"
+		or player_id == "monster_zombied_day"
+		or player_id == "monster_zombied_night"
+		or player_id == "zombied"
+		or (is_squad_monster and is_squad_monster[player_id] == true)
+end
+
+local function mutation_time_state(player_id)
+	local hour = level and level.get_time_hours and level.get_time_hours() or 12
+	if player_id == "monster_predatory_day" or player_id == "monster_zombied_day" then
+		return hour >= 6 and hour < 19 and "active_day" or "inactive_day"
+	elseif player_id == "monster_predatory_night" or player_id == "monster_zombied_night" then
+		return (hour >= 19 or hour < 6) and "active_night" or "inactive_night"
+	end
+	return "always_active"
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok, value = pcall(cfg.get_bool, key, default)
+		if ok then
+			return value == true
+		end
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_num) == "function" then
+		local ok, value = pcall(cfg.get_num, key, default)
+		if ok then
+			return tonumber(value) or default
+		end
+	end
+	return default
+end
+
+local function runtime_ready_state(context)
+	local ready_fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(ready_fn) ~= "function" then
+		return false, "no_ready_fn"
+	end
+	local ok, value = pcall(ready_fn, context or "mutant_diag")
+	if not ok then
+		return false, "ready_error:" .. tostring(value)
+	end
+	if value == true then
+		return true, "-"
+	end
+	local reason_fn = rawget(_G, "zhopa2_runtime_not_ready_reason")
+	if type(reason_fn) == "function" then
+		local ok_reason, reason = pcall(reason_fn)
+		return false, ok_reason and tostring(reason or "-") or ("reason_error:" .. tostring(reason))
+	end
+	return false, "not_ready"
+end
+
+local function log_runtime()
+	local rt = safe_mod("zhopa2_runtime_patches")
+	local ready, reason = runtime_ready_state("mutant_diag")
+	log(
+		"runtime module [%s] ready [%s] reason [%s] cfg [%s] tasks [%s] perception [%s] index [%s]",
+		tostring(type(rt)),
+		tostring(ready),
+		reason,
+		tostring(type(rawget(_G, "zhopa2_cfg"))),
+		tostring(type(rawget(_G, "zhopa2_tasks"))),
+		tostring(type(rawget(_G, "zhopa2_perception"))),
+		tostring(type(rawget(_G, "zhopa2_index")))
+	)
+end
+
+local function log_cfg()
+	log(
+		"cfg enabled [%s] mutant_move [%s] hunt [%s/%s] patrol [%s/%s] explore [%s/%s]",
+		tostring(cfg_bool("enabled", true)),
+		tostring(cfg_bool("mutant_movement_enabled", true)),
+		tostring(cfg_bool("mutant_hunt_enabled", true)),
+		tostring(cfg_num("mutant_hunt_weight", 35)),
+		tostring(cfg_bool("mutant_patrol_enabled", true)),
+		tostring(cfg_num("mutant_patrol_weight", 30)),
+		tostring(cfg_bool("mutant_explore_enabled", true)),
+		tostring(cfg_num("mutant_explore_weight", 35))
+	)
+end
+
+local function board_smart(board, smart_id)
+	local entry = board and board.smarts and board.smarts[smart_id] or nil
+	return entry and (entry.smrt or entry) or safe_alife_object(smart_id)
+end
+
+local function bucket_count(bucket)
+	return table_count(bucket)
+end
+
+local function log_board()
+	local board = rawget(_G, "SIMBOARD")
+	if not board then
+		log("board missing")
+		return
+	end
+	log(
+		"board methods ensure [%s] rebuild [%s] register_smart [%s] update_squad_level [%s] buckets_ready [%s] smarts [%s] squads [%s]",
+		tostring(type(board.zhopa2_ensure_buckets)),
+		tostring(type(board.zhopa2_rebuild_buckets)),
+		tostring(type(board.zhopa2_register_smart)),
+		tostring(type(board.zhopa2_update_squad_level)),
+		tostring(board.zhopa2_buckets_ready),
+		tostring(table_count(board.smarts)),
+		tostring(table_count(board.squads))
+	)
+	local by_kind = board.zhopa2_smarts_by_level_kind or {}
+	local printed = 0
+	for _, level_name in ipairs(sorted_keys(by_kind)) do
+		if printed >= MAX_BUCKET_LEVELS then
+			log("board kind levels truncated limit [%s]", tostring(MAX_BUCKET_LEVELS))
+			break
+		end
+		printed = printed + 1
+		local kinds = by_kind[level_name] or {}
+		local mutant = kinds.mutant or {}
+		log(
+			"board kind level [%s] mutant [%s] rest [%s] base [%s] populate [%s] all_level [%s]",
+			tostring(level_name),
+			tostring(bucket_count(mutant)),
+			tostring(bucket_count(kinds.rest)),
+			tostring(bucket_count(kinds.base)),
+			tostring(bucket_count(kinds.populate)),
+			tostring(bucket_count(board.zhopa2_smarts_by_level and board.zhopa2_smarts_by_level[level_name]))
+		)
+	end
+	if printed == 0 then
+		log("board kind buckets empty")
+	end
+end
+
+local function list_levels_for(p, squad, mode)
+	local current = p and type(p.obj_level) == "function" and p.obj_level(squad) or obj_level(squad)
+	local neighbors = p and type(p.nearby_levels) == "function" and p.nearby_levels(current) or nil
+	if p and type(p.level_names_for_mode) == "function" then
+		local ok, levels = pcall(p.level_names_for_mode, current, mode, neighbors)
+		if ok then
+			return levels or {}, current
+		end
+	end
+	return current and { current } or {}, current
+end
+
+local function count_index_smarts(idx, levels, kind)
+	if not (idx and type(idx.smarts_on_levels) == "function") then
+		return 0, {}
+	end
+	local ok, list = pcall(idx.smarts_on_levels, levels, nil, kind)
+	return ok and #(list or {}) or -1, ok and list or {}
+end
+
+local function collect_smarts(p, squad, opts)
+	if not (p and type(p.collect_smarts) == "function") then
+		return -1, {}
+	end
+	local ok, list = pcall(p.collect_smarts, squad, opts)
+	return ok and #(list or {}) or -1, ok and list or {}
+end
+
+local function count_hunt_targets(p, idx, squad, level_name)
+	local levels = level_name and { level_name } or {}
+	local out = {}
+	local total = 0
+	if not (p and idx and type(idx.squads_on_levels) == "function" and type(p.valid_hunt_target) == "function") then
+		return -1, out
+	end
+	local ok, list = pcall(idx.squads_on_levels, levels)
+	if not ok then
+		return -1, out
+	end
+	local squad_id = object_id(squad)
+	for i = 1, #(list or {}) do
+		local target = list[i]
+		local target_id = object_id(target)
+		if target_id and target_id ~= squad_id then
+			local ok_valid, valid = pcall(p.valid_hunt_target, squad, target, { level_mode = "same", prey = "stalker" })
+			if ok_valid and valid == true then
+				total = total + 1
+				if #out < MAX_PREY_PER_SQUAD then
+					out[#out + 1] = target
+				end
+			end
+		end
+	end
+	return total, out
+end
+
+local function smart_reject_reason(cfg, squad, smart, level_name)
+	if not smart then
+		return "missing"
+	end
+	if smart.disabled then
+		return "disabled"
+	end
+	if smart.respawn_only_smart then
+		return "respawn_only"
+	end
+	local smart_id = object_id(smart)
+	local ok_smart_id, squad_smart_id = safe_field(squad, "smart_id")
+	if smart_id and ok_smart_id and smart_id == squad_smart_id then
+		return "current_smart"
+	end
+	if cfg and type(cfg.is_smart_blacklisted_for_squad) == "function" then
+		local ok, blocked = pcall(cfg.is_smart_blacklisted_for_squad, squad, smart, level_name)
+		if ok and blocked == true then
+			return "blacklisted"
+		end
+	end
+	if not smart_mutant_props(smart) then
+		return "not_mutant_props"
+	end
+	if smart.evaluate_prior then
+		local ok, prior = pcall(smart.evaluate_prior, smart, squad)
+		if ok and tonumber(prior) and tonumber(prior) <= 0 then
+			return "prior_" .. tostring(prior)
+		end
+	end
+	return "ok"
+end
+
+local function log_smart_sample(squad, level_name)
+	local board = rawget(_G, "SIMBOARD")
+	local cfg = cfg_mod()
+	if not (board and board.zhopa2_smarts_by_level and level_name) then
+		return
+	end
+	local bucket = board.zhopa2_smarts_by_level[level_name] or {}
+	local printed = 0
+	for _, smart_id in ipairs(sorted_keys(bucket)) do
+		if printed >= MAX_SMARTS_PER_SQUAD then
+			log("smart sample squad [%s] truncated limit [%s]", named_id(squad), tostring(MAX_SMARTS_PER_SQUAD))
+			break
+		end
+		local smart = board_smart(board, smart_id)
+		printed = printed + 1
+		log(
+			"smart sample squad [%s] smart [%s] reason [%s] flags [%s] jobs_mon [%s]",
+			named_id(squad),
+			named_id(smart or smart_id),
+			tostring(smart_reject_reason(cfg, squad, smart, level_name)),
+			tostring(smart_flags(smart)),
+			tostring(smart and smart.zhopa2_job_capacity_monster)
+		)
+	end
+	if printed == 0 then
+		log("smart sample squad [%s] level [%s] empty_general_bucket", named_id(squad), tostring(level_name))
+	end
+end
+
+local function dump_squad(squad)
+	local p = safe_mod("zhopa2_perception")
+	local idx = safe_mod("zhopa2_index")
+	local cfg = cfg_mod()
+	local player_id = squad_player_id(squad)
+	local relation = squad_relation_faction(squad)
+	local level_name = obj_level(squad)
+	local current_smart = squad.smart_id and safe_alife_object(squad.smart_id) or nil
+	local can_manage_ok, can_manage = safe_call(squad, "zhopa2_can_manage")
+	local reached_ok, reached = safe_call(squad, "zhopa2_reached_target")
+	local target_alive_ok, target_alive = safe_call(squad, "zhopa2_target_is_alive")
+	local blacklist = false
+	if cfg and type(cfg.is_smart_blacklisted_for_squad) == "function" and current_smart then
+		local ok, blocked = pcall(cfg.is_smart_blacklisted_for_squad, squad, current_smart, level_name)
+		blacklist = ok and blocked == true
+	end
+	log(
+		"squad [%s] section [%s] player [%s] relation [%s] monster [%s] time [%s] level [%s] smart [%s] online [%s] common [%s] disabled [%s]",
+		named_id(squad),
+		tostring(squad_section_name(squad)),
+		tostring(player_id),
+		tostring(relation),
+		tostring(is_monster_squad(squad)),
+		tostring(mutation_time_state(player_id)),
+		tostring(level_name),
+		named_id(current_smart or squad.smart_id),
+		tostring(squad.online),
+		tostring(squad.common),
+		tostring(squad.disabled)
+	)
+	log(
+		"squad state [%s] task [%s] target [%s] reason [%s] result [%s] runtime_wait [%s] scripted [%s] assigned [%s] current [%s] action [%s] task_target [%s] can_manage [%s/%s] reached [%s/%s] target_alive [%s/%s] current_blacklist [%s]",
+		named_id(squad),
+		tostring(squad.zhopa2_task),
+		tostring(squad.zhopa2_target),
+		tostring(squad.zhopa2_last_reason),
+		tostring(squad.zhopa2_last_result),
+		tostring(squad.zhopa2_runtime_wait_reason),
+		tostring(squad.scripted_target),
+		tostring(squad.assigned_target_id),
+		tostring(squad.current_target_id),
+		tostring(squad.current_action),
+		tostring(squad.task_target_id),
+		tostring(can_manage_ok),
+		tostring(can_manage),
+		tostring(reached_ok),
+		tostring(reached),
+		tostring(target_alive_ok),
+		tostring(target_alive),
+		tostring(blacklist)
+	)
+
+	local same_levels, current = list_levels_for(p, squad, "same")
+	local explore_levels = list_levels_for(p, squad, "current_or_neighbor")
+	local fallback_levels = list_levels_for(p, squad, "nearby")
+	local same_idx_count, same_idx = count_index_smarts(idx, same_levels, "mutant")
+	local same_all_count = count_index_smarts(idx, same_levels, nil)
+	local explore_idx_count = count_index_smarts(idx, explore_levels, "mutant")
+	local fallback_idx_count = count_index_smarts(idx, fallback_levels, "mutant")
+	local patrol_count, patrol_list = collect_smarts(p, squad, {
+		level_mode = "same",
+		kind = "mutant",
+		ignore_population = true,
+		exclude_current = true,
+		skip_prior = true,
+	})
+	local explore_count, explore_list = collect_smarts(p, squad, {
+		level_mode = "current_or_neighbor",
+		kind = "mutant",
+		ignore_population = false,
+		exclude_current = true,
+		skip_prior = true,
+	})
+	local fallback_count, fallback_list = collect_smarts(p, squad, {
+		level_mode = "nearby",
+		kind = "mutant",
+		ignore_population = false,
+		exclude_current = true,
+		skip_prior = true,
+	})
+	log(
+		"squad candidates [%s] current [%s] levels_same [%s] idx_same_mutant [%s] idx_same_all [%s] idx_explore [%s] idx_fallback [%s] collect_patrol [%s] collect_explore [%s] collect_fallback [%s]",
+		named_id(squad),
+		tostring(current),
+		table.concat(same_levels or {}, ","),
+		tostring(same_idx_count),
+		tostring(same_all_count),
+		tostring(explore_idx_count),
+		tostring(fallback_idx_count),
+		tostring(patrol_count),
+		tostring(explore_count),
+		tostring(fallback_count)
+	)
+	log(
+		"squad candidate lists [%s] idx_same [%s] patrol [%s] explore [%s] fallback [%s]",
+		named_id(squad),
+		join_ids(same_idx, 6),
+		join_ids(patrol_list, 6),
+		join_ids(explore_list, 6),
+		join_ids(fallback_list, 6)
+	)
+	if p and type(p.pick_hunt_target) == "function" then
+		local ok, target = pcall(p.pick_hunt_target, squad, { level_mode = "same", prey = "stalker" })
+		local prey_count, prey_sample = count_hunt_targets(p, idx, squad, level_name)
+		log(
+			"squad hunt [%s] pick_ok [%s] target [%s] valid_same_count [%s] sample [%s]",
+			named_id(squad),
+			tostring(ok),
+			named_id(target),
+			tostring(prey_count),
+			join_ids(prey_sample, 6)
+		)
+	end
+	log_smart_sample(squad, level_name)
+end
+
+local function collect_mutant_squads()
+	local board = rawget(_G, "SIMBOARD")
+	local out = {}
+	local seen = {}
+	local source = board and board.squads or nil
+	if type(source) == "table" then
+		for squad_id, stored in pairs(source) do
+			local squad = type(stored) == "table" and stored or safe_alife_object(squad_id)
+			local resolved_id = object_id(squad)
+			if resolved_id and not seen[resolved_id] and is_monster_squad(squad) then
+				seen[resolved_id] = true
+				out[#out + 1] = squad
+			end
+		end
+	end
+	if #out <= 0 and alife then
+		local sim = alife()
+		if sim and sim.object_count and sim.object then
+			for i = 0, sim:object_count() - 1 do
+				local squad = sim:object(i)
+				local squad_id = object_id(squad)
+				if squad_id and not seen[squad_id] and is_monster_squad(squad) then
+					seen[squad_id] = true
+					out[#out + 1] = squad
+				end
+			end
+		end
+	end
+	table.sort(out, function(a, b) return tostring(object_id(a)) < tostring(object_id(b)) end)
+	return out
+end
+
+function M.dump(reason)
+	if not debug_print_enabled() then
+		return false
+	end
+	log("begin reason [%s]", tostring(reason or "-"))
+	log_runtime()
+	log_cfg()
+	log_board()
+	local squads = collect_mutant_squads()
+	log("mutant squads total [%s] shown [%s]", tostring(#squads), tostring(math.min(#squads, MAX_MUTANT_SQUADS)))
+	for i = 1, math.min(#squads, MAX_MUTANT_SQUADS) do
+		dump_squad(squads[i])
+	end
+	if #squads > MAX_MUTANT_SQUADS then
+		log("mutant squads truncated total [%s] limit [%s]", tostring(#squads), tostring(MAX_MUTANT_SQUADS))
+	end
+	log("end")
+	return true
+end
+
+function M.dump_squad(squad_id)
+	local squad = safe_alife_object(squad_id)
+	if not (squad and is_monster_squad(squad)) then
+		log("dump_squad no mutant squad id [%s]", tostring(squad_id))
+		return false
+	end
+	log("begin single squad [%s]", named_id(squad))
+	dump_squad(squad)
+	log("end single squad")
+	return true
+end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+function M.actor_on_update()
+	if dumped then
+		return
+	end
+	local now = now_ms()
+	if next_dump_tg and now > 0 and now < next_dump_tg then
+		return
+	end
+	attempts = attempts + 1
+	local ready, reason = runtime_ready_state("mutant_diag_auto")
+	if ready ~= true and attempts < MAX_ATTEMPTS then
+		log("defer reason [actor_update_%s] runtime ready [false] reason [%s]", tostring(attempts), tostring(reason))
+		next_dump_tg = now > 0 and (now + RETRY_MS) or nil
+		return
+	end
+	if ready ~= true then
+		log("forced dump reason [actor_update_%s] runtime ready [false] reason [%s]", tostring(attempts), tostring(reason))
+	end
+	if M.dump("actor_update_" .. tostring(attempts)) then
+		dumped = true
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		return
+	end
+	if attempts >= MAX_ATTEMPTS and UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+	end
+	next_dump_tg = now > 0 and (now + RETRY_MS) or nil
+end
+
+function M.actor_on_first_update()
+	if not AUTO_DUMP_ENABLED or scheduled then
+		return
+	end
+	scheduled = true
+	local now = now_ms()
+	next_dump_tg = now > 0 and (now + DUMP_DELAY_MS) or nil
+	if RegisterScriptCallback then
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	else
+		M.actor_on_update()
+	end
+end
+
+function M.on_game_start()
+	if not AUTO_DUMP_ENABLED or not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function actor_on_update()
+	return M.actor_on_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_mutant_diag = M
+return M

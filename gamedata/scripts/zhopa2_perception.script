@@ -21,9 +21,38 @@ local monster_player_ids = {
 	["monster_zombied_night"] = true,
 	["zombied"] = true,
 }
+local relation_faction_aliases = {
+	duty = "dolg",
+	merc = "killer",
+	mutant = "monster",
+	mutants = "monster",
+	monster_predatory = "monster",
+	monster_predatory_day = "monster",
+	monster_predatory_night = "monster",
+	monster_vegetarian = "monster",
+	monster_special = "monster",
+	monster_zombied = "zombied",
+	monster_zombied_day = "zombied",
+	monster_zombied_night = "zombied",
+}
+local cfg_require_attempted = false
 
 local function squad_section_name(squad)
-	return squad and squad.zhopa2_section_name or nil
+	if not squad then
+		return nil
+	end
+	if squad.zhopa2_section_name ~= nil then
+		return squad.zhopa2_section_name
+	end
+	if type(squad.section_name) ~= "function" then
+		return nil
+	end
+	local ok, section = pcall(squad.section_name, squad)
+	if ok and section then
+		squad.zhopa2_section_name = section
+		return section
+	end
+	return nil
 end
 
 local function section_faction(section)
@@ -45,8 +74,23 @@ function M.squad_player_id(squad)
 	return player_id
 end
 
+function M.squad_relation_faction(squad)
+	local player_id = M.squad_player_id(squad)
+	if player_id == nil then
+		return nil
+	end
+	local faction = tostring(player_id)
+	return relation_faction_aliases[faction] or faction
+end
+
 local function cfg()
-	return rawget(_G, "zhopa2_cfg")
+	local c = rawget(_G, "zhopa2_cfg")
+	if not c and not cfg_require_attempted and require then
+		cfg_require_attempted = true
+		pcall(require, "zhopa2_cfg")
+		c = rawget(_G, "zhopa2_cfg")
+	end
+	return c
 end
 
 local function now_ms()
@@ -133,6 +177,17 @@ end
 function M.is_monster_squad(squad)
 	local player_id = M.squad_player_id(squad)
 	return player_id ~= nil and (monster_player_ids[player_id] == true or (is_squad_monster and is_squad_monster[player_id] == true))
+end
+
+local function plain_sim_stalker_squad(squad)
+	if M.is_monster_squad(squad) then
+		return false
+	end
+	local section = squad_section_name(squad)
+	return type(section) == "string"
+		and string.find(section, "_sim_squad_", 1, true) ~= nil
+		and string.find(section, "_sim_squad_service_", 1, true) == nil
+		and string.find(section, "_sim_squad_dead", 1, true) == nil
 end
 
 function M.game_time()
@@ -687,7 +742,7 @@ local function is_zhopa2_managed_scripted_target(squad)
 end
 
 local function is_common_sim_squad(target)
-	if not target or target.common ~= true then
+	if not target or (target.common ~= true and plain_sim_stalker_squad(target) ~= true) then
 		return false
 	end
 	if target.random_targets or target.action_condlist then
@@ -786,7 +841,7 @@ local function factions_hostile(faction, target_faction)
 end
 
 function M.squad_relation_hostile(squad, target)
-	return squad and target and factions_hostile(squad.player_id, target.player_id) or false
+	return squad and target and factions_hostile(M.squad_relation_faction(squad), M.squad_relation_faction(target)) or false
 end
 
 local function faction_relation_rank(faction, owner)
@@ -1040,7 +1095,7 @@ local function smart_owner_relation_rank(squad, smart)
 		return nil
 	end
 	if ownership.state == "owned" then
-		return faction_relation_rank(squad and squad.player_id, ownership.owner)
+		return faction_relation_rank(M.squad_relation_faction(squad), relation_faction_aliases[tostring(ownership.owner)] or ownership.owner)
 	end
 	return 4
 end
@@ -1274,8 +1329,10 @@ local function smart_owner_hostile_or_unstable(squad, smart)
 	if ownership.state == "unstable" then
 		return true
 	end
-	if ownership.state == "owned" and ownership.owner and squad.player_id and ownership.owner ~= squad.player_id then
-		return factions_hostile(squad.player_id, ownership.owner)
+	local squad_faction = M.squad_relation_faction(squad)
+	local owner_faction = ownership.owner and (relation_faction_aliases[tostring(ownership.owner)] or ownership.owner) or nil
+	if ownership.state == "owned" and owner_faction and squad_faction and owner_faction ~= squad_faction then
+		return factions_hostile(squad_faction, owner_faction)
 	end
 	return false
 end
