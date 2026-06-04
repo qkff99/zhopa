@@ -702,7 +702,7 @@ local function tick_rest_auto_trade(squad)
 end
 
 local function rest_trade_blocks_completion(squad)
-	if not (squad and squad.zhopa2_task == M.TASK_REST) then
+	if not (squad and (squad.zhopa2_task == M.TASK_REST or squad.zhopa2_task == M.TASK_NIGHT_REST)) then
 		return false
 	end
 	if sync_rest_trade_done_from_economy(squad) then
@@ -712,9 +712,13 @@ local function rest_trade_blocks_completion(squad)
 		return true
 	end
 	if squad.zhopa2_rest_trade_state == "waiting" then
+		if squad.zhopa2_rest_trade_result == "runtime_not_ready" and squad.zhopa2_rest_trade_next_tg and now_ms() >= squad.zhopa2_rest_trade_next_tg then
+			return false
+		end
 		return squad.zhopa2_rest_trade_result == "trade_prepared"
 			or squad.zhopa2_rest_trade_result == "queued"
 			or squad.zhopa2_rest_trade_result == "cooldown"
+			or squad.zhopa2_rest_trade_result == "runtime_not_ready"
 	end
 	return false
 end
@@ -731,6 +735,15 @@ local function try_after_night_rest_auto_trade(squad)
 		return false
 	end
 	local traded, result = try_auto_trade_at_rest_smart(squad, "after_NIGHT_REST")
+	if result == "runtime_not_ready" then
+		if squad then
+			squad.zhopa2_rest_trade_reason = "after_NIGHT_REST"
+			squad.zhopa2_rest_trade_started_tg = squad.zhopa2_rest_trade_started_tg or now_ms()
+			mark_rest_trade_wait(squad, result)
+		end
+		debug_trade_log(squad, "after_NIGHT_REST_attempt", result, "try_auto_trade=false")
+		return false, result
+	end
 	if squad then
 		squad.zhopa2_rest_trade_state = "done"
 		squad.zhopa2_rest_trade_reason = "after_NIGHT_REST"
@@ -739,7 +752,7 @@ local function try_after_night_rest_auto_trade(squad)
 	if not traded then
 		debug_trade_log(squad, "after_NIGHT_REST_attempt", result, "try_auto_trade=false")
 	end
-	return traded
+	return traded, traded and "traded" or result
 end
 
 local function tick_base_camping_auto_trade(squad)
@@ -763,7 +776,7 @@ local function tick_base_camping_auto_trade(squad)
 	if not traded then
 		debug_trade_log(squad, "during_BASE_CAMPING_attempt", result, "try_auto_trade=false")
 	end
-	if result == "queued" or result == "trade_slot_busy" or result == "no_online_member" or result == "no_trader" then
+	if result == "queued" or result == "trade_slot_busy" or result == "no_online_member" or result == "no_trader" or result == "runtime_not_ready" then
 		squad.zhopa2_base_trade_next_tg = now_ms() + REST_TRADE_RETRY_MS
 	else
 		squad.zhopa2_base_trade_next_tg = now_ms() + BASE_CAMPING_TRADE_RETRY_MS
@@ -796,6 +809,7 @@ local function trade_route_result_waiting(result)
 		or result == "queued"
 		or result == "cooldown"
 		or result == "trade_slot_busy"
+		or result == "runtime_not_ready"
 end
 
 local function mark_trade_route_wait(squad, result)
@@ -2114,7 +2128,11 @@ function M.update_squad(squad, memory)
 			complete_populate(squad, completed_target)
 		else
 			if completed == M.TASK_NIGHT_REST then
-				try_after_night_rest_auto_trade(squad)
+				local traded, trade_result = try_after_night_rest_auto_trade(squad)
+				if trade_result == "runtime_not_ready" then
+					update_debug(squad)
+					return true
+				end
 			end
 			if type(squad.zhopa2_clear_task) == "function" then
 				squad:zhopa2_clear_task("completed_" .. tostring(completed))

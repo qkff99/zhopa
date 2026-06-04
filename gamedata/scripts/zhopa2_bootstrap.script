@@ -1,0 +1,18 @@
+local function runtime_patches()
+	local mod = rawget(_G, "zhopa2_runtime_patches")
+	if mod then
+		return mod
+	end
+	if require then
+		pcall(require, "zhopa2_runtime_patches")
+	end
+	return rawget(_G, "zhopa2_runtime_patches")
+end
+
+function on_game_start()
+	local rt = runtime_patches()
+	if rt and type(rt.on_game_start) == "function" then
+		return rt.on_game_start()
+	end
+	return false
+end

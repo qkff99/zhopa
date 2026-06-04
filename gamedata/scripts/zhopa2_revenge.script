@@ -55,6 +55,18 @@ local function current_hour()
 	return level and level.get_time_hours and level.get_time_hours() or nil
 end
 
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
+end
+
 local function is_night_now()
 	local perception = perception_mod()
 	if perception and type(perception.is_night) == "function" then
@@ -473,6 +485,9 @@ local function restore_paused_actor_revenge_after_sleep()
 end
 
 function M.apply_online_revenge_hostility()
+	if not runtime_ready("revenge_hostility") then
+		return false, "runtime_not_ready"
+	end
 	if not cfg_bool("revenge_enabled", true) then
 		return false
 	end
@@ -566,6 +581,9 @@ local function install_sleep_hook()
 end
 
 local function actor_on_sleep(hours)
+	if not runtime_ready("revenge_actor_sleep") then
+		return false, "runtime_not_ready"
+	end
 	if sleep_touches_night(hours, last_sleep_start_hour) or is_night_now() then
 		M.cancel_active_revenge("revenge_day_expired", false)
 		night_revenge_cancelled = true
@@ -577,6 +595,9 @@ local function actor_on_sleep(hours)
 end
 
 local function actor_on_update()
+	if not runtime_ready("revenge_actor_update") then
+		return false, "runtime_not_ready"
+	end
 	if revenge_disabled_for_night() then
 		if not night_revenge_cancelled then
 			M.cancel_active_revenge("revenge_day_expired", false)
@@ -589,6 +610,9 @@ local function actor_on_update()
 end
 
 function M.assign_revenge(responder, offender_target_id)
+	if not runtime_ready("revenge_assign") then
+		return false, "runtime_not_ready"
+	end
 	if not (responder and offender_target_id ~= nil) then
 		return false
 	end
@@ -607,6 +631,9 @@ function M.assign_revenge(responder, offender_target_id)
 end
 
 function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
+	if not runtime_ready("revenge_squad_npc_death") then
+		return false, "runtime_not_ready"
+	end
 	if not (victim_squad and victim_squad.id and se_npc and se_killer) then
 		return false
 	end
@@ -654,6 +681,9 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 end
 
 function M.on_npc_death_callback(victim, who)
+	if not runtime_ready("revenge_npc_death_callback") then
+		return false, "runtime_not_ready"
+	end
 	if not actor_killer(who) then
 		return false
 	end

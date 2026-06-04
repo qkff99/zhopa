@@ -4,6 +4,7 @@ local DEBUG_COOLDOWN_MS = 3000
 local ONLINE_PICKUP_STALL_TIMEOUT_MS = 45000
 local ONLINE_PICKUP_STALL_EPS_SQR = 0.01
 local ONLINE_PICKUP_INACTIVE_GRACE_MS = 5000
+local ONLINE_PICKUP_INVENTORY_GRACE_MS = 5000
 local ONLINE_CONTEST_TIMEOUT_MS = 45000
 
 local function index_mod()
@@ -82,6 +83,18 @@ end
 
 local function now_ms()
 	return time_global and time_global() or 0
+end
+
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
 end
 
 local function object_id(obj)
@@ -480,6 +493,37 @@ local function remember_artifact_reservation(squad, artifact_id)
 	end
 end
 
+local function sync_task_artifact_metadata(squad, artifact_id)
+	local idx = index_mod()
+	artifact_id = tonumber(artifact_id)
+	if not (idx and squad and artifact_id) then
+		return
+	end
+	local live_obj = (alife_object and alife_object(artifact_id)) or online_object_by_id(artifact_id)
+	local live_section = object_section(live_obj)
+	if live_obj and type(idx.refresh_artifact_entity) == "function" then
+		pcall(idx.refresh_artifact_entity, live_obj)
+	end
+	if idx.artifact_section and idx.artifact_section[artifact_id] then
+		squad.zhopa2_artifact_section = idx.artifact_section[artifact_id]
+	elseif live_section and idx.artifact_section then
+		squad.zhopa2_artifact_section = live_section
+		idx.artifact_section[artifact_id] = live_section
+	elseif squad.zhopa2_artifact_section and idx.artifact_section then
+		idx.artifact_section[artifact_id] = squad.zhopa2_artifact_section
+	end
+	if idx.artifact_smart and idx.artifact_smart[artifact_id] then
+		squad.zhopa2_artifact_smart = idx.artifact_smart[artifact_id]
+	elseif squad.zhopa2_artifact_smart and idx.artifact_smart then
+		idx.artifact_smart[artifact_id] = squad.zhopa2_artifact_smart
+	end
+	if idx.artifact_zone and idx.artifact_zone[artifact_id] then
+		squad.zhopa2_artifact_zone = idx.artifact_zone[artifact_id]
+	elseif squad.zhopa2_artifact_zone and idx.artifact_zone then
+		idx.artifact_zone[artifact_id] = squad.zhopa2_artifact_zone
+	end
+end
+
 local function artifact_from_task_smart(squad)
 	local idx = index_mod()
 	local smart_id = tonumber(squad and squad.zhopa2_target)
@@ -506,10 +550,11 @@ local function recover_task_artifact_id(squad)
 	end
 	local idx = index_mod()
 	squad.zhopa2_artifact_id = artifact_id
-	squad.zhopa2_artifact_smart = idx and idx.artifact_smart and idx.artifact_smart[artifact_id] or tonumber(squad.zhopa2_target)
-	squad.zhopa2_artifact_zone = idx and idx.artifact_zone and idx.artifact_zone[artifact_id] or nil
-	squad.zhopa2_artifact_section = idx and idx.artifact_section and idx.artifact_section[artifact_id] or nil
+	squad.zhopa2_artifact_smart = (idx and idx.artifact_smart and idx.artifact_smart[artifact_id]) or squad.zhopa2_artifact_smart or tonumber(squad.zhopa2_target)
+	squad.zhopa2_artifact_zone = (idx and idx.artifact_zone and idx.artifact_zone[artifact_id]) or squad.zhopa2_artifact_zone
+	squad.zhopa2_artifact_section = (idx and idx.artifact_section and idx.artifact_section[artifact_id]) or squad.zhopa2_artifact_section
 	remember_artifact_reservation(squad, artifact_id)
+	sync_task_artifact_metadata(squad, artifact_id)
 	return artifact_id
 end
 
@@ -523,12 +568,45 @@ local function cancel_online_pickup(squad)
 	return true
 end
 
+local function recover_vanilla_artifact_pickup(squad, artifact_id)
+	local loot = loot_mod()
+	if not (loot and type(loot.recover_pending_vanilla_artifact_pickup) == "function") then
+		return false
+	end
+	local ok, recovered = pcall(loot.recover_pending_vanilla_artifact_pickup, squad, artifact_id)
+	return ok and recovered == true
+end
+
+local function online_inventory_recovery_pending(squad)
+	if not (squad and squad.online == true) then
+		return false
+	end
+	if not (
+		squad.zhopa2_artifact_collect_started ~= nil
+		or squad.zhopa2_last_result == "artifact_online_pickup_requested"
+		or squad.zhopa2_last_result == "artifact_online_wait_inventory"
+	) then
+		return false
+	end
+	local now = now_ms()
+	if not (now and now > 0) then
+		return true
+	end
+	local since = tonumber(squad.zhopa2_artifact_inventory_wait_since)
+	if not since then
+		squad.zhopa2_artifact_inventory_wait_since = now
+		return true
+	end
+	return (now - since) < ONLINE_PICKUP_INVENTORY_GRACE_MS
+end
+
 local function clear_online_pickup_state(squad)
 	if not squad then
 		return
 	end
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_artifact_pickup_npc_id = nil
+	squad.zhopa2_artifact_inventory_wait_since = nil
 	squad.zhopa2_artifact_contested_since = nil
 	squad.zhopa2_artifact_pickup_last_x = nil
 	squad.zhopa2_artifact_pickup_last_y = nil
@@ -650,6 +728,7 @@ current_artifact_id = function(squad)
 	local artifact_id = tonumber(squad and squad.zhopa2_artifact_id)
 		or (idx and idx.squad_artifact_reservation and squad and tonumber(idx.squad_artifact_reservation[squad.id]))
 	remember_artifact_reservation(squad, artifact_id)
+	sync_task_artifact_metadata(squad, artifact_id)
 	return artifact_id
 end
 
@@ -752,6 +831,9 @@ function M.release_reservation(squad, reason)
 end
 
 function M.pick_target(squad, opts)
+	if not runtime_ready("artifact_pick_target") then
+		return nil, "runtime_not_ready"
+	end
 	if not (squad and squad.id) then
 		return nil
 	end
@@ -790,6 +872,9 @@ function M.pick_target(squad, opts)
 end
 
 function M.offline_collect(squad, artifact_id, reason)
+	if not runtime_ready("artifact_offline_collect") then
+		return false, "runtime_not_ready"
+	end
 	artifact_id = tonumber(artifact_id)
 	if M.offline_enabled() ~= true then
 		release_artifact_reservation(squad, "artifact_offline_disabled")
@@ -837,6 +922,9 @@ function M.offline_collect(squad, artifact_id, reason)
 end
 
 function M.offline_collect_virtual(squad, artifact_id, reason)
+	if not runtime_ready("artifact_offline_collect_virtual") then
+		return false, "runtime_not_ready"
+	end
 	artifact_id = tonumber(artifact_id)
 	if M.offline_enabled() ~= true then
 		release_artifact_reservation(squad, "artifact_offline_disabled")
@@ -884,6 +972,9 @@ function M.offline_collect_virtual(squad, artifact_id, reason)
 end
 
 function M.try_collect(squad)
+	if not runtime_ready("artifact_try_collect") then
+		return nil, "runtime_not_ready"
+	end
 	if not (squad and squad.zhopa2_task == "ARTEFACT") then
 		return false, "artifact_not_active"
 	end
@@ -900,9 +991,13 @@ function M.try_collect(squad)
 		return true, "artifact_collected"
 	end
 	if not artifact_valid(artifact_id) then
-		if squad_has_artifact_cargo(squad, artifact_id) then
+		if recover_vanilla_artifact_pickup(squad, artifact_id) or squad_has_artifact_cargo(squad, artifact_id) then
 			release_artifact_reservation(squad, "artifact_collected")
 			return true, "artifact_collected"
+		end
+		if online_inventory_recovery_pending(squad) then
+			squad.zhopa2_last_result = "artifact_online_wait_inventory"
+			return nil, squad.zhopa2_last_result
 		end
 		if squad.online == true then
 			debug_artifact_error(squad, "artifact_missing", artifact_id, nil, "artifact_valid=false")
@@ -910,8 +1005,8 @@ function M.try_collect(squad)
 		release_artifact_reservation(squad, "artifact_missing")
 		return false, "artifact_missing"
 	end
-	local materialized
-	artifact_id, materialized = materialize_virtual_artifact_online(squad, artifact_id)
+	local materialized, materialize_reason
+	artifact_id, materialized, materialize_reason = materialize_virtual_artifact_online(squad, artifact_id)
 	if materialized then
 		remember_artifact_reservation(squad, artifact_id)
 	end
@@ -980,8 +1075,10 @@ function M.try_collect(squad)
 		return nil, squad.zhopa2_last_result
 	end
 	if squad.online == true and online_reason == "artifact_virtual_offline_only" then
-		squad.zhopa2_last_result = "artifact_virtual_wait_materialize"
-		return nil, squad.zhopa2_last_result
+		debug_artifact_error(squad, "artifact_virtual_online_unmaterialized", artifact_id, nil, tostring(materialize_reason or online_reason))
+		release_artifact_reservation(squad, "artifact_virtual_online_unmaterialized")
+		squad.zhopa2_last_result = "artifact_virtual_online_unmaterialized"
+		return false, squad.zhopa2_last_result
 	end
 
 	return M.offline_collect(squad, artifact_id, "artifact_offline_collect:" .. tostring(online_reason or "offline"))

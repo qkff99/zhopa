@@ -12,6 +12,8 @@ local event_stores = {
 }
 local targeted_item_requests = {}
 local targeted_item_requests_by_item = {}
+local vanilla_artifact_pickups = {}
+local VANILLA_ARTIFACT_PICKUP_TTL_MS = 30000
 
 local death_ini
 local loadout_ini
@@ -62,6 +64,18 @@ end
 
 local function now_ms()
 	return time_global and time_global() or 0
+end
+
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
 end
 
 local function alife_sim()
@@ -215,6 +229,14 @@ local function object_alive(obj)
 	end
 	local ok, alive = pcall(obj.alive, obj)
 	return ok and alive or nil
+end
+
+local function valid_squad_object(squad)
+	local squad_type = type(squad)
+	if squad_type ~= "table" and squad_type ~= "userdata" then
+		return nil
+	end
+	return object_id(squad) and squad or nil
 end
 
 local function item_cost(item)
@@ -388,11 +410,26 @@ local function looter_squad(npc)
 		return nil
 	end
 	local ok, squad = pcall(get_object_squad, npc, "zhopa2_loot")
-	if ok and squad then
+	if ok and valid_squad_object(squad) then
 		return squad
 	end
 	ok, squad = pcall(get_object_squad, npc)
-	return ok and squad or nil
+	return ok and valid_squad_object(squad) or nil
+end
+
+local function squad_by_id(squad_id)
+	squad_id = tonumber(squad_id)
+	if not squad_id then
+		return nil
+	end
+	local board = rawget(_G, "SIMBOARD")
+	local squads = board and board.squads
+	local squad = squads and (squads[squad_id] or squads[tostring(squad_id)]) or nil
+	if valid_squad_object(squad) then
+		return squad
+	end
+	squad = alife_object and alife_object(squad_id) or nil
+	return valid_squad_object(squad)
 end
 
 local function managed_stalker_squad_for_looter(npc, require_loot_enabled)
@@ -1062,6 +1099,9 @@ local function offline_loot_items_log(items)
 end
 
 function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
+	if not runtime_ready("loot_offline") then
+		return false, "runtime_not_ready"
+	end
 	if not (offline_squad_can_loot(attacker_squad) and se_victim) then
 		return false
 	end
@@ -1369,6 +1409,9 @@ local function targeted_gather_clear()
 end
 
 function M.request_item_pickup(npc, item_id, reason)
+	if not runtime_ready("loot_request_item_pickup") then
+		return false, "runtime_not_ready"
+	end
 	item_id = tonumber(item_id)
 	local npc_id = object_id(npc)
 	if not (valid_id(npc_id) and valid_id(item_id)) then
@@ -1416,6 +1459,9 @@ function M.request_item_pickup(npc, item_id, reason)
 end
 
 function M.targeted_item_ids_for_npc(npc)
+	if not runtime_ready("loot_targeted_items") then
+		return nil
+	end
 	local npc_id = object_id(npc)
 	if not valid_id(npc_id) then
 		return nil
@@ -1450,21 +1496,161 @@ function M.cancel_item_pickup(npc_or_id, item_id)
 	end
 end
 
-local function targeted_request_for_item(item)
+local function targeted_request_for_item(item, keep_parented)
 	local item_id = object_id(item)
 	if not valid_id(item_id) then
 		return nil
 	end
-	cleanup_targeted_item_requests()
+	if keep_parented ~= true then
+		cleanup_targeted_item_requests()
+	end
 	return targeted_item_requests_by_item[item_id]
+end
+
+local function cleanup_vanilla_artifact_pickups()
+	local now = now_ms()
+	if not (now and now > 0) then
+		return
+	end
+	for npc_id, request in pairs(vanilla_artifact_pickups) do
+		if not request or (now - (tonumber(request.tg) or 0)) > VANILLA_ARTIFACT_PICKUP_TTL_MS then
+			vanilla_artifact_pickups[npc_id] = nil
+		end
+	end
+end
+
+local function inventory_section_count(owner, section)
+	if not (owner and section) then
+		return 0
+	end
+	local count = 0
+	if type(owner.iterate_inventory) == "function" and object_is_online_inventory_owner(owner) then
+		local function inspect(_, item)
+			if object_section(item) == section then
+				count = count + 1
+			end
+		end
+		pcall(owner.iterate_inventory, owner, inspect, owner)
+		return count
+	end
+	if type(owner.object) == "function" then
+		local ok, item = pcall(owner.object, owner, section)
+		return ok and item and 1 or 0
+	end
+	return 0
+end
+
+local function inventory_item_by_section(owner, section, excluded_id)
+	if not (owner and section) then
+		return nil
+	end
+	excluded_id = tonumber(excluded_id)
+	local found
+	if type(owner.iterate_inventory) == "function" and object_is_online_inventory_owner(owner) then
+		local function inspect(_, item)
+			if not found and object_section(item) == section and tonumber(object_id(item)) ~= excluded_id then
+				found = item
+			end
+		end
+		pcall(owner.iterate_inventory, owner, inspect, owner)
+	end
+	if found then
+		return found
+	end
+	if type(owner.object) == "function" then
+		local ok, item = pcall(owner.object, owner, section)
+		return ok and item or nil
+	end
+	return nil
+end
+
+local function add_online_member(out, seen, id)
+	id = tonumber(id)
+	if not (id and not seen[id]) then
+		return
+	end
+	local obj = online_object_by_id(id)
+	if not obj then
+		return
+	end
+	local alive = object_alive(obj)
+	if alive == false then
+		return
+	end
+	seen[id] = true
+	out[#out + 1] = obj
+end
+
+local function squad_online_member_objects(squad)
+	local out = {}
+	local seen = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return out
+	end
+	if type(squad.commander_id) == "function" then
+		local ok, commander_id = pcall(squad.commander_id, squad)
+		if ok then
+			add_online_member(out, seen, commander_id)
+		end
+	end
+	for member in squad:squad_members() do
+		add_online_member(out, seen, member and member.id)
+	end
+	return out
+end
+
+local function artifact_pickup_recovery_context(squad)
+	return squad
+		and (
+			squad.zhopa2_last_result == "artifact_online_pickup_requested"
+			or squad.zhopa2_last_result == "artifact_online_wait_pickup"
+			or squad.zhopa2_last_result == "artifact_online_contested"
+			or squad.zhopa2_last_result == "artifact_online_wait_inventory"
+			or squad.zhopa2_artifact_collect_started ~= nil
+		)
+end
+
+function M.note_vanilla_artifact_pickup(npc, artifact_id, section)
+	cleanup_vanilla_artifact_pickups()
+	local npc_id = object_id(npc)
+	artifact_id = tonumber(artifact_id)
+	if not (valid_id(npc_id) and valid_id(artifact_id)) then
+		return false
+	end
+	local idx = index_mod()
+	local squad_id = idx and idx.artifact_reserved_by and tonumber(idx.artifact_reserved_by[artifact_id]) or nil
+	local squad = squad_by_id(squad_id) or looter_squad(npc)
+	if not (squad and squad.zhopa2_task == "ARTEFACT") then
+		return false
+	end
+	local reserved = tonumber(squad.zhopa2_artifact_id)
+	if not reserved and idx and idx.squad_artifact_reservation and squad.id then
+		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+	end
+	if reserved ~= artifact_id then
+		return false
+	end
+	section = section or squad.zhopa2_artifact_section or (idx and idx.artifact_section and idx.artifact_section[artifact_id])
+	if not section then
+		return false
+	end
+	vanilla_artifact_pickups[npc_id] = {
+		npc_id = npc_id,
+		squad_id = squad.id,
+		artifact_id = artifact_id,
+		section = section,
+		before_count = inventory_section_count(npc, section),
+		tg = now_ms(),
+	}
+	return true
 end
 
 local function record_targeted_artifact_pickup(npc, item, request, reason)
 	if not (npc and item and request) then
 		return false
 	end
-	local squad = looter_squad(npc)
-	if not (squad and (not request.squad_id or request.squad_id == squad.id)) then
+	local squad = squad_by_id(request.squad_id) or looter_squad(npc)
+	if not (squad and (not request.squad_id or tonumber(request.squad_id) == tonumber(squad.id))) then
 		return false
 	end
 	local section = object_section(item)
@@ -1475,6 +1661,115 @@ local function record_targeted_artifact_pickup(npc, item, request, reason)
 	end
 	forget_targeted_item_request(object_id(item))
 	return true
+end
+
+local function record_task_artifact_pickup_by_section(npc, item, request, reason)
+	if not (npc and item and request) then
+		return false
+	end
+	if request.section ~= object_section(item) then
+		return false
+	end
+	local artifact_id = tonumber(request.artifact_id)
+	local squad = squad_by_id(request.squad_id) or looter_squad(npc)
+	local reserved = squad and tonumber(squad.zhopa2_artifact_id) or nil
+	local idx = index_mod()
+	if not reserved and squad and idx and idx.squad_artifact_reservation and squad.id then
+		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+	end
+	if not (
+		squad
+		and squad.zhopa2_task == "ARTEFACT"
+		and artifact_id
+		and reserved == artifact_id
+	) then
+		return false
+	end
+	if not mark_artifact_cargo_for_squad(squad, item, request.section, item_cost(item), artifact_id, reason or "artifact_vanilla_item_take") then
+		return false
+	end
+	forget_targeted_item_request(artifact_id)
+	vanilla_artifact_pickups[request.npc_id or object_id(npc)] = nil
+	return true
+end
+
+local function record_task_artifact_pickup(npc, item, reason)
+	if not (npc and item) then
+		return false
+	end
+	local item_id = object_id(item)
+	local idx = index_mod()
+	local squad_id = idx and idx.artifact_reserved_by and item_id and tonumber(idx.artifact_reserved_by[item_id]) or nil
+	local squad = squad_by_id(squad_id) or looter_squad(npc)
+	local reserved = squad and tonumber(squad.zhopa2_artifact_id) or nil
+	if not reserved and squad and idx and idx.squad_artifact_reservation and squad.id then
+		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+	end
+	if not (
+		squad
+		and squad.zhopa2_task == "ARTEFACT"
+		and item_id
+		and reserved == tonumber(item_id)
+	) then
+		return false
+	end
+	return mark_artifact_cargo_for_squad(squad, item, object_section(item), item_cost(item), item_id, reason or "ground_artefact_loot")
+end
+
+local function recover_task_artifact_from_squad_inventory(squad, artifact_id, reason)
+	artifact_id = tonumber(artifact_id)
+	if not (
+		squad
+		and squad.id
+		and squad.zhopa2_task == "ARTEFACT"
+		and artifact_id
+		and artifact_pickup_recovery_context(squad)
+	) then
+		return false
+	end
+	local idx = index_mod()
+	local reserved = tonumber(squad.zhopa2_artifact_id)
+	if not reserved and idx and idx.squad_artifact_reservation and squad.id then
+		reserved = tonumber(idx.squad_artifact_reservation[squad.id])
+	end
+	if reserved ~= artifact_id then
+		return false
+	end
+	local section = squad.zhopa2_artifact_section or (idx and idx.artifact_section and idx.artifact_section[artifact_id])
+	if not section then
+		return false
+	end
+	local members = squad_online_member_objects(squad)
+	for i = 1, #members do
+		local item = inventory_item_by_section(members[i], section)
+		if item then
+			return mark_artifact_cargo_for_squad(squad, item, section, item_cost(item), artifact_id, reason or "artifact_inventory_recover")
+		end
+	end
+	return false
+end
+
+function M.recover_pending_vanilla_artifact_pickup(squad, artifact_id)
+	cleanup_vanilla_artifact_pickups()
+	artifact_id = tonumber(artifact_id)
+	if not (squad and squad.id and artifact_id) then
+		return false
+	end
+	for npc_id, request in pairs(vanilla_artifact_pickups) do
+		if request
+			and tonumber(request.artifact_id) == artifact_id
+			and tonumber(request.squad_id) == tonumber(squad.id)
+		then
+			local npc = online_object_by_id(npc_id)
+			if npc and inventory_section_count(npc, request.section) > (tonumber(request.before_count) or 0) then
+				local item = inventory_item_by_section(npc, request.section)
+				if record_task_artifact_pickup_by_section(npc, item, request, "artifact_vanilla_inventory_recover") then
+					return true
+				end
+			end
+		end
+	end
+	return recover_task_artifact_from_squad_inventory(squad, artifact_id, "artifact_inventory_recover")
 end
 
 function M.corpse_detect_dist_sqr()
@@ -1488,9 +1783,15 @@ function M.item_detect_dist_sqr()
 end
 
 function M.record_loot(npc, source, item, value, reason)
+	if not runtime_ready("loot_record") then
+		return false, "runtime_not_ready"
+	end
 	local request = targeted_request_for_item(item)
 	if request and reason == "ground_artefact_loot" then
 		return record_targeted_artifact_pickup(npc, item, request, reason)
+	end
+	if reason == "ground_artefact_loot" and record_task_artifact_pickup(npc, item, reason) then
+		return true
 	end
 	if not M.enabled() then
 		return false
@@ -1514,6 +1815,9 @@ function M.record_loot(npc, source, item, value, reason)
 end
 
 function M.record_offline_combat_loot(squad, target, killed_count, reason)
+	if not runtime_ready("loot_offline_combat") then
+		return false, "runtime_not_ready"
+	end
 	if not (M.offline_enabled() and squad and squad.zhopa2_managed == true) then
 		return false
 	end
@@ -1538,40 +1842,63 @@ function M.record_offline_combat_loot(squad, target, killed_count, reason)
 end
 
 local function on_npc_death(npc, who)
+	if not runtime_ready("loot_npc_death") then
+		return false, "runtime_not_ready"
+	end
 	if npc then
 		add_event(STORE_CORPSE, object_id(npc))
 	end
 end
 
 local function on_monster_death(obj, who)
+	if not runtime_ready("loot_monster_death") then
+		return false, "runtime_not_ready"
+	end
 	if obj then
 		add_event(STORE_CORPSE, object_id(obj))
 	end
 end
 
 local function on_npc_item_drop(npc, item)
+	if not runtime_ready("loot_npc_item_drop") then
+		return false, "runtime_not_ready"
+	end
 	if item then
 		add_event(STORE_ITEM, object_id(item))
 	end
 end
 
 local function on_actor_item_drop(item)
+	if not runtime_ready("loot_actor_item_drop") then
+		return false, "runtime_not_ready"
+	end
 	if item then
 		add_event(STORE_ITEM, object_id(item))
 	end
 end
 
 local function on_item_take(npc, item)
+	if not runtime_ready("loot_item_take") then
+		return false, "runtime_not_ready"
+	end
 	if item then
-		local request = targeted_request_for_item(item)
+		local request = targeted_request_for_item(item, true)
+		local vanilla_request = vanilla_artifact_pickups[object_id(npc)]
 		if request then
 			record_targeted_artifact_pickup(npc, item, request, "artifact_item_take")
+		elseif vanilla_request and object_is_artifact(item) then
+			record_task_artifact_pickup_by_section(npc, item, vanilla_request, "artifact_vanilla_item_take")
+		elseif object_is_artifact(item) then
+			record_task_artifact_pickup(npc, item, "artifact_item_take")
 		end
 		remove_event(STORE_ITEM, object_id(item))
 	end
 end
 
 local function on_actor_item_take(item)
+	if not runtime_ready("loot_actor_item_take") then
+		return false, "runtime_not_ready"
+	end
 	if item then
 		remove_event(STORE_ITEM, object_id(item))
 	end
@@ -1582,6 +1909,7 @@ function M.on_game_load()
 	event_stores.item = { ids = {}, seen = {}, head = 1 }
 	targeted_item_requests = {}
 	targeted_item_requests_by_item = {}
+	vanilla_artifact_pickups = {}
 end
 
 function M.on_game_start()

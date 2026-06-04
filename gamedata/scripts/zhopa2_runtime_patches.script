@@ -2,6 +2,42 @@ local M = {}
 
 local PATCH_ID = "zhopa2_runtime"
 local installed = setmetatable({}, { __mode = "k" })
+local current_patch_reason = nil
+
+local RUNTIME_READY_WARMUP_MS = 5000
+local RUNTIME_READY_RECHECK_MS = 500
+
+local ZHOPA2_RUNTIME_MODULES = {
+	"zhopa2_index",
+	"zhopa2_topology",
+	"zhopa2_loot",
+	"zhopa2_economy",
+	"zhopa2_revenge",
+	"zhopa2_service_fillers",
+	"zhopa2_artifacts",
+}
+
+local ZHOPA2_RUNTIME_PATCHES = {
+	{ name = "se_level_changer", fn = "patch_se_level_changer" },
+	{ name = "sim_board", fn = "patch_sim_board" },
+	{ name = "smart_terrain", fn = "patch_smart_terrain" },
+	{ name = "sim_squad_scripted", fn = "patch_sim_squad_scripted" },
+	{ name = "bind_anomaly_zone", fn = "patch_bind_anomaly_zone" },
+	{ name = "bind_monster", fn = "patch_bind_monster" },
+	{ name = "xr_gather_items", fn = "patch_xr_gather_items" },
+	{ name = "xr_corpse_detection", fn = "patch_xr_corpse_detection" },
+	{ name = "sim_offline_combat", fn = "patch_sim_offline_combat" },
+}
+
+local runtime_ready_items = {}
+local runtime_ready_errors = {}
+local runtime_ready_total = #ZHOPA2_RUNTIME_MODULES + #ZHOPA2_RUNTIME_PATCHES + 4
+local runtime_ready_count = 0
+local runtime_ready_complete = false
+local runtime_callbacks_registered = false
+local runtime_actor_first_update = false
+local runtime_warmup_until = nil
+local runtime_next_recheck_tg = 0
 
 local function safe_require(name)
 	local mod = rawget(_G, name)
@@ -12,6 +48,55 @@ local function safe_require(name)
 		pcall(require, name)
 	end
 	return rawget(_G, name)
+end
+
+local function class_candidate(candidate, required_method)
+	local candidate_type = type(candidate)
+	if candidate_type ~= "table" and candidate_type ~= "userdata" then
+		return nil
+	end
+	if required_method then
+		local ok, method = pcall(function() return candidate[required_method] end)
+		if not (ok and type(method) == "function") then
+			return nil
+		end
+	end
+	return candidate
+end
+
+local function script_class(script_name, class_name, required_method)
+	local mod = safe_require(script_name)
+	if type(mod) == "table" then
+		local cls = class_candidate(rawget(mod, class_name), required_method)
+		if cls then
+			return cls
+		end
+		cls = class_candidate(mod, required_method)
+		if cls then
+			return cls
+		end
+	end
+	local cls = class_candidate(rawget(_G, class_name), required_method)
+	if cls then
+		return cls
+	end
+	if script_name == "sim_board" and class_name == "simulation_board" then
+		local board = rawget(_G, "SIMBOARD")
+		if class_candidate(board, required_method or "register_smart") then
+			return board
+		end
+		local mt = board and getmetatable and getmetatable(board) or nil
+		if type(mt) == "table" then
+			local index = rawget(mt, "__index")
+			if class_candidate(index, required_method or "register_smart") then
+				return index
+			end
+			if class_candidate(mt, required_method or "register_smart") then
+				return mt
+			end
+		end
+	end
+	return nil
 end
 
 local function object_id(obj)
@@ -62,6 +147,141 @@ local function zhopa2_debug_printf(fmt, ...)
 	end
 end
 
+local function runtime_time_ms()
+	return time_global and time_global() or 0
+end
+
+local function runtime_log(fmt, ...)
+	local ok, text = pcall(string.format, fmt, ...)
+	text = ok and text or tostring(fmt)
+	if type(printf) == "function" then
+		pcall(printf, "%s", text)
+	elseif type(log) == "function" then
+		pcall(log, text)
+	end
+end
+
+local function runtime_item_key(stage, item)
+	return tostring(stage) .. ":" .. tostring(item)
+end
+
+local function mark_runtime_item(stage, item, ok, reason, detail)
+	local key = runtime_item_key(stage, item)
+	if ok then
+		if runtime_ready_items[key] ~= true then
+			runtime_ready_items[key] = true
+			runtime_ready_errors[key] = nil
+			runtime_ready_count = runtime_ready_count + 1
+			runtime_log("~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]", tostring(runtime_ready_count), tostring(runtime_ready_total), tostring(stage), tostring(item))
+		end
+		return true
+	end
+	local err = tostring(reason or "not_ready") .. "|" .. tostring(detail or "-")
+	if runtime_ready_errors[key] ~= err then
+		runtime_ready_errors[key] = err
+		runtime_log("~ ZHOPA2 runtime error | stage [%s] item [%s] reason [%s] detail [%s]", tostring(stage), tostring(item), tostring(reason or "not_ready"), tostring(detail or "-"))
+	end
+	return false
+end
+
+local function runtime_item_ready(stage, item)
+	return runtime_ready_items[runtime_item_key(stage, item)] == true
+end
+
+local function runtime_error_enabled()
+	return current_patch_reason ~= "on_game_start" and current_patch_reason ~= "on_game_load"
+end
+
+local function runtime_mark_context()
+	if runtime_callbacks_registered then
+		mark_runtime_item("context", "callbacks", true, "callbacks_registered", "-")
+	end
+	if runtime_actor_first_update then
+		mark_runtime_item("context", "actor_first_update", true, "actor_first_update", "-")
+	end
+	if SIMBOARD and SIMBOARD.zhopa2_buckets_ready == true then
+		mark_runtime_item("context", "simboard_buckets", true, "simboard_buckets_ready", "-")
+	end
+	if runtime_actor_first_update then
+		local now = runtime_time_ms()
+		if runtime_warmup_until == nil then
+			runtime_warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
+		end
+		if runtime_warmup_until <= 0 or now >= runtime_warmup_until then
+			mark_runtime_item("context", "warmup", true, "warmup_done", "-")
+		end
+	end
+	runtime_ready_complete = runtime_ready_count >= runtime_ready_total
+	return runtime_ready_complete
+end
+
+local function runtime_missing_item()
+	for i = 1, #ZHOPA2_RUNTIME_MODULES do
+		local name = ZHOPA2_RUNTIME_MODULES[i]
+		if not runtime_item_ready("module", name) then
+			return "module:" .. tostring(name)
+		end
+	end
+	for i = 1, #ZHOPA2_RUNTIME_PATCHES do
+		local patch = ZHOPA2_RUNTIME_PATCHES[i]
+		if not runtime_item_ready("patch", patch.name) then
+			return "patch:" .. tostring(patch.name)
+		end
+	end
+	for _, name in ipairs({ "callbacks", "actor_first_update", "simboard_buckets", "warmup" }) do
+		if not runtime_item_ready("context", name) then
+			return "context:" .. tostring(name)
+		end
+	end
+	return "runtime_not_ready"
+end
+
+local function required_script_class(script_name, class_name, surface, required_method)
+	local cls = script_class(script_name, class_name, required_method)
+	if not cls and current_patch_reason ~= "on_game_start" then
+		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [%s] reason [missing_class] script [%s] class [%s] method [%s]", tostring(surface or class_name), tostring(script_name), tostring(class_name), tostring(required_method or "-"))
+	end
+	return cls
+end
+
+local zhopa2_started_modules = {}
+
+local function start_zhopa_module(name)
+	if zhopa2_started_modules[name] then
+		mark_runtime_item("module", name, true, "already_started", "-")
+		return true
+	end
+	local mod = safe_require(name)
+	if not (mod and type(mod.on_game_start) == "function") then
+		if runtime_error_enabled() then
+			mark_runtime_item("module", name, false, mod and "module_no_on_game_start" or "module_missing", "-")
+		end
+		return false
+	end
+	local ok, err = pcall(mod.on_game_start)
+	if not ok then
+		mark_runtime_item("module", name, false, "module_start_failed", err)
+		return false
+	end
+	if err == false then
+		if runtime_error_enabled() then
+			mark_runtime_item("module", name, false, "module_deferred", "-")
+		end
+		return false
+	end
+	zhopa2_started_modules[name] = true
+	mark_runtime_item("module", name, true, "module_started", "-")
+	return true
+end
+
+function M.ensure_zhopa_modules()
+	local ok = true
+	for i = 1, #ZHOPA2_RUNTIME_MODULES do
+		ok = start_zhopa_module(ZHOPA2_RUNTIME_MODULES[i]) and ok
+	end
+	return ok
+end
+
 local function upvalue(fn, name)
 	if not (debug and debug.getupvalue and type(fn) == "function") then
 		return nil
@@ -99,7 +319,10 @@ function M.patch_method(owner, method, patch_id, wrapper_factory)
 	if not (owner and method and patch_id and type(wrapper_factory) == "function") then
 		return false, "bad_args"
 	end
-	local current = owner[method]
+	local ok_get, current = pcall(function() return owner[method] end)
+	if not ok_get then
+		return false, "get_failed"
+	end
 	if type(current) ~= "function" then
 		return false, "missing_method"
 	end
@@ -110,16 +333,45 @@ function M.patch_method(owner, method, patch_id, wrapper_factory)
 	end
 	local key = tostring(method) .. ":" .. tostring(patch_id)
 	local rec = by_owner[key]
-	if rec and owner[method] == rec.wrapper then
-		return true, "already_patched"
+	if rec then
+		local ok_cur, current_owner_method = pcall(function() return owner[method] end)
+		if ok_cur and current_owner_method == rec.wrapper then
+			return true, "already_patched"
+		end
 	end
 	local wrapper = wrapper_factory(current)
 	if type(wrapper) ~= "function" then
 		return false, "bad_wrapper"
 	end
+	local ok_set = pcall(function() owner[method] = wrapper end)
+	if not ok_set then
+		return false, "set_failed"
+	end
 	by_owner[key] = { original = current, wrapper = wrapper }
-	owner[method] = wrapper
 	return true, "patched"
+end
+
+local function install_class_method(cls, name, fn)
+	if not (cls and name and type(fn) == "function") then
+		return false, "bad_args"
+	end
+	local ok_get, current = pcall(function() return cls[name] end)
+	if ok_get and type(current) == "function" then
+		return true, "already_patched"
+	end
+	local ok_set = pcall(function() cls[name] = fn end)
+	if not ok_set then
+		return false, "set_failed"
+	end
+	return true, "installed"
+end
+
+local function patch_required_method(owner, method, patch_id, wrapper_factory, surface)
+	local ok, reason = M.patch_method(owner, method, patch_id, wrapper_factory)
+	if not ok then
+		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [%s] method [%s] reason [%s]", tostring(surface or patch_id), tostring(method), tostring(reason))
+	end
+	return ok, reason
 end
 
 local function patch_global(table_name, method, patch_id, wrapper_factory)
@@ -574,6 +826,11 @@ function squad_methods.zhopa2_target_is_alive(self)
 end
 
 function squad_methods.zhopa2_update_task(self)
+	if not M.runtime_ready("squad_task") then
+		self.zhopa2_runtime_wait_reason = "runtime_not_ready"
+		return false
+	end
+	self.zhopa2_runtime_wait_reason = nil
 	local t = tasks()
 	if t and type(t.update_squad) == "function" then
 		return t.update_squad(self)
@@ -680,9 +937,7 @@ end
 
 local function install_squad_methods(cls)
 	for name, fn in pairs(squad_methods) do
-		if type(cls[name]) ~= "function" then
-			cls[name] = fn
-		end
+		install_class_method(cls, name, fn)
 	end
 end
 
@@ -692,12 +947,12 @@ local function wrapped_returns(original, self, ...)
 end
 
 function M.patch_sim_squad_scripted()
-	local cls = safe_require("sim_squad_scripted")
+	local cls = required_script_class("sim_squad_scripted", "sim_squad_scripted", "sim_squad_scripted", "update")
 	if not cls then
 		return false
 	end
 	install_squad_methods(cls)
-	M.patch_method(cls, "__init", PATCH_ID .. "_squad_init", function(original)
+	patch_required_method(cls, "__init", PATCH_ID .. "_squad_init", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }
 			if type(self.zhopa2_reset_state) == "function" then
@@ -705,8 +960,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
-	M.patch_method(cls, "init_squad", PATCH_ID .. "_squad_section", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "init_squad", PATCH_ID .. "_squad_section", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }
 			local ok, section = pcall(self.section_name, self)
@@ -715,8 +970,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
-	M.patch_method(cls, "get_script_target", PATCH_ID .. "_squad_target", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "get_script_target", PATCH_ID .. "_squad_target", function(original)
 		return function(self, ...)
 			if type(self.zhopa2_update_task) == "function" then
 				self:zhopa2_update_task()
@@ -730,16 +985,16 @@ function M.patch_sim_squad_scripted()
 			end
 			return original(self, ...)
 		end
-	end)
-	M.patch_method(cls, "specific_update", PATCH_ID .. "_squad_direct_target", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "specific_update", PATCH_ID .. "_squad_direct_target", function(original)
 		return function(self, script_target_id, ...)
 			if type(self.zhopa2_prepare_hunt_target) == "function" then
 				self:zhopa2_prepare_hunt_target(script_target_id)
 			end
 			return original(self, script_target_id, ...)
 		end
-	end)
-	M.patch_method(cls, "update", PATCH_ID .. "_squad_after_update", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "update", PATCH_ID .. "_squad_after_update", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }
 			local sim = alife and alife() or nil
@@ -756,8 +1011,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
-	M.patch_method(cls, "remove_squad", PATCH_ID .. "_squad_remove", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "remove_squad", PATCH_ID .. "_squad_remove", function(original)
 		return function(self, ...)
 			if type(self.zhopa2_cleanup_debug) == "function" then
 				self:zhopa2_cleanup_debug()
@@ -770,8 +1025,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return wrapped_returns(original, self, ...)
 		end
-	end)
-	M.patch_method(cls, "remove_npc", PATCH_ID .. "_squad_remove_npc", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "remove_npc", PATCH_ID .. "_squad_remove_npc", function(original)
 		return function(self, npc_id, force, ...)
 			local result = { original(self, npc_id, force, ...) }
 			if self:npc_count() <= 0 then
@@ -784,16 +1039,16 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
-	M.patch_method(cls, "STATE_Write", PATCH_ID .. "_squad_state_write", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "STATE_Write", PATCH_ID .. "_squad_state_write", function(original)
 		return function(self, packet, ...)
 			original(self, packet, ...)
 			if type(self.zhopa2_state_write) == "function" then
 				self:zhopa2_state_write(packet)
 			end
 		end
-	end)
-	M.patch_method(cls, "STATE_Read", PATCH_ID .. "_squad_state_read", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "STATE_Read", PATCH_ID .. "_squad_state_read", function(original)
 		return function(self, packet, size, ...)
 			original(self, packet, size, ...)
 			if packet and type(packet.r_elapsed) == "function" and packet:r_elapsed() > 0 then
@@ -805,8 +1060,8 @@ function M.patch_sim_squad_scripted()
 				self:zhopa2_reset_state()
 			end
 		end
-	end)
-	M.patch_method(cls, "on_unregister", PATCH_ID .. "_squad_unregister", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "on_unregister", PATCH_ID .. "_squad_unregister", function(original)
 		return function(self, ...)
 			if type(self.zhopa2_unregister_base_camping_registry) == "function" then
 				self:zhopa2_unregister_base_camping_registry()
@@ -816,8 +1071,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return wrapped_returns(original, self, ...)
 		end
-	end)
-	M.patch_method(cls, "check_online_status", PATCH_ID .. "_squad_day_night", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "check_online_status", PATCH_ID .. "_squad_day_night", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }
 			if not (get_object_story_id(self.id) or self.force_online or self.__lock or IsSurvivalMode()) then
@@ -840,8 +1095,8 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
-	M.patch_method(cls, "switch_online", PATCH_ID .. "_squad_revenge_online", function(original)
+	end, "sim_squad_scripted")
+	patch_required_method(cls, "switch_online", PATCH_ID .. "_squad_revenge_online", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }
 			if type(self.zhopa2_apply_revenge_hostility) == "function" then
@@ -849,7 +1104,7 @@ function M.patch_sim_squad_scripted()
 			end
 			return unpack(result)
 		end
-	end)
+	end, "sim_squad_scripted")
 	return true
 end
 
@@ -1300,15 +1555,12 @@ end
 
 local function install_board_methods(cls)
 	for name, fn in pairs(board_methods) do
-		if type(cls[name]) ~= "function" then
-			cls[name] = fn
-		end
+		install_class_method(cls, name, fn)
 	end
 end
 
 function M.patch_sim_board()
-	local board_mod = safe_require("sim_board")
-	local cls = rawget(_G, "simulation_board") or board_mod
+	local cls = required_script_class("sim_board", "simulation_board", "sim_board", "register_smart")
 	if not cls then
 		return false
 	end
@@ -1372,6 +1624,10 @@ function M.patch_sim_board()
 			return original(self, se_obj, ...)
 		end
 	end)
+	local board = rawget(_G, "SIMBOARD")
+	if board and type(board.zhopa2_rebuild_buckets) == "function" then
+		pcall(board.zhopa2_rebuild_buckets, board)
+	end
 	return true
 end
 
@@ -1435,8 +1691,17 @@ end
 
 local function clear_forced_trade_job(st)
 	if st then
+		st.has_items_to_sell = false
+		st.zhopa2_trade_squad_id = nil
+		st.zhopa2_trade_smart_id = nil
 		st.zhopa2_trade_force_job_section = nil
 		st.zhopa2_trade_force_until = nil
+		st.zhopa2_trade_trader_id = nil
+		st.zhopa2_trade_reason = nil
+		st.zhopa2_trade_member_ids = nil
+		if st.trade_items then
+			empty_table(st.trade_items)
+		end
 	end
 end
 
@@ -1569,8 +1834,7 @@ local function refresh_job_capacity(smart)
 end
 
 function M.patch_smart_terrain()
-	local st_mod = safe_require("smart_terrain")
-	local cls = rawget(_G, "se_smart_terrain") or st_mod
+	local cls = required_script_class("smart_terrain", "se_smart_terrain", "smart_terrain", "select_npc_job")
 	if not cls then
 		return false
 	end
@@ -1729,8 +1993,7 @@ local function anomaly_materialize_virtual_artifacts(self)
 end
 
 function M.patch_bind_anomaly_zone()
-	local mod = safe_require("bind_anomaly_zone")
-	local cls = rawget(_G, "anomaly_zone_binder") or (mod and mod.anomaly_zone_binder)
+	local cls = required_script_class("bind_anomaly_zone", "anomaly_zone_binder", "bind_anomaly_zone", "spawn_artefact_randomly")
 	if not cls then
 		return false
 	end
@@ -1828,12 +2091,21 @@ local function direct_monster_update(self)
 	if not (squad and squad.current_action and squad.current_action == 0) then
 		return false
 	end
-	local squad_target = squad.assigned_target_id and simulation_objects.get_server_entity(squad.assigned_target_id)
+	local assigned_target_id = tonumber(squad.assigned_target_id)
+	local squad_target = nil
+	if assigned_target_id and simulation_objects and type(simulation_objects.get_server_entity) == "function" then
+		local ok_target, target = pcall(simulation_objects.get_server_entity, assigned_target_id)
+		squad_target = ok_target and target or nil
+	end
 	local scripted_squad = false
 	local run = task_run(squad)
-	if squad_target == nil and squad.assigned_target_id and squad.get_script_target and squad:get_script_target() ~= nil then
-		squad_target = alife_object(squad.assigned_target_id)
-		scripted_squad = squad_target ~= nil
+	if squad_target == nil and assigned_target_id and squad.get_script_target and alife_object then
+		local ok_script, script_target = pcall(squad.get_script_target, squad)
+		if ok_script and script_target ~= nil then
+			local ok_alife, target = pcall(alife_object, assigned_target_id)
+			squad_target = ok_alife and target or nil
+			scripted_squad = squad_target ~= nil
+		end
 	end
 	if not squad_target then
 		xr_logic.mob_release(self.object)
@@ -1866,8 +2138,7 @@ local function direct_monster_update(self)
 end
 
 function M.patch_bind_monster()
-	local mod = safe_require("bind_monster")
-	local cls = rawget(_G, "generic_object_binder") or (mod and mod.generic_object_binder)
+	local cls = required_script_class("bind_monster", "generic_object_binder", "bind_monster", "update")
 	if not cls then
 		return false
 	end
@@ -1907,11 +2178,9 @@ local function patch_death_class(cls, patch_name)
 end
 
 function M.patch_sim_offline_combat()
-	safe_require("se_stalker")
-	safe_require("se_monster")
-	patch_death_class(rawget(_G, "se_stalker"), "stalker_death_loot")
-	patch_death_class(rawget(_G, "se_monster"), "monster_death_loot")
-	return true
+	local stalker_ok = patch_death_class(required_script_class("se_stalker", "se_stalker", "sim_offline_combat", "on_death"), "stalker_death_loot")
+	local monster_ok = patch_death_class(required_script_class("se_monster", "se_monster", "sim_offline_combat", "on_death"), "monster_death_loot")
+	return stalker_ok == true and monster_ok == true
 end
 
 -- xr_gather_items / xr_corpse_detection -------------------------------------
@@ -1922,9 +2191,12 @@ local ZHOPA2_APPROACH_NPC_MIN_DIST_SQR = 1
 local ZHOPA2_APPROACH_CHECK_MS = 1500
 local ZHOPA2_APPROACH_BAD_TICKS = 3
 local ZHOPA2_APPROACH_PROGRESS_EPS_SQR = 0.25
-local ZHOPA2_APPROACH_FORWARD_STEPS = { 4, 8, 12, 18, 25, 35, 50 }
+local ZHOPA2_APPROACH_FORWARD_STEPS = {}
 local ZHOPA2_ARTIFACT_SCAN_MS = 3500
 local ZHOPA2_ARTIFACT_SCAN_STAGE = 5
+for i = 1, 50 do
+	ZHOPA2_APPROACH_FORWARD_STEPS[i] = i
+end
 
 local function gather_mod()
 	return safe_require("xr_gather_items")
@@ -1934,7 +2206,7 @@ local function corpse_mod()
 	return safe_require("xr_corpse_detection")
 end
 
-local function script_class(mod, name)
+local function module_member(mod, name)
 	return rawget(_G, name) or (mod and mod[name]) or nil
 end
 
@@ -2063,6 +2335,15 @@ local function zhopa2_record_loot(npc, item, reason)
 	return false
 end
 
+function M.zhopa2_note_vanilla_artifact_pickup(npc, artifact_id, section)
+	local mod = zhopa2_loot_mod()
+	if mod and type(mod.note_vanilla_artifact_pickup) == "function" then
+		local ok, result = pcall(mod.note_vanilla_artifact_pickup, npc, artifact_id, section)
+		return ok and result == true
+	end
+	return false
+end
+
 local function zhopa2_should_skip_overweight(npc)
 	return not zhopa2_loot_active(npc)
 end
@@ -2127,6 +2408,17 @@ local function zhopa2_mark_approach_failed(st, item_id, reason)
 	st.zhopa2_approach_failed_reason = reason or "approach_failed"
 end
 
+local function zhopa2_clear_approach_failure(st, item_id)
+	if not st then
+		return
+	end
+	if item_id and tonumber(st.zhopa2_approach_failed_item_id) ~= tonumber(item_id) then
+		return
+	end
+	st.zhopa2_approach_failed_item_id = nil
+	st.zhopa2_approach_failed_reason = nil
+end
+
 local function zhopa2_object_vertex(obj)
 	if not (obj and level) then
 		return nil
@@ -2161,6 +2453,11 @@ end
 local function zhopa2_nearest_accessible_vertex(npc, pos)
 	if not (npc and pos and vector and type(npc.accessible_nearest) == "function") then
 		return nil
+	end
+	local direct_vid = level and level.vertex_id and level.vertex_id(pos) or nil
+	local direct_ok, direct_pos = zhopa2_valid_accessible_vertex(npc, direct_vid)
+	if direct_ok then
+		return direct_vid, direct_pos
 	end
 	local out_pos = vector():set(0, 0, 0)
 	local ok, vid = pcall(function()
@@ -2250,7 +2547,27 @@ local function zhopa2_artifact_pickup_ready(npc, st)
 	end
 	local dist_sqr = ZHOPA2_ARTIFACT_PICKUP_DIST * ZHOPA2_ARTIFACT_PICKUP_DIST
 	return npc:position():distance_to_sqr(st.nearest_pos) <= dist_sqr
-		or st.zhopa2_approach_final == true
+end
+
+function M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, item)
+	if not (npc and st and type(npc.level_vertex_id) == "function") then
+		return false
+	end
+	local ok_npc_vid, npc_vid = pcall(npc.level_vertex_id, npc)
+	npc_vid = ok_npc_vid and tonumber(npc_vid) or nil
+	if not npc_vid then
+		return false
+	end
+	if st.vid and tonumber(st.vid) == npc_vid then
+		return true
+	end
+	if item and type(item.level_vertex_id) == "function" then
+		local ok_item_vid, item_vid = pcall(item.level_vertex_id, item)
+		if ok_item_vid and tonumber(item_vid) == npc_vid then
+			return true
+		end
+	end
+	return false
 end
 
 local function zhopa2_artifact_approach_progress_ok(npc, st)
@@ -2295,6 +2612,7 @@ local function zhopa2_prepare_next_artifact_approach(npc, st, item, item_pos, re
 	st.zhopa2_approach_pos = st.vid_pos
 	st.zhopa2_approach_final = final == true
 	st.zhopa2_approach_check_time = nil
+	st.zhopa2_artifact_force_pickup = nil
 	return true
 end
 
@@ -2510,7 +2828,9 @@ local function zhopa2_update_artifact_scan(npc, st, item, now)
 	return true
 end
 
-local function zhopa2_begin_artifact_pickup(npc, st, item, now)
+local function zhopa2_begin_artifact_pickup(npc, st, item, now, force)
+	zhopa2_clear_approach_failure(st, st and st.selected_id or nil)
+	st.zhopa2_artifact_force_pickup = force == true
 	if zhopa2_start_artifact_scan(npc, st, item, now) and zhopa2_update_artifact_scan(npc, st, item, now) then
 		return
 	end
@@ -2518,6 +2838,22 @@ local function zhopa2_begin_artifact_pickup(npc, st, item, now)
 		state_mgr.set_state(npc, "pickup_crouch")
 	end
 	st.stage = 2
+end
+
+function M.zhopa2_try_artifact_force_pickup(npc, st, item, now, reason)
+	if zhopa2_artifact_pickup_ready(npc, st) or M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, item) then
+		zhopa2_begin_artifact_pickup(npc, st, item, now, false)
+		return true
+	end
+	local item_pos = st and st.nearest_pos or nil
+	if not item_pos and item and type(item.position) == "function" then
+		item_pos = item:position()
+	end
+	if zhopa2_prepare_next_artifact_approach(npc, st, item, item_pos, reason or "approach_stalled") then
+		return true
+	end
+	zhopa2_begin_artifact_pickup(npc, st, item, now, true)
+	return true
 end
 
 local function zhopa2_reset_gather_state(st)
@@ -2540,6 +2876,7 @@ local function zhopa2_reset_gather_state(st)
 	st.zhopa2_targeted_item_id = nil
 	st.zhopa2_gather_precondition_key = nil
 	st.zhopa2_gather_precondition_time = nil
+	st.zhopa2_artifact_force_pickup = nil
 	zhopa2_reset_artifact_approach(st)
 end
 
@@ -2716,16 +3053,34 @@ local function zhopa2_gather_item_replacement(original)
 		local zhopa2_active = zhopa2_loot_active(npc)
 		if not (st and selected_id and itm and se_itm and (zhopa2_active or zhopa2_was_targeted) and zhopa2_can_take_section(npc, itm, itm:section())) then
 			if original then
+				local fallback_cls = se_itm and zhopa2_item_clsid(se_itm) or nil
+				if selected_id and itm and fallback_cls and IsArtefact and IsArtefact(nil, fallback_cls) == true then
+					M.zhopa2_note_vanilla_artifact_pickup(npc, selected_id, itm:section())
+				end
 				return original(npc, ...)
+			end
+			return
+		end
+		local cls = zhopa2_item_clsid(se_itm or itm)
+		local is_artifact = IsArtefact and IsArtefact(nil, cls) == true
+		if is_artifact
+			and zhopa2_was_targeted
+			and st.zhopa2_artifact_force_pickup ~= true
+			and not zhopa2_artifact_pickup_ready(npc, st)
+			and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, itm)
+		then
+			st.stage = 1
+			st.__stimer = nil
+			if state_mgr then
+				state_mgr.set_state(npc, st.state or "rush")
 			end
 			return
 		end
 		local items = gather_items_table()
 		items[selected_id] = nil
 		zhopa2_reset_gather_state(st)
-		local cls = zhopa2_item_clsid(se_itm or itm)
-		local is_artifact = IsArtefact and IsArtefact(nil, cls) == true
 		if is_artifact then
+			zhopa2_record_loot(npc, itm, "ground_artefact_loot")
 			local anomal_zone = bind_anomaly_zone and bind_anomaly_zone.parent_zones_by_artefact_id and bind_anomaly_zone.parent_zones_by_artefact_id[selected_id]
 			if anomal_zone and type(anomal_zone.on_artefact_take) == "function" then
 				anomal_zone:on_artefact_take(itm)
@@ -2752,7 +3107,9 @@ local function zhopa2_gather_item_replacement(original)
 			zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 			return
 		end
-		zhopa2_record_loot(npc, itm, is_artifact and "ground_artefact_loot" or "ground_item_loot")
+		if not is_artifact then
+			zhopa2_record_loot(npc, itm, "ground_item_loot")
+		end
 		if alife_create_item then
 			alife_create_item(itm:section(), npc)
 		end
@@ -2764,7 +3121,7 @@ local function zhopa2_gather_item_replacement(original)
 end
 
 local function patch_gather_classes(mod)
-	local eva = script_class(mod, "eva_gather_itm")
+	local eva = module_member(mod, "eva_gather_itm")
 	if eva then
 		M.patch_method(eva, "find_valid_item", PATCH_ID .. "_gather_find", function(original)
 			return function(self, ...)
@@ -2848,7 +3205,7 @@ local function patch_gather_classes(mod)
 			end
 		end)
 	end
-	local act = script_class(mod, "act_gather_itm")
+	local act = module_member(mod, "act_gather_itm")
 	if act then
 		M.patch_method(act, "initialize", PATCH_ID .. "_gather_init", function(original)
 			return function(self, ...)
@@ -2870,11 +3227,23 @@ local function patch_gather_classes(mod)
 				if not targeted_artifact then
 					return original(self, ...)
 				end
+				local item_pos = itm:position()
+				st.nearest_id = item_id
+				st.nearest_pos = item_pos
 				if action_base and action_base.execute then
 					action_base.execute(self)
 				end
 				local now = time_global and time_global() or 0
 				if state_mgr and state_mgr.get_state(npc) == "pickup_crouch" then
+					if st.zhopa2_artifact_force_pickup ~= true
+						and not zhopa2_artifact_pickup_ready(npc, st)
+						and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, itm)
+					then
+						st.__stimer = nil
+						st.stage = 1
+						state_mgr.set_state(npc, st.state or "rush")
+						return
+					end
 					local pickup_delay = st.zhopa2_targeted_item_id and 2500 or 15000
 					st.__stimer = st.__stimer or now + pickup_delay
 					if now > st.__stimer then
@@ -2889,14 +3258,16 @@ local function patch_gather_classes(mod)
 				if zhopa2_update_artifact_scan(npc, st, itm, now) then
 					return
 				end
-				if zhopa2_artifact_pickup_ready(npc, st) or not zhopa2_artifact_approach_progress_ok(npc, st) then
-					zhopa2_begin_artifact_pickup(npc, st, itm, now)
+				if zhopa2_artifact_pickup_ready(npc, st) then
+					zhopa2_begin_artifact_pickup(npc, st, itm, now, false)
+					return
+				end
+				if not zhopa2_artifact_approach_progress_ok(npc, st) then
+					M.zhopa2_try_artifact_force_pickup(npc, st, itm, now, "approach_stalled")
 					return
 				end
 				if zhopa2_artifact_approach_reached(npc, st) then
-					if not zhopa2_prepare_next_artifact_approach(npc, st, itm, st.nearest_pos or itm:position(), "approach_waypoint_reached") then
-						zhopa2_begin_artifact_pickup(npc, st, itm, now)
-					end
+					M.zhopa2_try_artifact_force_pickup(npc, st, itm, now, "approach_waypoint_reached")
 					return
 				end
 				if npc:path_type() ~= game_object.level_path then
@@ -3191,7 +3562,7 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 end
 
 local function patch_corpse_classes(mod)
-	local eva = script_class(mod, "evaluator_corpse")
+	local eva = module_member(mod, "evaluator_corpse")
 	if eva then
 		M.patch_method(eva, "find_valid_target", PATCH_ID .. "_corpse_find", function(original)
 			return function(self, ...)
@@ -3283,42 +3654,119 @@ function M.patch_se_level_changer()
 	return true
 end
 
-function M.ensure_all(reason)
-	M.patch_se_level_changer()
-	M.patch_sim_board()
-	M.patch_smart_terrain()
-	M.patch_sim_squad_scripted()
-	M.patch_bind_anomaly_zone()
-	M.patch_bind_monster()
-	M.patch_xr_gather_items()
-	M.patch_xr_corpse_detection()
-	M.patch_sim_offline_combat()
+local function run_runtime_patch(patch)
+	if not (patch and patch.name and patch.fn) then
+		return false
+	end
+	if runtime_item_ready("patch", patch.name) then
+		return true
+	end
+	local fn = M[patch.fn]
+	if type(fn) ~= "function" then
+		mark_runtime_item("patch", patch.name, false, "missing_patch_function", tostring(patch.fn))
+		return false
+	end
+	local ok, result, detail = pcall(fn)
+	if not ok then
+		mark_runtime_item("patch", patch.name, false, "patch_error", result)
+		return false
+	end
+	if result == false then
+		if runtime_error_enabled() then
+			mark_runtime_item("patch", patch.name, false, detail or "patch_deferred", "-")
+		end
+		return false
+	end
+	mark_runtime_item("patch", patch.name, true, "patch_ready", tostring(result or "true"))
 	return true
 end
 
-local function on_game_load()
+function M.ensure_all(reason)
+	local prev_patch_reason = current_patch_reason
+	current_patch_reason = reason
+	M.ensure_zhopa_modules()
+	for i = 1, #ZHOPA2_RUNTIME_PATCHES do
+		run_runtime_patch(ZHOPA2_RUNTIME_PATCHES[i])
+	end
+	runtime_mark_context()
+	current_patch_reason = prev_patch_reason
+	return runtime_ready_complete
+end
+
+function M._on_game_load()
 	M.ensure_all("on_game_load")
 end
 
-local function actor_on_first_update()
+function M._actor_on_first_update()
+	runtime_actor_first_update = true
+	if runtime_warmup_until == nil then
+		local now = runtime_time_ms()
+		runtime_warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
+	end
 	M.ensure_all("actor_on_first_update")
+end
+
+function M._runtime_recheck_due(reason)
+	if runtime_ready_complete then
+		return false
+	end
+	if reason == "on_game_start" or reason == "on_game_load" or reason == "actor_on_first_update" then
+		return true
+	end
+	local now = runtime_time_ms()
+	if now <= 0 then
+		return true
+	end
+	if now >= runtime_next_recheck_tg then
+		runtime_next_recheck_tg = now + RUNTIME_READY_RECHECK_MS
+		return true
+	end
+	return false
+end
+
+function M.runtime_not_ready_reason()
+	runtime_mark_context()
+	return runtime_ready_complete and nil or runtime_missing_item()
+end
+
+function M.runtime_ready(reason)
+	if M._runtime_recheck_due(reason) then
+		M.ensure_all(reason or "runtime_ready")
+	else
+		runtime_mark_context()
+	end
+	return runtime_ready_complete
+end
+
+function M.runtime_gate_ready(reason)
+	return M.runtime_ready(reason) == true
 end
 
 function M.on_game_start()
 	M.ensure_all("on_game_start")
 	if RegisterScriptCallback then
 		if UnregisterScriptCallback then
-			pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
-			pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+			pcall(UnregisterScriptCallback, "on_game_load", M._on_game_load)
+			pcall(UnregisterScriptCallback, "actor_on_first_update", M._actor_on_first_update)
 		end
-		RegisterScriptCallback("on_game_load", on_game_load)
-		RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+		RegisterScriptCallback("on_game_load", M._on_game_load)
+		RegisterScriptCallback("actor_on_first_update", M._actor_on_first_update)
+		runtime_callbacks_registered = true
+		runtime_mark_context()
 	end
 	return true
 end
 
 function on_game_start()
 	return M.on_game_start()
+end
+
+_G.zhopa2_runtime_ready = function(reason)
+	return M.runtime_ready(reason)
+end
+
+_G.zhopa2_runtime_not_ready_reason = function()
+	return M.runtime_not_ready_reason()
 end
 
 _G.zhopa2_runtime_patches = M

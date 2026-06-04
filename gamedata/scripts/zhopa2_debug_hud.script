@@ -20,6 +20,7 @@ local faction_spots = {
 
 local owned_spots = {}
 local squad_spot_ids = {}
+local callbacks_registered = false
 
 local function enabled()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -286,13 +287,15 @@ function update_squad(squad)
 		return
 	end
 
-	if old == nil then
-		local ok_add = pcall(function() map_add(id, spot, hint) end)
-		if ok_add then
-			owned_spots[id] = spot
-			if squad_id then
-				squad_spot_ids[squad_id] = id
-			end
+	if old ~= nil then
+		owned_spots[id] = nil
+		forget_spot_owner(id, squad_id)
+	end
+	local ok_add = pcall(function() map_add(id, spot, hint) end)
+	if ok_add then
+		owned_spots[id] = spot
+		if squad_id then
+			squad_spot_ids[squad_id] = id
 		end
 	end
 end
@@ -322,4 +325,19 @@ end
 
 function on_game_load()
 	cleanup_all()
+end
+
+function on_game_start()
+	if not RegisterScriptCallback then
+		callbacks_registered = false
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+	end
+	local ok = true
+	ok = pcall(RegisterScriptCallback, "on_game_load", on_game_load) and ok
+	ok = pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update) and ok
+	callbacks_registered = ok == true
 end

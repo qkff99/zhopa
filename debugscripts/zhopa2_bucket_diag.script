@@ -1,0 +1,792 @@
+local M = {}
+
+local AUTO_DUMP_ENABLED = true
+local DUMP_DELAY_MS = 3000
+local RETRY_MS = 2000
+local MAX_ATTEMPTS = 4
+local MAX_LEVEL_LINES = 24
+local MAX_ENTRY_LINES = 160
+local MAX_TRADE_SQUAD_LINES = 120
+
+local scheduled = false
+local dumped = false
+local next_dump_tg = nil
+local attempts = 0
+
+local function cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+local function debug_print_enabled()
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 bucket diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 bucket diag | " .. fmt, ...))
+	end
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result = pcall(fn, obj, ...)
+	return ok, result
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function field_value(obj, field)
+	local ok, value = safe_field(obj, field)
+	if not ok then
+		return nil
+	end
+	if type(value) == "function" then
+		local ok_call, result = pcall(value, obj)
+		return ok_call and result or nil
+	end
+	return value
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return obj
+	end
+	if type(obj) == "string" then
+		return tonumber(obj) or obj
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return tonumber(id) or id
+	end
+	ok, id = safe_call(obj, "id")
+	if ok and id ~= nil then
+		return tonumber(id) or id
+	end
+	return nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" or type(obj) == "string" then
+		local id = tonumber(obj)
+		if id then
+			local se = safe_alife_object(id)
+			if se then
+				return object_name(se) or tostring(id)
+			end
+		end
+		return tostring(obj)
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "name")
+	if ok and name ~= nil then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "section_name")
+	if ok and name ~= nil then
+		return tostring(name)
+	end
+	return nil
+end
+
+local function named_id(obj_or_id)
+	local obj = obj_or_id
+	local id = object_id(obj)
+	if type(obj_or_id) == "number" or type(obj_or_id) == "string" then
+		local num = tonumber(obj_or_id)
+		if num then
+			obj = safe_alife_object(num) or obj_or_id
+			id = num
+		end
+	end
+	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id or "-"))
+end
+
+local function table_count(t)
+	if type(t) ~= "table" then
+		return 0
+	end
+	local n = 0
+	for _ in pairs(t) do
+		n = n + 1
+	end
+	return n
+end
+
+local function sorted_keys(t)
+	local keys = {}
+	if type(t) ~= "table" then
+		return keys
+	end
+	for k in pairs(t) do
+		keys[#keys + 1] = k
+	end
+	table.sort(keys, function(a, b)
+		local na = tonumber(a)
+		local nb = tonumber(b)
+		if na and nb then
+			return na < nb
+		end
+		return tostring(a) < tostring(b)
+	end)
+	return keys
+end
+
+local function bucket_stats(bucket)
+	local levels = 0
+	local entries = 0
+	if type(bucket) ~= "table" then
+		return 0, 0
+	end
+	for _, by_id in pairs(bucket) do
+		levels = levels + 1
+		entries = entries + table_count(by_id)
+	end
+	return levels, entries
+end
+
+local function kind_bucket_stats(kind_bucket)
+	local levels = 0
+	local kinds = 0
+	local entries = 0
+	if type(kind_bucket) ~= "table" then
+		return 0, 0, 0
+	end
+	for _, by_kind in pairs(kind_bucket) do
+		levels = levels + 1
+		for _, by_id in pairs(by_kind or {}) do
+			kinds = kinds + 1
+			entries = entries + table_count(by_id)
+		end
+	end
+	return levels, kinds, entries
+end
+
+local function smart_from_board(board, id)
+	if not (board and id) then
+		return nil
+	end
+	local entry = board.smarts and board.smarts[id] or board.smarts and board.smarts[tonumber(id)] or nil
+	return entry and (entry.smrt or entry) or nil
+end
+
+local function squad_from_board(board, id, stored)
+	local stored_type = type(stored)
+	if stored_type == "table" or stored_type == "userdata" then
+		return stored
+	end
+	if not (board and id) then
+		return nil
+	end
+	return board.squads and (board.squads[id] or board.squads[tonumber(id)]) or safe_alife_object(id) or nil
+end
+
+local function level_name_for_obj(obj)
+	if not obj then
+		return nil
+	end
+	local ok, pos_level = safe_call(obj, "level_name")
+	if ok and pos_level then
+		return pos_level
+	end
+	local ok_vertex, vertex = safe_field(obj, "m_game_vertex_id")
+	if not ok_vertex or vertex == nil then
+		ok_vertex, vertex = safe_field(obj, "game_vertex_id")
+	end
+	if type(vertex) == "function" then
+		local ok_vertex, value = pcall(vertex, obj)
+		vertex = ok_vertex and value or nil
+	end
+	local sim = alife and alife() or nil
+	if sim and game_graph and vertex then
+		local ok_level, name = pcall(function()
+			return sim:level_name(game_graph():vertex(vertex):level_id())
+		end)
+		if ok_level then
+			return name
+		end
+	end
+	return nil
+end
+
+local function bool_text(value)
+	return value == true and "true" or "false"
+end
+
+local function flags_text(flags)
+	if type(flags) ~= "table" then
+		return "-"
+	end
+	return string.format(
+		"route=%s,provider=%s,customer=%s,trader=%s,barman=%s,medic=%s,tech=%s",
+		bool_text(flags.trade_route),
+		bool_text(flags.provider),
+		bool_text(flags.customer),
+		bool_text(flags.trader),
+		bool_text(flags.barman),
+		bool_text(flags.medic),
+		bool_text(flags.tech)
+	)
+end
+
+local function dump_level_bucket(name, bucket, resolver, level_map)
+	local printed_levels = 0
+	local printed_entries = 0
+	for _, level_key in ipairs(sorted_keys(bucket)) do
+		if printed_levels >= MAX_LEVEL_LINES then
+			log("%s levels_truncated shown [%s] limit [%s]", tostring(name), tostring(printed_levels), tostring(MAX_LEVEL_LINES))
+			return
+		end
+		local by_id = bucket[level_key]
+		printed_levels = printed_levels + 1
+		log("%s level [%s] count [%s]", tostring(name), tostring(level_key), tostring(table_count(by_id)))
+		for _, id in ipairs(sorted_keys(by_id)) do
+			if printed_entries >= MAX_ENTRY_LINES then
+				log("%s entries_truncated shown [%s] limit [%s]", tostring(name), tostring(printed_entries), tostring(MAX_ENTRY_LINES))
+				return
+			end
+			local stored = by_id and by_id[id] or nil
+			local obj = resolver and resolver(id, stored) or nil
+			local stored_type = type(stored)
+			if not obj and (stored_type == "table" or stored_type == "userdata") then
+				obj = stored
+			end
+			printed_entries = printed_entries + 1
+			log(
+				"%s entry [%s] bucket_level [%s] indexed_level [%s] real_level [%s]",
+				tostring(name),
+				named_id(obj or id),
+				tostring(level_key),
+				tostring(level_map and level_map[id] or level_map and level_map[tonumber(id)] or "-"),
+				tostring(level_name_for_obj(obj) or "-")
+			)
+		end
+	end
+	if printed_levels <= 0 then
+		log("%s empty", tostring(name))
+	end
+end
+
+local function economy_mod()
+	local economy = rawget(_G, "zhopa2_economy")
+	if not economy and require then
+		pcall(require, "zhopa2_economy")
+		economy = rawget(_G, "zhopa2_economy")
+	end
+	return economy
+end
+
+local function smart_id_for_squad(squad)
+	return tonumber(field_value(squad, "smart_id"))
+end
+
+local function target_id_for_squad(squad)
+	return tonumber(field_value(squad, "current_target_id"))
+		or tonumber(field_value(squad, "assigned_target_id"))
+		or tonumber(field_value(squad, "task_target_id"))
+		or tonumber(field_value(squad, "zhopa2_target"))
+end
+
+local function current_smart_for_squad(board, squad)
+	local smart_id = smart_id_for_squad(squad)
+	if not smart_id then
+		return nil
+	end
+	return smart_from_board(board, smart_id) or safe_alife_object(smart_id)
+end
+
+local function trade_flags_for_smart(board, smart_id)
+	if not (board and board.zhopa2_trade_smart_flags and smart_id) then
+		return nil
+	end
+	return board.zhopa2_trade_smart_flags[smart_id] or board.zhopa2_trade_smart_flags[tonumber(smart_id)]
+end
+
+local function trade_state_relevant(squad)
+	return field_value(squad, "zhopa2_last_trade_result") ~= nil
+		or field_value(squad, "zhopa2_trade_detail") ~= nil
+		or field_value(squad, "zhopa2_rest_trade_state") ~= nil
+		or field_value(squad, "zhopa2_base_trade_result") ~= nil
+		or field_value(squad, "zhopa2_trade_queue_state") ~= nil
+end
+
+local function pcall_profile(fn, ...)
+	if type(fn) ~= "function" then
+		return "-", "missing", "-"
+	end
+	local ok, a, b, c = pcall(fn, ...)
+	if not ok then
+		return "error", tostring(a), "-"
+	end
+	return tostring(a), tostring(b or "-"), tostring(c or "-")
+end
+
+local function online_member_count(economy, squad)
+	if not (economy and type(economy._online_squad_members) == "function") then
+		return "-"
+	end
+	local ok, members = pcall(economy._online_squad_members, squad)
+	if not ok then
+		return "error"
+	end
+	return type(members) == "table" and tostring(#members) or "-"
+end
+
+local function dump_trade_squad_candidates(board)
+	local economy = economy_mod()
+	local trade_tasks = {
+		REST = true,
+		BASE_CAMPING = true,
+		TRADE = true,
+	}
+	local scanned = 0
+	local relevant = 0
+	local printed = 0
+	local route_smarts = 0
+	local work_yes = 0
+
+	for _, level_key in ipairs(sorted_keys(board and board.zhopa2_squads_by_level)) do
+		local by_id = board.zhopa2_squads_by_level[level_key]
+		for _, id in ipairs(sorted_keys(by_id)) do
+			scanned = scanned + 1
+			local squad = squad_from_board(board, id, by_id and by_id[id])
+			local task = field_value(squad, "zhopa2_task")
+			local smart_id = smart_id_for_squad(squad)
+			local current_smart = current_smart_for_squad(board, squad)
+			local flags = trade_flags_for_smart(board, smart_id)
+			local is_trade_smart = flags and (flags.trade_route == true or flags.provider == true or flags.customer == true)
+
+			if flags and flags.trade_route == true then
+				route_smarts = route_smarts + 1
+			end
+
+			if trade_tasks[task] or is_trade_smart or trade_state_relevant(squad) then
+				relevant = relevant + 1
+				if printed < MAX_TRADE_SQUAD_LINES then
+					local has_smart, has_smart_reason = pcall_profile(economy and economy.squad_has_trade_smart, squad)
+					local online_count = online_member_count(economy, squad)
+					local online_num = tonumber(online_count)
+					local route_has, route_reason, route_value = "skipped", "online", "-"
+					local offline_has, offline_reason, offline_value = "skipped", "online", "-"
+					if not online_num or online_num <= 0 then
+						route_has, route_reason, route_value = pcall_profile(economy and economy.squad_trade_route_profile, squad)
+						offline_has, offline_reason, offline_value = pcall_profile(economy and economy.offline_squad_has_trade_work, squad, current_smart)
+					end
+					if offline_has == "true" or route_has == "true" then
+						work_yes = work_yes + 1
+					end
+					printed = printed + 1
+					log(
+						"trade_candidate squad [%s] bucket_level [%s] real_level [%s] task [%s] smart [%s] target [%s] flags [%s] online [%s] has_smart [%s/%s] route_profile [%s/%s/%s] offline_work [%s/%s/%s] queue [%s] last [%s] detail [%s]",
+						named_id(squad or id),
+						tostring(level_key),
+						tostring(level_name_for_obj(squad) or "-"),
+						tostring(task or "-"),
+						named_id(current_smart or smart_id or "-"),
+						named_id(target_id_for_squad(squad) or "-"),
+						flags_text(flags),
+						online_count,
+						has_smart,
+						has_smart_reason,
+						route_has,
+						route_reason,
+						route_value,
+						offline_has,
+						offline_reason,
+						offline_value,
+						tostring(field_value(squad, "zhopa2_trade_queue_state") or "-"),
+						tostring(field_value(squad, "zhopa2_last_trade_result") or field_value(squad, "zhopa2_rest_trade_result") or field_value(squad, "zhopa2_base_trade_result") or "-"),
+						tostring(field_value(squad, "zhopa2_trade_detail") or "-")
+					)
+				end
+			end
+		end
+	end
+
+	log(
+		"trade_candidates summary scanned [%s] relevant [%s] printed [%s] route_smart_refs [%s] work_yes [%s]",
+		tostring(scanned),
+		tostring(relevant),
+		tostring(printed),
+		tostring(route_smarts),
+		tostring(work_yes)
+	)
+	if relevant > printed then
+		log("trade_candidates entries_truncated shown [%s] total [%s]", tostring(printed), tostring(relevant))
+	end
+end
+
+local function dump_kind_bucket(board)
+	local by_kind = board and board.zhopa2_smarts_by_level_kind or nil
+	local printed_levels = 0
+	local printed_entries = 0
+	for _, level_key in ipairs(sorted_keys(by_kind)) do
+		if printed_levels >= MAX_LEVEL_LINES then
+			log("smart_kind_bucket levels_truncated shown [%s] limit [%s]", tostring(printed_levels), tostring(MAX_LEVEL_LINES))
+			return
+		end
+		printed_levels = printed_levels + 1
+		local kind_table = by_kind[level_key]
+		for _, kind in ipairs(sorted_keys(kind_table)) do
+			local bucket = kind_table[kind]
+			log("smart_kind_bucket level [%s] kind [%s] count [%s]", tostring(level_key), tostring(kind), tostring(table_count(bucket)))
+			for _, id in ipairs(sorted_keys(bucket)) do
+				if printed_entries >= MAX_ENTRY_LINES then
+					log("smart_kind_bucket entries_truncated shown [%s] limit [%s]", tostring(printed_entries), tostring(MAX_ENTRY_LINES))
+					return
+				end
+				printed_entries = printed_entries + 1
+				log("smart_kind_entry smart [%s] level [%s] kind [%s]", named_id(smart_from_board(board, id) or id), tostring(level_key), tostring(kind))
+			end
+		end
+	end
+	if printed_levels <= 0 then
+		log("smart_kind_bucket empty")
+	end
+end
+
+local function dump_trade_flags(board)
+	local flags_by_smart = board and board.zhopa2_trade_smart_flags or nil
+	local level_by_smart = board and board.zhopa2_trade_smart_level or nil
+	local route = 0
+	local provider = 0
+	local customer = 0
+	local printed = 0
+	for _, id in ipairs(sorted_keys(flags_by_smart)) do
+		local flags = flags_by_smart[id]
+		if flags and flags.trade_route == true then
+			route = route + 1
+		end
+		if flags and flags.provider == true then
+			provider = provider + 1
+		end
+		if flags and flags.customer == true then
+			customer = customer + 1
+		end
+	end
+	log(
+		"trade_flags total [%s] route [%s] provider [%s] customer [%s] level_map [%s]",
+		tostring(table_count(flags_by_smart)),
+		tostring(route),
+		tostring(provider),
+		tostring(customer),
+		tostring(table_count(level_by_smart))
+	)
+	for _, id in ipairs(sorted_keys(flags_by_smart)) do
+		if printed >= MAX_ENTRY_LINES then
+			log("trade_flags entries_truncated shown [%s] limit [%s]", tostring(printed), tostring(MAX_ENTRY_LINES))
+			return
+		end
+		local smart = smart_from_board(board, id)
+		printed = printed + 1
+		log(
+			"trade_flag smart [%s] indexed_level [%s] real_level [%s] flags [%s]",
+			named_id(smart or id),
+			tostring(level_by_smart and (level_by_smart[id] or level_by_smart[tonumber(id)]) or "-"),
+			tostring(level_name_for_obj(smart) or "-"),
+			flags_text(flags_by_smart[id])
+		)
+	end
+	if printed <= 0 then
+		log("trade_flags empty")
+	end
+end
+
+local function dump_board_consistency(board)
+	local vanilla_smarts = table_count(board and board.smarts)
+	local smart_level = board and board.zhopa2_smart_level or nil
+	local missing_smart_level = 0
+	local stale_smart_level = 0
+	for id in pairs(board and board.smarts or {}) do
+		if not (smart_level and (smart_level[id] or smart_level[tonumber(id)])) then
+			missing_smart_level = missing_smart_level + 1
+		end
+	end
+	for id in pairs(smart_level or {}) do
+		if not smart_from_board(board, id) then
+			stale_smart_level = stale_smart_level + 1
+		end
+	end
+
+	local vanilla_squads = table_count(board and board.squads)
+	local squad_level = board and board.zhopa2_squad_level or nil
+	local missing_squad_level = 0
+	local stale_squad_level = 0
+	for id in pairs(board and board.squads or {}) do
+		if not (squad_level and (squad_level[id] or squad_level[tonumber(id)])) then
+			missing_squad_level = missing_squad_level + 1
+		end
+	end
+	for id in pairs(squad_level or {}) do
+		if not squad_from_board(board, id) then
+			stale_squad_level = stale_squad_level + 1
+		end
+	end
+
+	log(
+		"consistency vanilla_smarts [%s] smart_level [%s] missing_smart_level [%s] stale_smart_level [%s] vanilla_squads [%s] squad_level [%s] missing_squad_level [%s] stale_squad_level [%s]",
+		tostring(vanilla_smarts),
+		tostring(table_count(smart_level)),
+		tostring(missing_smart_level),
+		tostring(stale_smart_level),
+		tostring(vanilla_squads),
+		tostring(table_count(squad_level)),
+		tostring(missing_squad_level),
+		tostring(stale_squad_level)
+	)
+end
+
+local function dump_index_summary()
+	local idx = rawget(_G, "zhopa2_index")
+	if not idx then
+		log("index missing")
+		return
+	end
+	local smart_artifact_buckets, smart_artifact_entries = bucket_stats(idx.smart_artifacts)
+	local zone_artifact_buckets, zone_artifact_entries = bucket_stats(idx.zone_artifacts)
+	local virtual_zone_levels, virtual_zone_entries = bucket_stats(idx.virtual_zones_by_level)
+	local base_camping_buckets, base_camping_entries = bucket_stats(idx.base_camping_targets)
+	log(
+		"index smart_ownership [%s] base_pull_squad [%s] base_camping_targets [%s/%s] base_camping_squad_target [%s] artifact_total [%s] artifact_smart [%s] smart_artifacts [%s/%s] zone_artifacts [%s/%s] virtual_artifacts [%s] virtual_zones [%s] virtual_zones_by_level [%s/%s] reservations [%s] cargo [%s] revision [%s]",
+		tostring(table_count(idx.smart_ownership)),
+		tostring(table_count(idx.base_pull_squad)),
+		tostring(base_camping_buckets),
+		tostring(base_camping_entries),
+		tostring(table_count(idx.base_camping_squad_target)),
+		tostring(table_count(idx.artifacts)),
+		tostring(table_count(idx.artifact_smart)),
+		tostring(smart_artifact_buckets),
+		tostring(smart_artifact_entries),
+		tostring(zone_artifact_buckets),
+		tostring(zone_artifact_entries),
+		tostring(table_count(idx.virtual_artifacts)),
+		tostring(table_count(idx.virtual_zones)),
+		tostring(virtual_zone_levels),
+		tostring(virtual_zone_entries),
+		tostring(table_count(idx.artifact_reserved_by)),
+		tostring(table_count(idx.squad_artifact_cargo)),
+		tostring(type(idx.get_revision) == "function" and idx.get_revision() or "-")
+	)
+end
+
+local function dump_index_buckets()
+	local idx = rawget(_G, "zhopa2_index")
+	if not idx then
+		return
+	end
+	local printed = 0
+	for _, smart_id in ipairs(sorted_keys(idx.smart_artifacts)) do
+		if printed >= MAX_ENTRY_LINES then
+			log("smart_artifacts entries_truncated shown [%s] limit [%s]", tostring(printed), tostring(MAX_ENTRY_LINES))
+			break
+		end
+		local bucket = idx.smart_artifacts[smart_id]
+		log("smart_artifacts smart [%s] count [%s]", named_id(smart_id), tostring(table_count(bucket)))
+		printed = printed + 1
+	end
+	printed = 0
+	for _, smart_id in ipairs(sorted_keys(idx.base_camping_targets)) do
+		if printed >= MAX_ENTRY_LINES then
+			log("base_camping entries_truncated shown [%s] limit [%s]", tostring(printed), tostring(MAX_ENTRY_LINES))
+			break
+		end
+		local bucket = idx.base_camping_targets[smart_id]
+		log("base_camping smart [%s] squad_count [%s]", named_id(smart_id), tostring(table_count(bucket)))
+		printed = printed + 1
+	end
+end
+
+function M.refresh_simboard_buckets()
+	local board = rawget(_G, "SIMBOARD")
+	if not (board and type(board.zhopa2_rebuild_buckets) == "function") then
+		return false, "missing_rebuild"
+	end
+	local ok, err = pcall(board.zhopa2_rebuild_buckets, board)
+	return ok == true, ok and "rebuilt" or tostring(err)
+end
+
+function M.refresh_trade_buckets()
+	local board = rawget(_G, "SIMBOARD")
+	if not (board and board.smarts and type(board.zhopa2_register_trade_smart) == "function") then
+		return 0
+	end
+	local refreshed = 0
+	for _, smart_id in ipairs(sorted_keys(board.smarts)) do
+		local smart = smart_from_board(board, smart_id)
+		if smart then
+			pcall(board.zhopa2_register_trade_smart, board, smart)
+			refreshed = refreshed + 1
+		end
+	end
+	return refreshed
+end
+
+function M.dump(reason)
+	if not debug_print_enabled() then
+		return false
+	end
+	local board = rawget(_G, "SIMBOARD")
+	log("begin reason [%s] board [%s] actor [%s]", tostring(reason or "-"), tostring(board ~= nil), named_id(db and db.actor))
+	if not board then
+		log("end no_simboard")
+		return false
+	end
+
+	local smart_levels, smart_entries = bucket_stats(board.zhopa2_smarts_by_level)
+	local squad_levels, squad_entries = bucket_stats(board.zhopa2_squads_by_level)
+	local trade_levels, trade_entries = bucket_stats(board.zhopa2_trade_smarts_by_level)
+	local kind_levels, kind_count, kind_entries = kind_bucket_stats(board.zhopa2_smarts_by_level_kind)
+	log(
+		"methods ensure [%s] rebuild [%s] register_smart [%s] unregister_smart [%s] update_squad_level [%s] unregister_squad [%s] register_trade [%s]",
+		tostring(type(board.zhopa2_ensure_buckets)),
+		tostring(type(board.zhopa2_rebuild_buckets)),
+		tostring(type(board.zhopa2_register_smart)),
+		tostring(type(board.zhopa2_unregister_smart)),
+		tostring(type(board.zhopa2_update_squad_level)),
+		tostring(type(board.zhopa2_unregister_squad)),
+		tostring(type(board.zhopa2_register_trade_smart))
+	)
+	log(
+		"summary buckets_ready [%s] vanilla_smarts [%s] vanilla_squads [%s] smarts_by_level [%s/%s] smart_level [%s] smart_kind [%s/%s/%s] squads_by_level [%s/%s] squad_level [%s] trade_by_level [%s/%s] trade_flags [%s]",
+		tostring(board.zhopa2_buckets_ready),
+		tostring(table_count(board.smarts)),
+		tostring(table_count(board.squads)),
+		tostring(smart_levels),
+		tostring(smart_entries),
+		tostring(table_count(board.zhopa2_smart_level)),
+		tostring(kind_levels),
+		tostring(kind_count),
+		tostring(kind_entries),
+		tostring(squad_levels),
+		tostring(squad_entries),
+		tostring(table_count(board.zhopa2_squad_level)),
+		tostring(trade_levels),
+		tostring(trade_entries),
+		tostring(table_count(board.zhopa2_trade_smart_flags))
+	)
+	dump_board_consistency(board)
+	dump_level_bucket("smarts_by_level", board.zhopa2_smarts_by_level, function(id) return smart_from_board(board, id) end, board.zhopa2_smart_level)
+	dump_kind_bucket(board)
+	dump_level_bucket("squads_by_level", board.zhopa2_squads_by_level, function(id, stored) return squad_from_board(board, id, stored) end, board.zhopa2_squad_level)
+	dump_level_bucket("trade_smarts_by_level", board.zhopa2_trade_smarts_by_level, function(id) return smart_from_board(board, id) end, board.zhopa2_trade_smart_level)
+	dump_trade_flags(board)
+	dump_trade_squad_candidates(board)
+	dump_index_summary()
+	dump_index_buckets()
+	log("end")
+	return true
+end
+
+function M.refresh_and_dump()
+	local rebuilt, rebuild_reason = M.refresh_simboard_buckets()
+	local trade_refreshed = M.refresh_trade_buckets()
+	log("manual_refresh rebuilt [%s] reason [%s] trade_refreshed [%s]", tostring(rebuilt), tostring(rebuild_reason), tostring(trade_refreshed))
+	return M.dump("manual_after_refresh")
+end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+function M.actor_on_update()
+	if dumped then
+		return
+	end
+	local now = now_ms()
+	if next_dump_tg and now > 0 and now < next_dump_tg then
+		return
+	end
+	attempts = attempts + 1
+	if M.dump("actor_update_" .. tostring(attempts)) then
+		dumped = true
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		return
+	end
+	if attempts >= MAX_ATTEMPTS and UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+	end
+	next_dump_tg = now > 0 and (now + RETRY_MS) or nil
+end
+
+function M.actor_on_first_update()
+	if not AUTO_DUMP_ENABLED or scheduled then
+		return
+	end
+	scheduled = true
+	local now = now_ms()
+	next_dump_tg = now > 0 and (now + DUMP_DELAY_MS) or nil
+	if RegisterScriptCallback then
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	else
+		M.actor_on_update()
+	end
+end
+
+function M.on_game_start()
+	if not AUTO_DUMP_ENABLED or not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function actor_on_update()
+	return M.actor_on_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_bucket_diag = M
+return M

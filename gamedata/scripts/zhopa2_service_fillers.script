@@ -102,6 +102,18 @@ local function cfg_bool(key, default)
 	return default == true
 end
 
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
+end
+
 local function cfg_alias(name)
 	local cfg = cfg_mod()
 	if cfg and type(cfg.get_faction_alias) == "function" then
@@ -796,6 +808,9 @@ local function spawn_service_squad(smart, engine_owner, role)
 end
 
 function M.reconcile_smart(smart, ownership, allow_spawn, reason)
+	if not runtime_ready("service_reconcile") then
+		return false, "runtime_not_ready"
+	end
 	if cfg_bool("enabled", true) ~= true or not smart_is_base(smart) then
 		clear_smart_fields(smart)
 		unmark_smart(smart)
@@ -862,6 +877,9 @@ local function smart_by_id(id)
 end
 
 function M.fill_marked_smarts(reason)
+	if not runtime_ready("service_fill_marked") then
+		return 0, "runtime_not_ready"
+	end
 	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true then
 		return 0
 	end
@@ -884,6 +902,9 @@ function M.fill_marked_smarts(reason)
 end
 
 function M.on_smart_update(smart, ownership)
+	if not runtime_ready("service_smart_update") then
+		return false, "runtime_not_ready"
+	end
 	return M.reconcile_smart(smart, ownership, false, "smart_update")
 end
 
@@ -893,14 +914,23 @@ function M.on_smart_unregister(smart)
 end
 
 function M.on_before_surge(flags)
+	if not runtime_ready("service_before_surge") then
+		return false, "runtime_not_ready"
+	end
 	return queue_emission_fill("surge", surge_event_due())
 end
 
 function M.on_before_psi_storm(flags)
+	if not runtime_ready("service_before_psi_storm") then
+		return false, "runtime_not_ready"
+	end
 	return queue_emission_fill("psi_storm", psi_storm_event_due())
 end
 
 function M.actor_on_update()
+	if not runtime_ready("service_actor_update") then
+		return false, "runtime_not_ready"
+	end
 	return flush_pending_emission_fill()
 end
 
