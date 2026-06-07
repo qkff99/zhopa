@@ -12,6 +12,7 @@ local event_stores = {
 }
 local targeted_item_requests = {}
 local targeted_item_requests_by_item = {}
+local exclusive_item_reservations = {}
 local vanilla_artifact_pickups = {}
 local VANILLA_ARTIFACT_PICKUP_TTL_MS = 30000
 
@@ -547,6 +548,47 @@ local function object_is_story(obj, id)
 	return get_object_story_id and id and get_object_story_id(id) ~= nil
 end
 
+local function cleanup_exclusive_item_reservations()
+	local ttl = math.max(1, cfg_num("loot_event_ttl_sec", 900)) * 1000
+	local now = now_ms()
+	for item_id, request in pairs(exclusive_item_reservations) do
+		local expired = not request or not request.npc_id or (now > 0 and (now - (request.tg or 0)) > ttl)
+		local item = online_object_by_id(item_id)
+		local se_item = item and alife_object and alife_object(item_id) or nil
+		if expired or not item or (se_item and tonumber(se_item.parent_id) ~= INVALID_ID) then
+			exclusive_item_reservations[item_id] = nil
+		end
+	end
+end
+
+local function exclusive_item_owner(item_id)
+	item_id = tonumber(item_id)
+	if not valid_id(item_id) then
+		return nil
+	end
+	cleanup_exclusive_item_reservations()
+	local request = exclusive_item_reservations[item_id]
+	if request and valid_id(request.npc_id) then
+		return tonumber(request.npc_id)
+	end
+	return nil
+end
+
+local function item_reserved_for_other(obj, looter)
+	local item_id = tonumber(object_id(obj))
+	if not valid_id(item_id) then
+		return false
+	end
+	local owner_id = exclusive_item_owner(item_id)
+	local targeted = targeted_item_requests_by_item[item_id]
+	owner_id = owner_id or (targeted and tonumber(targeted.npc_id) or nil)
+	if not owner_id then
+		return false
+	end
+	local looter_id = object_id(looter)
+	return tonumber(looter_id) ~= tonumber(owner_id)
+end
+
 function M.can_take_section(section, obj, looter)
 	if type(section) ~= "string" or section == "" then
 		return false
@@ -558,6 +600,9 @@ function M.can_take_section(section, obj, looter)
 		return false
 	end
 	if object_is_story(obj) then
+		return false
+	end
+	if item_reserved_for_other(obj, looter) then
 		return false
 	end
 	if not section_is_lootable_inventory(section, obj) then
@@ -1408,6 +1453,60 @@ local function targeted_gather_clear()
 	return type(clear) == "function" and clear or nil
 end
 
+function M.reserve_item_for_npc(npc, item_id, reason)
+	if not runtime_ready("loot_reserve_item") then
+		return false, "runtime_not_ready"
+	end
+	item_id = tonumber(item_id)
+	local npc_id = object_id(npc)
+	if not (valid_id(npc_id) and valid_id(item_id)) then
+		return false, "reserve_bad_ids"
+	end
+	local item = online_object_by_id(item_id)
+	local se_item = item and alife_object and alife_object(item_id) or nil
+	if not (item and (not se_item or tonumber(se_item.parent_id) == INVALID_ID)) then
+		return false, "reserve_no_online_item"
+	end
+	cleanup_exclusive_item_reservations()
+	local existing = exclusive_item_reservations[item_id]
+	if existing and existing.npc_id and tonumber(existing.npc_id) ~= npc_id then
+		return false, "reserve_owned_by:" .. tostring(existing.npc_id)
+	end
+	exclusive_item_reservations[item_id] = {
+		npc_id = npc_id,
+		item_id = item_id,
+		reason = reason or "exclusive_item_reservation",
+		tg = now_ms(),
+	}
+	return true, "reserved"
+end
+
+function M.release_item_reservation(item_id, npc_or_id)
+	item_id = tonumber(item_id)
+	if not valid_id(item_id) then
+		return false
+	end
+	local request = exclusive_item_reservations[item_id]
+	if not request then
+		return false
+	end
+	local npc_id = object_id(npc_or_id) or tonumber(npc_or_id)
+	if valid_id(npc_id) and tonumber(request.npc_id) ~= tonumber(npc_id) then
+		return false
+	end
+	exclusive_item_reservations[item_id] = nil
+	return true
+end
+
+function M.item_reserved_for_other(npc, item_id)
+	item_id = tonumber(item_id)
+	if not valid_id(item_id) then
+		return false
+	end
+	local item = online_object_by_id(item_id) or (alife_object and alife_object(item_id) or nil)
+	return item_reserved_for_other(item or item_id, npc)
+end
+
 function M.request_item_pickup(npc, item_id, reason)
 	if not runtime_ready("loot_request_item_pickup") then
 		return false, "runtime_not_ready"
@@ -1604,8 +1703,10 @@ local function artifact_pickup_recovery_context(squad)
 		and (
 			squad.zhopa2_last_result == "artifact_online_pickup_requested"
 			or squad.zhopa2_last_result == "artifact_online_wait_pickup"
+			or squad.zhopa2_last_result == "artifact_online_approach"
 			or squad.zhopa2_last_result == "artifact_online_contested"
 			or squad.zhopa2_last_result == "artifact_online_wait_inventory"
+			or squad.zhopa2_artifact_approach_npc_id ~= nil
 			or squad.zhopa2_artifact_collect_started ~= nil
 		)
 end
@@ -1909,6 +2010,7 @@ function M.on_game_load()
 	event_stores.item = { ids = {}, seen = {}, head = 1 }
 	targeted_item_requests = {}
 	targeted_item_requests_by_item = {}
+	exclusive_item_reservations = {}
 	vanilla_artifact_pickups = {}
 end
 

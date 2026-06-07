@@ -305,6 +305,19 @@ local function object_name(obj)
 	return ok and name or nil
 end
 
+local function object_is_smart(obj)
+	if not (obj and clsid) then
+		return false
+	end
+	local ok, class_id = pcall(function()
+		if type(obj.clsid) == "function" then
+			return obj:clsid()
+		end
+		return obj.clsid
+	end)
+	return ok and class_id == clsid.smart_terrain
+end
+
 local function named_id(obj_or_id)
 	local obj = obj_or_id
 	local id = object_id(obj)
@@ -899,14 +912,13 @@ end
 local function force_exit_target(squad)
 	local p = perception()
 	local level_name = p and p.obj_level and p.obj_level(squad) or nil
-	local current_smart = squad.smart_id and alife_object(squad.smart_id) or nil
 	local c = cfg()
 	local blocked = false
+	if c and type(c.is_global_level_blacklisted) == "function" and c.is_global_level_blacklisted(level_name) == true then
+		return nil
+	end
 	if c and type(c.is_level_blacklisted_for_squad) == "function" then
 		blocked = c.is_level_blacklisted_for_squad(squad, level_name) == true
-	end
-	if not blocked and c and type(c.is_smart_blacklisted_for_squad) == "function" and current_smart then
-		blocked = c.is_smart_blacklisted_for_squad(squad, current_smart, level_name) == true
 	end
 	if not blocked then
 		return nil
@@ -934,6 +946,30 @@ local function force_exit_target(squad)
 	end
 	target = final_smart(p, squad, target, { ignore_population = false, skip_prior = monster })
 	return target and target.id or nil
+end
+
+local function target_blacklisted_for_squad(squad, target_id)
+	local smart = target_id and safe_alife_object(target_id) or nil
+	if not object_is_smart(smart) then
+		return false
+	end
+	local p = perception()
+	local level_name = p and p.obj_level and p.obj_level(smart) or nil
+	local c = cfg()
+	if c and type(c.is_level_blacklisted_for_squad) == "function" and c.is_level_blacklisted_for_squad(squad, level_name) == true then
+		return true, "target_level_blacklisted"
+	end
+	if c and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, level_name) == true then
+		return true, "target_smart_blacklisted"
+	end
+	return false
+end
+
+local function task_target_blacklisted(squad)
+	if not (squad and squad.zhopa2_task and squad.zhopa2_target) then
+		return false
+	end
+	return target_blacklisted_for_squad(squad, squad.zhopa2_target)
 end
 
 local function build_stalker_explore(squad)
@@ -1215,6 +1251,19 @@ local function assign_choice(squad, choice, fallback_reason)
 		if mutant_has_stalker_task(squad, choice.task) then
 			squad.zhopa2_last_reason = "mutant_reject_stalker_task"
 			squad.zhopa2_last_result = "mutant_reject_stalker_task"
+			update_debug(squad)
+			return false
+		end
+		local blacklisted, blacklist_reason = target_blacklisted_for_squad(squad, choice.target)
+		if blacklisted then
+			if choice.task == M.TASK_ARTEFACT then
+				local artifacts = artifacts_mod()
+				if artifacts and type(artifacts.release_reservation) == "function" then
+					artifacts.release_reservation(squad, "artifact_target_blacklisted")
+				end
+			end
+			squad.zhopa2_last_reason = blacklist_reason or "target_blacklisted"
+			squad.zhopa2_last_result = squad.zhopa2_last_reason
 			update_debug(squad)
 			return false
 		end
@@ -1953,6 +2002,11 @@ function M.release_artifact_task(squad, reason)
 		squad.zhopa2_artifact_section = nil
 		squad.zhopa2_artifact_collect_started = nil
 		squad.zhopa2_artifact_pickup_npc_id = nil
+		squad.zhopa2_artifact_arrived_idle_since = nil
+		squad.zhopa2_artifact_approach_npc_id = nil
+		squad.zhopa2_artifact_approach_vid = nil
+		squad.zhopa2_artifact_approach_last_id = nil
+		squad.zhopa2_artifact_approach_sent_at = nil
 	end
 	return true
 end
@@ -2001,6 +2055,32 @@ function M.update_squad(squad, memory)
 	end
 
 	if repair_invalid_mutant_task(squad) then
+		return true
+	end
+
+	local force_target = force_exit_target(squad)
+	if force_target and (squad.zhopa2_task ~= M.TASK_FORCE_EXIT or tonumber(squad.zhopa2_target) ~= tonumber(force_target)) then
+		if squad.zhopa2_task == M.TASK_ARTEFACT then
+			M.release_artifact_task(squad, "blacklist_exit")
+		end
+		if M.interrupt_task(squad, M.TASK_FORCE_EXIT, force_target, 0, "blacklist_exit", nil, {
+			clear_reason = "blacklist_exit",
+			result = "blacklist_exit",
+		}) then
+			return true
+		end
+	end
+
+	local blacklisted, blacklist_reason = task_target_blacklisted(squad)
+	if blacklisted then
+		if squad.zhopa2_task == M.TASK_ARTEFACT then
+			M.release_artifact_task(squad, "artifact_target_blacklisted")
+		end
+		if type(squad.zhopa2_clear_task) == "function" then
+			squad:zhopa2_clear_task("target_blacklisted")
+		end
+		assign_rest(squad, blacklist_reason or "target_blacklisted")
+		update_debug(squad)
 		return true
 	end
 

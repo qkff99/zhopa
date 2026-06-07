@@ -1518,6 +1518,9 @@ local function route_smart_ok(squad, smart, target_level)
 	end
 
 	local c = cfg()
+	if c and type(c.is_level_blacklisted_for_squad) == "function" and c.is_level_blacklisted_for_squad(squad, target_level) then
+		return false
+	end
 	if c and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, target_level) then
 		return false
 	end
@@ -1709,6 +1712,9 @@ function M.valid_smart(squad, smart, opts)
 	end
 
 	local c = cfg()
+	if c and type(c.is_level_blacklisted_for_squad) == "function" and c.is_level_blacklisted_for_squad(squad, target_level) then
+		return false
+	end
 	if c and type(c.is_smart_blacklisted_for_squad) == "function" and c.is_smart_blacklisted_for_squad(squad, smart, target_level) then
 		return false
 	end

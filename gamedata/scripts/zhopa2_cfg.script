@@ -283,8 +283,7 @@ end
 
 local function section_is_true(section, key)
 	local v = section_value(section, key)
-	local set = section_set(section, key)
-	return bool_from_value(v, false) or (set and set.__all == true)
+	return bool_from_value(v, false)
 end
 
 local function smart_name_for_blacklist(smart)
@@ -342,7 +341,10 @@ function is_smart_blacklisted_for_squad(squad, smart, level_name)
 
 	level_name = level_name or ""
 	local smart_name = smart_name_for_blacklist(smart)
-	if is_level_blacklisted_for_squad(squad, level_name) then
+	if section_has("zhopa2_smart_blacklists", "*", smart_name) then
+		return true
+	end
+	if section_has("zhopa2_smart_blacklists", "global", smart_name) then
 		return true
 	end
 	if section_has("zhopa2_smart_blacklists", level_name, smart_name) then
