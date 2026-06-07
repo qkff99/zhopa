@@ -4,16 +4,15 @@
 	<string id="ui_mcm_zhopa2_panel_general"><text>General</text></string>
 	<string id="ui_mcm_zhopa2_panel_tasks"><text>Stalker movement</text></string>
 	<string id="ui_mcm_zhopa2_panel_mutants"><text>Mutant movement</text></string>
-	<string id="ui_mcm_zhopa2_panel_deferred"><text>Deferred systems</text></string>
 	<string id="ui_mcm_zhopa2_group_core"><text>Core</text></string>
 	<string id="ui_mcm_zhopa2_group_systems"><text>Systems</text></string>
 	<string id="ui_mcm_zhopa2_group_roam"><text>Roam tasks</text></string>
 	<string id="ui_mcm_zhopa2_group_weights"><text>Task weights</text></string>
 	<string id="ui_mcm_zhopa2_group_timing"><text>Timing</text></string>
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Targeting</text></string>
+	<string id="ui_mcm_zhopa2_group_story"><text>Story systems</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Movement</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Timing</text></string>
-	<string id="ui_mcm_zhopa2_group_deferred_smart"><text>Smart control</text></string>
-	<string id="ui_mcm_zhopa2_group_deferred_story"><text>Story systems</text></string>
-	<string id="ui_mcm_zhopa2_group_deferred_systems"><text>Late systems</text></string>
+	<string id="ui_mcm_zhopa2_story_psy_watchdog_enabled"><text>Brain Scorcher watchdog</text></string>
+	<string id="ui_mcm_zhopa2_story_psy_watchdog_enabled_desc"><text>Converts non-immune stalker squads on active psi levels into zombified squads.</text></string>
 </string_table>

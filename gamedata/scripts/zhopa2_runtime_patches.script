@@ -15,6 +15,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_revenge",
 	"zhopa2_service_fillers",
 	"zhopa2_artifacts",
+	"zhopa2_story_psy_watchdog",
 }
 
 local ZHOPA2_RUNTIME_PATCHES = {

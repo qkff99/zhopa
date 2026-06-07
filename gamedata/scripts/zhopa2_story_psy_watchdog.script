@@ -1,0 +1,994 @@
+local M = {}
+
+local DEFAULT_PSI_LEVELS = "l10_limansk, l10_red_forest, l10_radar"
+local DEFAULT_IMMUNE_FACTIONS = "monolith, isg, greh"
+local SECTION_ZOMBIED_NOVICE = "zombied_sim_squad_novice"
+local SECTION_ZOMBIED_ADVANCED = "zombied_sim_squad_advanced"
+local SECTION_ZOMBIED_VETERAN = "zombied_sim_squad_veteran"
+local INVALID_ID = 65535
+local RECONCILE_RECHECK_MS = 1000
+
+local MEMBER_POOL_BY_SECTION = {
+	[SECTION_ZOMBIED_NOVICE] = {
+		"sim_default_zombied_1",
+		"sim_default_zombied_1",
+		"sim_default_zombied_2",
+	},
+	[SECTION_ZOMBIED_ADVANCED] = {
+		"sim_default_zombied_2",
+		"sim_default_zombied_2",
+		"sim_default_zombied_3",
+	},
+	[SECTION_ZOMBIED_VETERAN] = {
+		"sim_default_zombied_3",
+		"sim_default_zombied_3",
+		"sim_default_zombied_4",
+	},
+}
+
+local runtime = {
+	psi_levels = nil,
+	immune_factions = nil,
+	processing_by_sid = {},
+}
+
+local callbacks_registered = false
+local pending_reconcile = false
+local pending_source = nil
+local next_reconcile_tg = 0
+
+local function load_module(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg_mod()
+	return load_module("zhopa2_cfg")
+end
+
+local function index_mod()
+	return load_module("zhopa2_index")
+end
+
+local function perception_mod()
+	return load_module("zhopa2_perception")
+end
+
+local function tasks_mod()
+	return load_module("zhopa2_tasks")
+end
+
+local function cfg_bool(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		return cfg.get_bool(key, default) == true
+	end
+	return default == true
+end
+
+local function cfg_string(key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_string) == "function" then
+		return cfg.get_string(key, default)
+	end
+	return default
+end
+
+local function runtime_ready(reason)
+	local rt = rawget(_G, "zhopa2_runtime_patches")
+	if rt and type(rt.runtime_ready) == "function" then
+		return rt.runtime_ready(reason) == true
+	end
+	local fn = rawget(_G, "zhopa2_runtime_ready")
+	if type(fn) == "function" then
+		return fn(reason) == true
+	end
+	return false
+end
+
+local function debug_print_enabled()
+	return cfg_bool("debug_hud_enabled", false) == true
+end
+
+local function debug_log(fmt, ...)
+	if type(printf) == "function" and debug_print_enabled() then
+		pcall(printf, fmt, ...)
+	end
+end
+
+local function now_ms()
+	return time_global and time_global() or 0
+end
+
+local function normalize_id(value)
+	local id = tonumber(value)
+	if not id or id <= 0 or id == INVALID_ID then
+		return nil
+	end
+	return id
+end
+
+local function lower_trim(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	value = string.gsub(value, "^%s*(.-)%s*$", "%1")
+	if value == "" then
+		return nil
+	end
+	return string.lower(value)
+end
+
+local function parse_csv_set(value)
+	local out = {}
+	value = tostring(value or "")
+	for token in string.gmatch(value, "([^,]+)") do
+		local normalized = lower_trim(token)
+		if normalized then
+			out[normalized] = true
+		end
+	end
+	return out
+end
+
+local function invalidate_runtime_caches()
+	runtime.psi_levels = nil
+	runtime.immune_factions = nil
+end
+
+local function get_psi_levels()
+	if runtime.psi_levels == nil then
+		runtime.psi_levels = parse_csv_set(cfg_string("story_psy_watchdog_levels", DEFAULT_PSI_LEVELS))
+	end
+	return runtime.psi_levels
+end
+
+local function get_immune_factions()
+	if runtime.immune_factions == nil then
+		runtime.immune_factions = parse_csv_set(cfg_string("story_psy_watchdog_immune_factions", DEFAULT_IMMUNE_FACTIONS))
+	end
+	return runtime.immune_factions
+end
+
+local function has_info(info)
+	if type(info) ~= "string" or info == "" then
+		return false
+	end
+	local fn = rawget(_G, "has_alife_info")
+	if type(fn) == "function" then
+		local ok, value = pcall(fn, info)
+		if ok then
+			return value == true
+		end
+	end
+	local actor = db and db.actor or nil
+	if actor and type(actor.has_info) == "function" then
+		local ok, value = pcall(actor.has_info, actor, info)
+		if ok then
+			return value == true
+		end
+	end
+	return false
+end
+
+local function is_story_mode_active()
+	local fn = rawget(_G, "IsStoryMode")
+	if type(fn) == "function" then
+		local ok, value = pcall(fn)
+		if ok then
+			return value == true
+		end
+	end
+	return has_info("story_mode_disabled") ~= true
+end
+
+local function feature_enabled_now()
+	if cfg_bool("enabled", true) ~= true then
+		return false
+	end
+	if cfg_bool("story_psy_watchdog_enabled", false) ~= true then
+		return false
+	end
+	if is_story_mode_active() ~= true then
+		return false
+	end
+	if has_info("bar_deactivate_radar_done") == true then
+		return false
+	end
+	return true
+end
+
+local function resolve_alife_object(id)
+	id = normalize_id(id)
+	if not id then
+		return nil
+	end
+	if type(alife_object) == "function" then
+		local ok, obj = pcall(alife_object, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	local sim = alife and alife() or nil
+	if sim and type(sim.object) == "function" then
+		local ok, obj = pcall(sim.object, sim, id)
+		if ok then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function get_board()
+	if rawget(_G, "SIMBOARD") then
+		return rawget(_G, "SIMBOARD")
+	end
+	if sim_board and type(sim_board.get_sim_board) == "function" then
+		local ok, board = pcall(sim_board.get_sim_board)
+		if ok then
+			return board
+		end
+	end
+	return nil
+end
+
+local function clone_position(pos)
+	if not pos then
+		return nil
+	end
+	if type(vector) == "function" then
+		local ok, cloned = pcall(function()
+			return vector():set(pos.x, pos.y, pos.z)
+		end)
+		if ok and cloned then
+			return cloned
+		end
+	end
+	return pos
+end
+
+local function safe_position(obj)
+	if not obj then
+		return nil
+	end
+	if obj.position ~= nil and type(obj.position) ~= "function" then
+		return clone_position(obj.position)
+	end
+	if type(obj.position) == "function" then
+		local ok, pos = pcall(obj.position, obj)
+		if ok then
+			return clone_position(pos)
+		end
+	end
+	return nil
+end
+
+local function safe_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.name) == "string" and obj.name ~= "" then
+		return obj.name
+	end
+	if type(obj.name) == "function" then
+		local ok, name = pcall(obj.name, obj)
+		if ok and type(name) == "string" and name ~= "" then
+			return name
+		end
+	end
+	return nil
+end
+
+local function section_faction(section)
+	if not (section and ini_sys and type(ini_sys.r_string_ex) == "function") then
+		return nil
+	end
+	local ok, faction = pcall(ini_sys.r_string_ex, ini_sys, section, "faction")
+	return ok and faction or nil
+end
+
+local function squad_section_name(squad)
+	if not squad then
+		return nil
+	end
+	if squad.zhopa2_section_name ~= nil then
+		return squad.zhopa2_section_name
+	end
+	if type(squad.section_name) == "string" then
+		squad.zhopa2_section_name = squad.section_name
+		return squad.section_name
+	end
+	if type(squad.section_name) == "function" then
+		local ok, section = pcall(squad.section_name, squad)
+		if ok and type(section) == "string" and section ~= "" then
+			squad.zhopa2_section_name = section
+			return section
+		end
+	end
+	return nil
+end
+
+local function squad_community(squad)
+	local perception = perception_mod()
+	if perception and type(perception.squad_player_id) == "function" then
+		local value = perception.squad_player_id(squad)
+		if value then
+			return lower_trim(tostring(value))
+		end
+	end
+	local player_id = squad and squad.player_id or nil
+	if player_id then
+		return lower_trim(tostring(player_id))
+	end
+	return lower_trim(section_faction(squad_section_name(squad)))
+end
+
+local function cfg_alias(value)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.get_faction_alias) == "function" then
+		local ok, alias = pcall(cfg.get_faction_alias, value)
+		if ok and alias then
+			return lower_trim(tostring(alias))
+		end
+	end
+	return value
+end
+
+local function is_immune_faction(community)
+	community = lower_trim(community)
+	if not community then
+		return false
+	end
+	local immune = get_immune_factions()
+	return immune[community] == true or immune[cfg_alias(community)] == true
+end
+
+local function is_already_zombied(squad, community)
+	local section = lower_trim(squad_section_name(squad))
+	community = lower_trim(community)
+	return community == "zombied"
+		or community == "monster_zombied"
+		or community == "monster_zombied_day"
+		or community == "monster_zombied_night"
+		or (section and string.find(section, "zombied", 1, true) ~= nil)
+end
+
+local function is_target_level(level_name)
+	level_name = lower_trim(level_name)
+	return level_name ~= nil and get_psi_levels()[level_name] == true
+end
+
+local function level_name_by_gvid(gvid)
+	if not (gvid and game_graph and alife) then
+		return nil
+	end
+	local ok, level_name = pcall(function()
+		local vertex = game_graph():vertex(gvid)
+		return vertex and alife():level_name(vertex:level_id()) or nil
+	end)
+	return ok and level_name or nil
+end
+
+local function squad_level_name(squad, known_level)
+	if type(known_level) == "string" and known_level ~= "" then
+		return known_level
+	end
+	if squad and type(squad.level_name) == "string" and squad.level_name ~= "" then
+		return squad.level_name
+	end
+	return level_name_by_gvid(squad and squad.m_game_vertex_id or nil)
+end
+
+local function read_commander_id(squad)
+	if not squad then
+		return nil
+	end
+	if type(squad.commander_id) == "function" then
+		local ok, id = pcall(squad.commander_id, squad)
+		id = ok and normalize_id(id) or nil
+		if id then
+			return id
+		end
+	end
+	return normalize_id(squad.commander_id)
+end
+
+local function extract_member_candidate_id(k, v)
+	if type(v) == "table" or type(v) == "userdata" then
+		local idv = normalize_id(v.id) or normalize_id(v.object_id) or normalize_id(v.squad_id)
+		if idv then
+			return idv
+		end
+	end
+	return normalize_id(v) or normalize_id(k)
+end
+
+local function squad_member_ids(squad)
+	local out = {}
+	local seen = {}
+	if not squad or type(squad.squad_members) ~= "function" then
+		return out
+	end
+	local function push(id)
+		id = normalize_id(id)
+		if id and not seen[id] then
+			seen[id] = true
+			out[#out + 1] = id
+		end
+	end
+	local ok_members, a, b, c = pcall(squad.squad_members, squad)
+	if ok_members and a ~= nil then
+		local ok_iter = pcall(function()
+			for member in a, b, c do
+				push(extract_member_candidate_id(nil, member))
+			end
+		end)
+		if (not ok_iter) and type(a) == "table" then
+			for k, v in pairs(a) do
+				push(extract_member_candidate_id(k, v))
+			end
+		end
+	end
+	return out
+end
+
+local function squad_member_count(squad)
+	if squad and type(squad.npc_count) == "function" then
+		local ok, count = pcall(squad.npc_count, squad)
+		count = ok and tonumber(count) or nil
+		if count and count > 0 then
+			return count
+		end
+	end
+	local ids = squad_member_ids(squad)
+	return #ids > 0 and #ids or nil
+end
+
+local function squad_can_manage(squad)
+	if not squad then
+		return false
+	end
+	if type(squad.zhopa2_can_manage) == "function" then
+		local ok, result = pcall(squad.zhopa2_can_manage, squad)
+		return ok and result == true
+	end
+	if squad.disabled or squad.player_id == "actor" then
+		return false
+	end
+	if get_object_story_id and squad.id and get_object_story_id(squad.id) then
+		return false
+	end
+	return squad_member_count(squad) ~= nil
+end
+
+local function is_plain_stalker_sim_squad(squad)
+	local perception = perception_mod()
+	if perception and type(perception.is_monster_squad) == "function" and perception.is_monster_squad(squad) == true then
+		return false
+	end
+	local section = squad_section_name(squad)
+	return type(section) == "string"
+		and string.find(section, "_sim_squad_", 1, true) ~= nil
+		and string.find(section, "_sim_squad_service_", 1, true) == nil
+		and string.find(section, "_sim_squad_dead", 1, true) == nil
+end
+
+local function is_ap_owned_squad(squad)
+	local bridge = rawget(_G, "zhopa2_ap_bridge")
+	if bridge and type(bridge.is_ap_owned_squad) == "function" then
+		local ok, result = pcall(bridge.is_ap_owned_squad, squad)
+		return ok and result == true
+	end
+	return false
+end
+
+local function pick_zombied_squad_section(source_section)
+	local value = lower_trim(source_section)
+	if type(value) ~= "string" then
+		return SECTION_ZOMBIED_ADVANCED
+	end
+	if string.find(value, "master", 1, true) then
+		return SECTION_ZOMBIED_VETERAN
+	end
+	if string.find(value, "veteran", 1, true) or string.find(value, "expert", 1, true) then
+		return SECTION_ZOMBIED_ADVANCED
+	end
+	if string.find(value, "novice", 1, true) or string.find(value, "advanced", 1, true) then
+		return SECTION_ZOMBIED_NOVICE
+	end
+	return SECTION_ZOMBIED_ADVANCED
+end
+
+local function pick_zombied_member_section(zombied_squad_section)
+	local pool = MEMBER_POOL_BY_SECTION[zombied_squad_section] or MEMBER_POOL_BY_SECTION[SECTION_ZOMBIED_ADVANCED]
+	if type(pool) ~= "table" or #pool == 0 then
+		return "sim_default_zombied_2"
+	end
+	return pool[math.random(#pool)] or pool[1]
+end
+
+local function smart_object_by_id(smart_id)
+	smart_id = normalize_id(smart_id)
+	if not smart_id then
+		return nil
+	end
+	local board = get_board()
+	local stored = board and board.smarts and board.smarts[smart_id] or nil
+	if type(stored) == "table" and stored.smrt then
+		return stored.smrt
+	end
+	if stored then
+		return stored
+	end
+	return resolve_alife_object(smart_id)
+end
+
+local function smart_level_name(smart)
+	if smart and type(smart.level_name) == "string" and smart.level_name ~= "" then
+		return smart.level_name
+	end
+	return level_name_by_gvid(smart and smart.m_game_vertex_id or nil)
+end
+
+local function build_context(squad, community, level_name)
+	local section = squad_section_name(squad)
+	local commander = resolve_alife_object(read_commander_id(squad))
+	local position = safe_position(squad) or safe_position(commander)
+	local lvid = tonumber(squad and squad.m_level_vertex_id) or tonumber(commander and commander.m_level_vertex_id)
+	local gvid = tonumber(squad and squad.m_game_vertex_id) or tonumber(commander and commander.m_game_vertex_id)
+	local source_smart_id = normalize_id(squad and squad.smart_id)
+	local source_smart = smart_object_by_id(source_smart_id)
+	local source_smart_level = smart_level_name(source_smart)
+	local member_count = squad_member_count(squad)
+	level_name = level_name or level_name_by_gvid(gvid)
+	if not (section and community and position and lvid and gvid and level_name and member_count and member_count > 0) then
+		return nil
+	end
+	local smart_id = source_smart_id
+	local smart_name = safe_name(source_smart)
+	local smart_check = source_smart_id and "unknown" or "none"
+	if source_smart_id and source_smart_level == level_name then
+		smart_check = "ok"
+	elseif source_smart_id then
+		smart_check = "stale"
+		smart_id = nil
+		smart_name = nil
+	end
+	return {
+		source_squad_name = safe_name(squad),
+		source_section = section,
+		source_community = community,
+		source_smart_id = source_smart_id,
+		source_smart_name = safe_name(source_smart),
+		source_smart_level = source_smart_level,
+		position = clone_position(position),
+		level_vertex_id = lvid,
+		game_vertex_id = gvid,
+		level_name = level_name,
+		member_count = member_count,
+		smart_id = smart_id,
+		smart_name = smart_name,
+		smart_check = smart_check,
+		zombied_squad_section = pick_zombied_squad_section(section),
+	}
+end
+
+local function create_empty_squad(section, position, lvid, gvid)
+	if type(section) ~= "string" or section == "" then
+		return nil
+	end
+	if type(alife_create) == "function" then
+		local ok, squad = pcall(alife_create, section, position, lvid, gvid)
+		if ok and squad then
+			return squad
+		end
+	end
+	local sim = alife and alife() or nil
+	if sim and type(sim.create) == "function" then
+		local ok, squad = pcall(sim.create, sim, section, position, lvid, gvid)
+		if ok then
+			return squad
+		end
+	end
+	return nil
+end
+
+local function populate_zombied_squad(squad, context)
+	local created = 0
+	for _ = 1, tonumber(context.member_count) do
+		local npc_section = pick_zombied_member_section(context.zombied_squad_section)
+		local ok, member_id = pcall(squad.add_squad_member, squad, npc_section, context.position, context.level_vertex_id, context.game_vertex_id)
+		if not (ok and normalize_id(member_id)) then
+			return false
+		end
+		created = created + 1
+	end
+	return true, created
+end
+
+local function assign_squad_to_smart(squad, smart_id)
+	smart_id = normalize_id(smart_id)
+	local board = get_board()
+	if not (squad and smart_id and board and type(board.assign_squad_to_smart) == "function" and board.smarts and board.smarts[smart_id]) then
+		return false
+	end
+	local ok = pcall(board.assign_squad_to_smart, board, squad, smart_id)
+	return ok == true
+end
+
+local function finalize_spawned_squad(squad, context)
+	local smart_obj = nil
+	if context.smart_id then
+		assign_squad_to_smart(squad, context.smart_id)
+		smart_obj = smart_object_by_id(context.smart_id)
+	end
+	if type(squad.set_squad_relation) == "function" then
+		pcall(squad.set_squad_relation, squad)
+	end
+	if type(squad.refresh) == "function" then
+		pcall(squad.refresh, squad)
+	end
+	local board = get_board()
+	for _, member_id in ipairs(squad_member_ids(squad)) do
+		local member = resolve_alife_object(member_id)
+		if member and board and type(board.setup_squad_and_group) == "function" then
+			pcall(board.setup_squad_and_group, board, member)
+		end
+		if member and type(SendScriptCallback) == "function" then
+			pcall(SendScriptCallback, "squad_on_npc_creation", squad, member, smart_obj)
+		end
+	end
+	if board and type(board.zhopa2_update_squad_level) == "function" then
+		pcall(board.zhopa2_update_squad_level, board, squad, context.level_name)
+	end
+	if type(squad.update) == "function" then
+		pcall(squad.update, squad)
+	end
+	local tasks = tasks_mod()
+	if tasks and type(tasks.assign_next_task) == "function" then
+		pcall(tasks.assign_next_task, squad, "story_psy_watchdog_convert")
+	end
+	return true
+end
+
+local function cleanup_source_task(squad)
+	if type(squad.zhopa2_clear_task) == "function" then
+		pcall(squad.zhopa2_clear_task, squad, "story_psy_watchdog_convert")
+	end
+	local idx = index_mod()
+	if idx and type(idx.release_artifact_reservation) == "function" then
+		pcall(idx.release_artifact_reservation, squad, "story_psy_watchdog_convert")
+	end
+	if idx and type(idx.clear_artifact_cargo) == "function" then
+		pcall(idx.clear_artifact_cargo, squad, "story_psy_watchdog_convert")
+	end
+end
+
+local function unregister_released_squad(squad)
+	local board = get_board()
+	if board and type(board.zhopa2_unregister_squad) == "function" then
+		pcall(board.zhopa2_unregister_squad, board, squad)
+	end
+	local idx = index_mod()
+	if idx and type(idx.unregister_squad) == "function" then
+		pcall(idx.unregister_squad, squad)
+	end
+end
+
+local function release_squad_safe(squad, reason)
+	if not normalize_id(squad and squad.id) then
+		return false
+	end
+	if type(squad.remove_squad) == "function" then
+		local ok, result = pcall(squad.remove_squad, squad)
+		if ok and result ~= false then
+			return true
+		end
+	end
+	local rel = rawget(_G, "alife_release_id")
+	if type(rel) == "function" then
+		local ok, result = pcall(rel, squad.id, reason)
+		if ok and result ~= false then
+			return true
+		end
+	end
+	local sim = alife and alife() or nil
+	if sim and type(sim.release) == "function" then
+		local ok, result = pcall(sim.release, sim, squad, true)
+		if ok and result ~= false then
+			return true
+		end
+	end
+	return false
+end
+
+local function log_mutation_error(sid, context, source, reason, new_squad, extra)
+	context = context or {}
+	local new_sid = normalize_id(new_squad and new_squad.id)
+	debug_log(
+		"~ ZHOPA2 psy watchdog error | mutation_error squad [%s:%s] faction [%s] section [%s] level [%s] source_smart [%s:%s] source_smart_level [%s] assigned_smart [%s:%s] smart_check [%s] new_squad [%s:%s] new_section [%s] members [%s] reason [%s] source [%s] extra [%s]",
+		tostring(context.source_squad_name or "-"),
+		tostring(sid or "-"),
+		tostring(context.source_community or "-"),
+		tostring(context.source_section or "-"),
+		tostring(context.level_name or "-"),
+		tostring(context.source_smart_name or context.smart_name or "-"),
+		tostring(context.source_smart_id or context.smart_id or "-"),
+		tostring(context.source_smart_level or "-"),
+		tostring(context.smart_name or "-"),
+		tostring(context.smart_id or "-"),
+		tostring(context.smart_check or "-"),
+		tostring(safe_name(new_squad) or "-"),
+		tostring(new_sid or "-"),
+		tostring(context.zombied_squad_section or "-"),
+		tostring(context.member_count or "-"),
+		tostring(reason or "-"),
+		tostring(source or "-"),
+		tostring(extra or "-")
+	)
+end
+
+local function candidate_context(squad, source, known_level)
+	if not feature_enabled_now() then
+		return nil
+	end
+	local sid = normalize_id(squad and squad.id)
+	if not sid or runtime.processing_by_sid[sid] == true then
+		return nil
+	end
+	if not squad_can_manage(squad) or is_ap_owned_squad(squad) then
+		return nil
+	end
+	if not is_plain_stalker_sim_squad(squad) then
+		return nil
+	end
+	local community = squad_community(squad)
+	if is_already_zombied(squad, community) or is_immune_faction(community) then
+		return nil
+	end
+	local level_name = squad_level_name(squad, known_level)
+	if not is_target_level(level_name) then
+		return nil
+	end
+	local context = build_context(squad, community, level_name)
+	if not context then
+		local smart_id = normalize_id(squad and squad.smart_id)
+		log_mutation_error(sid, {
+			source_squad_name = safe_name(squad),
+			source_section = squad_section_name(squad),
+			source_community = community,
+			level_name = level_name,
+			source_smart_id = smart_id,
+			source_smart_name = safe_name(smart_object_by_id(smart_id)),
+			smart_check = smart_id and "invalid_context" or "none",
+		}, source, "invalid_context")
+	end
+	return context
+end
+
+function M.convert_squad_to_zombied(squad, context, source)
+	local sid = normalize_id(squad and squad.id)
+	if not (sid and context) or runtime.processing_by_sid[sid] == true then
+		return false
+	end
+	runtime.processing_by_sid[sid] = true
+
+	local new_squad = create_empty_squad(context.zombied_squad_section, context.position, context.level_vertex_id, context.game_vertex_id)
+	local new_sid = normalize_id(new_squad and new_squad.id)
+	if not (new_squad and new_sid) then
+		runtime.processing_by_sid[sid] = nil
+		log_mutation_error(sid, context, source, "create_failed")
+		return false
+	end
+	runtime.processing_by_sid[new_sid] = true
+
+	local populated, spawned_members = populate_zombied_squad(new_squad, context)
+	if populated ~= true then
+		release_squad_safe(new_squad, "story_psy_watchdog_spawn_failed")
+		runtime.processing_by_sid[new_sid] = nil
+		runtime.processing_by_sid[sid] = nil
+		log_mutation_error(sid, context, source, "member_spawn_failed", new_squad)
+		return false
+	end
+	spawned_members = tonumber(spawned_members) or 0
+
+	cleanup_source_task(squad)
+	if release_squad_safe(squad, "story_psy_watchdog_convert") ~= true then
+		release_squad_safe(new_squad, "story_psy_watchdog_rollback")
+		runtime.processing_by_sid[new_sid] = nil
+		runtime.processing_by_sid[sid] = nil
+		log_mutation_error(sid, context, source, "source_release_failed", new_squad)
+		return false
+	end
+
+	unregister_released_squad(squad)
+	finalize_spawned_squad(new_squad, context)
+	local source_members = tonumber(context.member_count) or 0
+	local new_members = tonumber(squad_member_count(new_squad)) or 0
+	local count_check = (source_members > 0 and spawned_members == source_members and new_members == source_members) and "ok" or "mismatch"
+	if count_check ~= "ok" then
+		log_mutation_error(
+			sid,
+			context,
+			source,
+			"member_count_mismatch",
+			new_squad,
+			"source_members=" .. tostring(source_members) .. ",spawned_members=" .. tostring(spawned_members) .. ",new_members=" .. tostring(new_members)
+		)
+	end
+	runtime.processing_by_sid[new_sid] = nil
+	runtime.processing_by_sid[sid] = nil
+	debug_log(
+		"~ ZHOPA2 psy watchdog | mutated_to_zombied squad [%s:%s] faction [%s] section [%s] level [%s] source_smart [%s:%s] source_smart_level [%s] assigned_smart [%s:%s] smart_check [%s] new_squad [%s:%s] new_section [%s] source_members [%s] spawned_members [%s] new_members [%s] count_check [%s] reason [psi_level] source [%s]",
+		tostring(context.source_squad_name or "-"),
+		tostring(sid),
+		tostring(context.source_community or "-"),
+		tostring(context.source_section or "-"),
+		tostring(context.level_name or "-"),
+		tostring(context.source_smart_name or "-"),
+		tostring(context.source_smart_id or "-"),
+		tostring(context.source_smart_level or "-"),
+		tostring(context.smart_name or "-"),
+		tostring(context.smart_id or "-"),
+		tostring(context.smart_check or "-"),
+		tostring(safe_name(new_squad) or "-"),
+		tostring(new_sid),
+		tostring(context.zombied_squad_section or "-"),
+		tostring(source_members),
+		tostring(spawned_members),
+		tostring(new_members),
+		tostring(count_check),
+		tostring(source or "-")
+	)
+	return true
+end
+
+function M.try_process_squad(squad, source, known_level)
+	local context = candidate_context(squad, source, known_level)
+	if not context then
+		return false
+	end
+	return M.convert_squad_to_zombied(squad, context, source)
+end
+
+function M.reconcile_all_levels(source)
+	if not runtime_ready("story_psy_watchdog_reconcile") then
+		pending_reconcile = true
+		pending_source = source or pending_source or "runtime_not_ready"
+		return 0, "runtime_not_ready"
+	end
+	if not feature_enabled_now() then
+		pending_reconcile = false
+		return 0
+	end
+	local idx = index_mod()
+	if not (idx and type(idx.squads_on_levels) == "function") then
+		pending_reconcile = true
+		pending_source = source or pending_source or "index_missing"
+		return 0, "index_missing"
+	end
+	local levels = {}
+	for level_name in pairs(get_psi_levels()) do
+		levels[#levels + 1] = level_name
+	end
+	local squads = idx.squads_on_levels(levels)
+	local converted = 0
+	for i = 1, #squads do
+		if M.try_process_squad(squads[i], source or "reconcile_all") == true then
+			converted = converted + 1
+		end
+	end
+	pending_reconcile = false
+	return converted
+end
+
+local function request_reconcile(source)
+	pending_reconcile = true
+	pending_source = source or pending_source or "request"
+	if runtime_ready("story_psy_watchdog_request") then
+		return M.reconcile_all_levels(source)
+	end
+	return 0, "runtime_not_ready"
+end
+
+local function actor_on_update()
+	if pending_reconcile ~= true then
+		return
+	end
+	local now = now_ms()
+	if now > 0 and now < next_reconcile_tg then
+		return
+	end
+	next_reconcile_tg = now > 0 and (now + RECONCILE_RECHECK_MS) or 0
+	request_reconcile(pending_source or "actor_on_update")
+end
+
+local function actor_on_first_update()
+	invalidate_runtime_caches()
+	request_reconcile("actor_on_first_update")
+end
+
+local function on_game_load()
+	invalidate_runtime_caches()
+	request_reconcile("on_game_load")
+end
+
+local function on_option_change()
+	invalidate_runtime_caches()
+	request_reconcile("on_option_change")
+end
+
+local function squad_on_after_level_change(squad, old_level, new_level)
+	if not runtime_ready("story_psy_watchdog_level_change") then
+		pending_reconcile = true
+		pending_source = "squad_on_after_level_change"
+		return
+	end
+	if is_target_level(new_level) then
+		M.try_process_squad(squad, "squad_on_after_level_change", new_level)
+	end
+end
+
+local function server_entity_on_register(se_obj, type_name)
+	if type_name ~= "sim_squad_scripted" then
+		return
+	end
+	if not runtime_ready("story_psy_watchdog_register") then
+		pending_reconcile = true
+		pending_source = "server_entity_on_register"
+		return
+	end
+	M.try_process_squad(se_obj, "server_entity_on_register")
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		callbacks_registered = false
+		debug_log("~ ZHOPA2 psy watchdog error | init_error reason [missing_RegisterScriptCallback]")
+		return false
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "on_option_change", on_option_change)
+		pcall(UnregisterScriptCallback, "squad_on_after_level_change", squad_on_after_level_change)
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
+	end
+
+	local function register_callback(name, fn)
+		local ok, err = pcall(RegisterScriptCallback, name, fn)
+		if not ok then
+			debug_log("~ ZHOPA2 psy watchdog error | init_error reason [register_failed] callback [%s] detail [%s]", tostring(name or "-"), tostring(err or "-"))
+			return false
+		end
+		return true
+	end
+
+	local ok = true
+	ok = register_callback("actor_on_first_update", actor_on_first_update) and ok
+	ok = register_callback("actor_on_update", actor_on_update) and ok
+	ok = register_callback("on_game_load", on_game_load) and ok
+	ok = register_callback("on_option_change", on_option_change) and ok
+	ok = register_callback("squad_on_after_level_change", squad_on_after_level_change) and ok
+	ok = register_callback("server_entity_on_register", server_entity_on_register) and ok
+	callbacks_registered = ok == true
+	if callbacks_registered then
+		pending_reconcile = true
+		pending_source = pending_source or "on_game_start"
+	else
+		debug_log("~ ZHOPA2 psy watchdog error | init_error reason [callbacks_not_registered]")
+	end
+	return callbacks_registered
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_story_psy_watchdog = M
+return M
