@@ -8,6 +8,7 @@ local LOADOUT_INI_PATH = "items\\settings\\npc_loadouts\\npc_loadouts.ltx"
 
 local event_stores = {
 	corpse = { ids = {}, seen = {}, head = 1 },
+	ignored_corpse = { ids = {}, seen = {}, head = 1 },
 	item = { ids = {}, seen = {}, head = 1 },
 }
 local targeted_item_requests = {}
@@ -1357,6 +1358,9 @@ local function add_event(kind, id)
 	if not valid_id(id) then
 		return false
 	end
+	if kind == STORE_CORPSE and M.corpse_ignored(id) then
+		return false
+	end
 	if not M.enabled() then
 		return false
 	end
@@ -1391,19 +1395,57 @@ local function recent_ids(kind)
 	end
 	for i = 1, #store.ids do
 		local id = store.ids[i]
-		if store.seen[id] then
+		if store.seen[id] and not (kind == STORE_CORPSE and M.corpse_ignored(id)) then
 			out[#out + 1] = id
 		end
 	end
 	return out
 end
 
+function M.mark_corpse_ignored(id)
+	id = tonumber(id)
+	if not valid_id(id) then
+		return false
+	end
+	local store = store_for("ignored_corpse")
+	if not store then
+		return false
+	end
+	cleanup_store("ignored_corpse")
+	if not store.seen[id] then
+		store.ids[#store.ids + 1] = id
+	end
+	store.seen[id] = { tg = now_ms() }
+	while #store.ids > 512 do
+		local old_id = table.remove(store.ids, 1)
+		if old_id then
+			store.seen[old_id] = nil
+		end
+	end
+	return true
+end
+
+function M.corpse_ignored(id)
+	id = tonumber(id)
+	if not valid_id(id) then
+		return false
+	end
+	cleanup_store("ignored_corpse")
+	local store = store_for("ignored_corpse")
+	return store ~= nil and store.seen[id] ~= nil
+end
+
 function M.recent_corpse_ids()
 	return recent_ids(STORE_CORPSE)
 end
 
+function M.consume_corpse_event_id(id)
+	remove_event(STORE_CORPSE, id)
+end
+
 function M.forget_corpse_id(id)
 	remove_event(STORE_CORPSE, id)
+	M.mark_corpse_ignored(id)
 end
 
 function M.recent_item_ids()
@@ -2021,6 +2063,7 @@ end
 
 function M.on_game_load()
 	event_stores.corpse = { ids = {}, seen = {}, head = 1 }
+	event_stores.ignored_corpse = { ids = {}, seen = {}, head = 1 }
 	event_stores.item = { ids = {}, seen = {}, head = 1 }
 	targeted_item_requests = {}
 	targeted_item_requests_by_item = {}

@@ -1,0 +1,749 @@
+local M = {}
+
+-- Copy this file to gamedata/scripts only for focused corpse loot-loop diagnostics.
+local AUTO_INSTALL_ENABLED = true
+local AUTO_WATCH_ENABLED = true
+local WATCH_DURATION_MS = 120000
+local WATCH_INTERVAL_MS = 1000
+local DUMP_DELAY_MS = 2000
+local MAX_LOG_LINES = 260
+local MAX_NPC_LINES = 36
+local MAX_CORPSE_LINES = 28
+local MAX_ITEMS_PER_CORPSE = 18
+local MAX_MEMORY_IDS = 12
+
+-- Optional filters. Leave nil to watch every online looter/corpse.
+local TARGET_NPC_ID = nil
+local TARGET_CORPSE_ID = nil
+local TARGET_SECTION = nil
+
+local installed = false
+local scheduled = false
+local next_watch_tg = nil
+local watch_until_tg = nil
+local log_lines = 0
+local last_npc_sig = {}
+local last_corpse_sig = {}
+local wrapper_guard = false
+
+local function safe_mod(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg_mod()
+	return safe_mod("zhopa2_cfg")
+end
+
+local function debug_print_enabled()
+	local cfg = cfg_mod()
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
+local function log(fmt, ...)
+	if not debug_print_enabled() then
+		return
+	end
+	if log_lines >= MAX_LOG_LINES then
+		return
+	end
+	log_lines = log_lines + 1
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 loot loop diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 loot loop diag | " .. fmt, ...))
+	end
+end
+
+local function tg()
+	return type(time_global) == "function" and time_global() or 0
+end
+
+local function safe_field(obj, field)
+	if not obj then
+		return false, nil
+	end
+	local ok, value = pcall(function()
+		return obj[field]
+	end)
+	return ok, value
+end
+
+local function safe_call(obj, fn_name, ...)
+	if not obj then
+		return false, nil
+	end
+	local ok_fn, fn = safe_field(obj, fn_name)
+	if not (ok_fn and type(fn) == "function") then
+		return false, nil
+	end
+	local ok, result, extra = pcall(fn, obj, ...)
+	return ok, result, extra
+end
+
+local function object_id(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj) == "number" then
+		return tonumber(obj)
+	end
+	local ok, id = safe_field(obj, "id")
+	if ok and id ~= nil and type(id) ~= "function" then
+		return tonumber(id) or id
+	end
+	ok, id = safe_call(obj, "id")
+	return ok and (tonumber(id) or id) or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = safe_field(obj, "name")
+	if ok and name ~= nil and type(name) ~= "function" then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "name")
+	if ok and name ~= nil then
+		return tostring(name)
+	end
+	ok, name = safe_call(obj, "section_name")
+	return ok and name and tostring(name) or nil
+end
+
+local function object_section(obj)
+	if not obj then
+		return nil
+	end
+	local ok, section = safe_call(obj, "section")
+	if ok and section then
+		return tostring(section)
+	end
+	ok, section = safe_call(obj, "section_name")
+	if ok and section then
+		return tostring(section)
+	end
+	ok, section = safe_field(obj, "section")
+	if ok and section ~= nil and type(section) ~= "function" then
+		return tostring(section)
+	end
+	ok, section = safe_field(obj, "section_name")
+	return ok and section and tostring(section) or nil
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function online_object_by_id(id)
+	id = tonumber(id)
+	if not id then
+		return nil
+	end
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if obj then
+		return obj
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, value = pcall(level.object_by_id, id)
+		if ok and value then
+			return value
+		end
+	end
+	return nil
+end
+
+local function named_id(obj_or_id)
+	local obj = obj_or_id
+	local id = object_id(obj_or_id)
+	if type(obj_or_id) == "number" or type(obj_or_id) == "string" then
+		id = tonumber(obj_or_id)
+		obj = online_object_by_id(id) or safe_alife_object(id) or obj_or_id
+	end
+	return string.format("%s:%s", tostring(object_name(obj) or object_section(obj) or "-"), tostring(id or "-"))
+end
+
+local function boolstr(value)
+	if value == true then
+		return "true"
+	elseif value == false then
+		return "false"
+	end
+	return tostring(value)
+end
+
+local function safe_bool(fn, ...)
+	if type(fn) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(fn, ...)
+	return ok and result or nil
+end
+
+local function dist_to_actor(obj)
+	if not (obj and db and db.actor) then
+		return nil
+	end
+	local ok_a, actor_pos = safe_call(db.actor, "position")
+	local ok_o, obj_pos = safe_call(obj, "position")
+	if ok_a and ok_o and actor_pos and obj_pos and type(actor_pos.distance_to) == "function" then
+		local ok, dist = pcall(actor_pos.distance_to, actor_pos, obj_pos)
+		return ok and dist or nil
+	end
+	return nil
+end
+
+local function object_alive(obj)
+	local ok, alive = safe_call(obj, "alive")
+	return ok and alive
+end
+
+local function is_stalker(obj)
+	if not (obj and IsStalker) then
+		return false
+	end
+	local ok, result = pcall(IsStalker, obj)
+	return ok and result == true
+end
+
+local function is_monster(obj)
+	if not (obj and IsMonster) then
+		return false
+	end
+	local ok, result = pcall(IsMonster, obj)
+	return ok and result == true
+end
+
+local function table_count(t)
+	if type(t) ~= "table" then
+		return 0
+	end
+	local n = 0
+	for _ in pairs(t) do
+		n = n + 1
+	end
+	return n
+end
+
+local function list_has(list, id)
+	id = tonumber(id)
+	if type(list) ~= "table" or not id then
+		return false
+	end
+	for i = 1, #list do
+		if tonumber(list[i]) == id then
+			return true
+		end
+	end
+	return false
+end
+
+local function append_unique(list, seen, id)
+	id = tonumber(id)
+	if not id or seen[id] then
+		return
+	end
+	seen[id] = true
+	list[#list + 1] = id
+end
+
+local function short_ids(memory)
+	if type(memory) ~= "table" then
+		return "-"
+	end
+	local out = {}
+	local count = 0
+	for i = 1, #memory do
+		local id = tonumber(memory[i])
+		if id then
+			count = count + 1
+			if #out < MAX_MEMORY_IDS then
+				out[#out + 1] = tostring(id)
+			end
+		end
+	end
+	if count > #out then
+		out[#out + 1] = string.format("+%s", tostring(count - #out))
+	end
+	return table.concat(out, ",")
+end
+
+local function root_storage(id)
+	id = tonumber(id)
+	return id and db and db.storage and db.storage[id] or nil
+end
+
+local function corpse_storage_state(corpse_id)
+	local st = root_storage(corpse_id)
+	return st and st.corpse_already_selected or nil
+end
+
+local function corpse_detection_state(npc)
+	local st = root_storage(object_id(npc))
+	return st, st and st.corpse_detection or nil
+end
+
+local function vanilla_has_valuable(corpse_id)
+	local mod = safe_mod("xr_corpse_detection")
+	local corpse = online_object_by_id(corpse_id)
+	if not (mod and type(mod.has_valuable_loot) == "function" and corpse) then
+		return nil
+	end
+	local ok, result = pcall(mod.has_valuable_loot, corpse)
+	return ok and result
+end
+
+local function vanilla_lootable(section)
+	local mod = safe_mod("xr_corpse_detection")
+	local table_ref = mod and mod.lootable_table
+	return type(table_ref) == "table" and section ~= nil and table_ref[section] ~= nil
+end
+
+local function zhopa_corpse_ignored(corpse_id)
+	local loot = safe_mod("zhopa2_loot")
+	if not (loot and type(loot.corpse_ignored) == "function") then
+		return nil
+	end
+	local ok, result = pcall(loot.corpse_ignored, corpse_id)
+	return ok and result
+end
+
+local function zhopa_can_take(section, item, looter)
+	local loot = safe_mod("zhopa2_loot")
+	if not (loot and type(loot.can_take_section) == "function") then
+		return nil
+	end
+	local ok, result = pcall(loot.can_take_section, section, item, looter)
+	return ok and result
+end
+
+local function zhopa_protected_corpse(corpse, corpse_id)
+	local loot = safe_mod("zhopa2_loot")
+	if not (loot and type(loot.is_protected_corpse) == "function") then
+		return nil
+	end
+	local ok, result = pcall(loot.is_protected_corpse, corpse, corpse_id)
+	return ok and result
+end
+
+local function section_is_quest(section)
+	if not (section and ini_sys and type(ini_sys.r_bool_ex) == "function") then
+		return nil
+	end
+	local ok, result = pcall(ini_sys.r_bool_ex, ini_sys, section, "quest_item", false)
+	return ok and result or nil
+end
+
+local function object_is_story(obj)
+	local id = tonumber(object_id(obj))
+	if not (id and get_object_story_id) then
+		return nil
+	end
+	local ok, result = pcall(get_object_story_id, id)
+	return ok and result ~= nil or nil
+end
+
+local function recent_corpse_ids()
+	local loot = safe_mod("zhopa2_loot")
+	if not (loot and type(loot.recent_corpse_ids) == "function") then
+		return {}
+	end
+	local ok, ids = pcall(loot.recent_corpse_ids)
+	return ok and type(ids) == "table" and ids or {}
+end
+
+local function looter_sample_for_corpse(corpse_id)
+	if not (db and db.storage) then
+		return nil
+	end
+	for npc_id, stored in pairs(db.storage) do
+		local npc = stored and stored.object or nil
+		local cd = stored and stored.corpse_detection or nil
+		if npc and is_stalker(npc) and object_alive(npc) == true and cd then
+			if tonumber(cd.selected_corpse_id) == tonumber(corpse_id)
+				or tonumber(cd.nearest_id) == tonumber(corpse_id)
+				or list_has(cd.memory, corpse_id)
+			then
+				return npc, npc_id
+			end
+		end
+	end
+	return nil
+end
+
+local function corpse_inventory_signature(corpse, looter)
+	local count = 0
+	local vanilla = 0
+	local zhopa = 0
+	local quest = 0
+	local story = 0
+	local suspicious = 0
+	local lines = {}
+	if not (corpse and type(corpse.iterate_inventory) == "function") then
+		return "inventory=unavailable", lines
+	end
+	local function inspect_item(owner, item)
+		if not item then
+			return
+		end
+		count = count + 1
+		local section = object_section(item)
+		local v = vanilla_lootable(section)
+		local z = zhopa_can_take(section, item, looter)
+		local q = section_is_quest(section)
+		local s = object_is_story(item)
+		if v then
+			vanilla = vanilla + 1
+		end
+		if z then
+			zhopa = zhopa + 1
+		end
+		if q then
+			quest = quest + 1
+		end
+		if s then
+			story = story + 1
+		end
+		if (v and not z) or q or s or (TARGET_SECTION and section == TARGET_SECTION) then
+			suspicious = suspicious + 1
+		end
+		if #lines < MAX_ITEMS_PER_CORPSE and ((v and not z) or q or s or TARGET_SECTION == nil or section == TARGET_SECTION) then
+			local se = safe_alife_object(object_id(item))
+			lines[#lines + 1] = string.format(
+				"item [%s] section [%s] vanilla [%s] zhopa [%s] quest [%s] story [%s] parent [%s]",
+				tostring(named_id(item)),
+				tostring(section or "-"),
+				boolstr(v),
+				boolstr(z),
+				boolstr(q),
+				boolstr(s),
+				tostring(se and se.parent_id or "-")
+			)
+		end
+	end
+	local ok = pcall(corpse.iterate_inventory, corpse, inspect_item, corpse)
+	if not ok then
+		return "inventory=iterate_failed", lines
+	end
+	return string.format("items=%s vanilla=%s zhopa=%s quest=%s story=%s suspicious=%s", tostring(count), tostring(vanilla), tostring(zhopa), tostring(quest), tostring(story), tostring(suspicious)), lines
+end
+
+local function should_log_sig(kind, key, sig, force)
+	if force then
+		return true
+	end
+	local cache = kind == "npc" and last_npc_sig or last_corpse_sig
+	if cache[key] == sig then
+		return false
+	end
+	cache[key] = sig
+	return true
+end
+
+local function dump_corpse(corpse_id, reason, looter, force)
+	corpse_id = tonumber(corpse_id)
+	if not corpse_id or (TARGET_CORPSE_ID and corpse_id ~= tonumber(TARGET_CORPSE_ID)) then
+		return
+	end
+	local corpse = online_object_by_id(corpse_id)
+	local sample = looter or looter_sample_for_corpse(corpse_id)
+	local recent = list_has(recent_corpse_ids(), corpse_id)
+	local ignored = zhopa_corpse_ignored(corpse_id)
+	local valuable = vanilla_has_valuable(corpse_id)
+	local selected_by = corpse_storage_state(corpse_id)
+	local protected = corpse and zhopa_protected_corpse(corpse, corpse_id) or nil
+	local alive = corpse and object_alive(corpse) or nil
+	local dist = corpse and dist_to_actor(corpse) or nil
+	local inv_sig, item_lines = corpse_inventory_signature(corpse, sample)
+	local sig = table.concat({
+		tostring(recent),
+		tostring(ignored),
+		tostring(valuable),
+		tostring(selected_by),
+		tostring(protected),
+		tostring(alive),
+		inv_sig,
+	}, "|")
+	if not should_log_sig("corpse", corpse_id, sig, force) then
+		return
+	end
+	log(
+		"corpse reason [%s] corpse [%s] online [%s] alive [%s] dist_actor [%s] recent [%s] ignored [%s] valuable [%s] selected_by [%s] protected [%s] %s sample_looter [%s]",
+		tostring(reason or "-"),
+		tostring(named_id(corpse or corpse_id)),
+		boolstr(corpse ~= nil),
+		boolstr(alive),
+		tostring(dist and math.floor((tonumber(dist) * 10) + 0.5) / 10 or "-"),
+		boolstr(recent),
+		boolstr(ignored),
+		boolstr(valuable),
+		tostring(selected_by or "-"),
+		boolstr(protected),
+		tostring(inv_sig),
+		tostring(sample and named_id(sample) or "-")
+	)
+	for i = 1, #item_lines do
+		log("corpse_item corpse [%s] %s", tostring(corpse_id), item_lines[i])
+	end
+end
+
+local function dump_npc(npc, reason, force, out_corpses, seen_corpses)
+	local npc_id = tonumber(object_id(npc))
+	if not npc_id or (TARGET_NPC_ID and npc_id ~= tonumber(TARGET_NPC_ID)) then
+		return false
+	end
+	local root, cd = corpse_detection_state(npc)
+	if not cd then
+		return false
+	end
+	local loot = safe_mod("zhopa2_loot")
+	local managed = loot and safe_bool(loot.should_manage_looter, npc) or nil
+	local selected = tonumber(cd.selected_corpse_id)
+	local nearest = tonumber(cd.nearest_id)
+	append_unique(out_corpses, seen_corpses, selected)
+	append_unique(out_corpses, seen_corpses, nearest)
+	if type(cd.memory) == "table" then
+		for i = 1, #cd.memory do
+			append_unique(out_corpses, seen_corpses, cd.memory[i])
+		end
+	end
+	local sig = table.concat({
+		tostring(root and root.active_scheme),
+		tostring(root and root.active_section),
+		tostring(selected),
+		tostring(nearest),
+		short_ids(cd.memory),
+		tostring(cd.state),
+		tostring(cd.vertex_id),
+		tostring(cd.__stimer),
+		tostring(cd.__dtimer),
+	}, "|")
+	if should_log_sig("npc", npc_id, sig, force) then
+		log(
+			"npc reason [%s] npc [%s] active_scheme [%s] active_section [%s] alive [%s] managed [%s] selected [%s] nearest [%s] memory_count [%s] memory [%s] state [%s] vertex [%s] stimer [%s] dtimer [%s]",
+			tostring(reason or "-"),
+			tostring(named_id(npc)),
+			tostring(root and root.active_scheme or "-"),
+			tostring(root and root.active_section or "-"),
+			boolstr(object_alive(npc)),
+			boolstr(managed == true),
+			tostring(selected or "-"),
+			tostring(nearest or "-"),
+			tostring(table_count(cd.memory)),
+			tostring(short_ids(cd.memory)),
+			tostring(cd.state or "-"),
+			tostring(cd.vertex_id or "-"),
+			tostring(cd.__stimer or "-"),
+			tostring(cd.__dtimer or "-")
+		)
+	end
+	return true
+end
+
+local function dump_runtime(reason)
+	local loot = safe_mod("zhopa2_loot")
+	local rt = safe_mod("zhopa2_runtime_patches")
+	local corpse = safe_mod("xr_corpse_detection")
+	local runtime_ready = rt and safe_bool(rt.runtime_ready, "loot_loop_diag") or nil
+	local enabled = loot and safe_bool(loot.enabled) or nil
+	local online = loot and safe_bool(loot.online_enabled) or nil
+	log(
+		"runtime reason [%s] loot_mod [%s] corpse_mod [%s] runtime_ready [%s] loot_enabled [%s] loot_online [%s] recent_count [%s]",
+		tostring(reason or "-"),
+		boolstr(loot ~= nil),
+		boolstr(corpse ~= nil),
+		boolstr(runtime_ready == true),
+		boolstr(enabled == true),
+		boolstr(online == true),
+		tostring(#recent_corpse_ids())
+	)
+end
+
+function M.dump(reason, force)
+	log_lines = 0
+	force = force ~= false
+	reason = reason or "manual"
+	dump_runtime(reason)
+	local corpse_ids = {}
+	local seen_corpses = {}
+	local recent = recent_corpse_ids()
+	for i = 1, #recent do
+		append_unique(corpse_ids, seen_corpses, recent[i])
+	end
+	if TARGET_CORPSE_ID then
+		append_unique(corpse_ids, seen_corpses, TARGET_CORPSE_ID)
+	end
+	local npc_lines = 0
+	if db and db.storage then
+		for _, stored in pairs(db.storage) do
+			local npc = stored and stored.object or nil
+			if npc and is_stalker(npc) and object_alive(npc) == true and dump_npc(npc, reason, force, corpse_ids, seen_corpses) then
+				npc_lines = npc_lines + 1
+				if npc_lines >= MAX_NPC_LINES then
+					break
+				end
+			end
+		end
+	end
+	local corpse_lines = 0
+	for i = 1, #corpse_ids do
+		dump_corpse(corpse_ids[i], reason, nil, force)
+		corpse_lines = corpse_lines + 1
+		if corpse_lines >= MAX_CORPSE_LINES then
+			break
+		end
+	end
+	log("dump_done reason [%s] npc_lines [%s] corpse_candidates [%s] printed_corpses [%s]", tostring(reason), tostring(npc_lines), tostring(#corpse_ids), tostring(corpse_lines))
+end
+
+local function patch_function(mod, fn_name, patch_id, wrapper_factory)
+	if not (mod and type(mod) == "table" and type(mod[fn_name]) == "function") then
+		return false
+	end
+	local flag = "__zhopa2_loot_loop_diag_" .. patch_id
+	if mod[flag] then
+		return true
+	end
+	local original = mod[fn_name]
+	mod[fn_name] = wrapper_factory(original)
+	mod[flag] = true
+	return true
+end
+
+function M.install()
+	if installed then
+		return true
+	end
+	local loot = safe_mod("zhopa2_loot")
+	local corpse_mod = safe_mod("xr_corpse_detection")
+	if not (loot and corpse_mod) then
+		log("install_wait loot_mod [%s] corpse_mod [%s]", boolstr(loot ~= nil), boolstr(corpse_mod ~= nil))
+		return false
+	end
+	patch_function(loot, "forget_corpse_id", "forget_corpse", function(original)
+		return function(id, ...)
+			log("call forget_corpse_id corpse [%s] ignored_before [%s] recent_before [%s]", tostring(named_id(id)), boolstr(zhopa_corpse_ignored(id)), boolstr(list_has(recent_corpse_ids(), id)))
+			local result = original(id, ...)
+			log("done forget_corpse_id corpse [%s] ignored_after [%s] recent_after [%s]", tostring(named_id(id)), boolstr(zhopa_corpse_ignored(id)), boolstr(list_has(recent_corpse_ids(), id)))
+			dump_corpse(id, "forget_corpse_id", nil, true)
+			return result
+		end
+	end)
+	patch_function(corpse_mod, "set_valuable_loot", "set_valuable", function(original)
+		return function(id, val, ...)
+			if not wrapper_guard then
+				wrapper_guard = true
+				log("call set_valuable_loot corpse [%s] val [%s] ignored [%s] recent [%s]", tostring(named_id(id)), boolstr(val), boolstr(zhopa_corpse_ignored(id)), boolstr(list_has(recent_corpse_ids(), id)))
+				wrapper_guard = false
+			end
+			return original(id, val, ...)
+		end
+	end)
+	patch_function(corpse_mod, "get_all_from_corpse", "get_all", function(original)
+		return function(npc, ...)
+			local _, cd = corpse_detection_state(npc)
+			local corpse_id = cd and cd.selected_corpse_id or nil
+			log("call get_all_from_corpse npc [%s] selected [%s]", tostring(named_id(npc)), tostring(named_id(corpse_id)))
+			dump_npc(npc, "get_all_before", true, {}, {})
+			dump_corpse(corpse_id, "get_all_before", npc, true)
+			local result = original(npc, ...)
+			log("done get_all_from_corpse npc [%s] selected_before [%s]", tostring(named_id(npc)), tostring(named_id(corpse_id)))
+			dump_npc(npc, "get_all_after", true, {}, {})
+			dump_corpse(corpse_id, "get_all_after", npc, true)
+			return result
+		end
+	end)
+	installed = true
+	log("install_ok")
+	M.dump("install", true)
+	return true
+end
+
+function M.start_watch(duration_ms)
+	duration_ms = tonumber(duration_ms) or WATCH_DURATION_MS
+	local now = tg()
+	watch_until_tg = now + duration_ms
+	next_watch_tg = 0
+	log("watch_start duration_ms [%s]", tostring(duration_ms))
+end
+
+function M.stop_watch()
+	watch_until_tg = nil
+	next_watch_tg = nil
+	log("watch_stop")
+end
+
+function M.actor_on_update()
+	if not installed then
+		M.install()
+	end
+	if not (AUTO_WATCH_ENABLED and watch_until_tg) then
+		return
+	end
+	local now = tg()
+	if now <= 0 or now > watch_until_tg then
+		M.stop_watch()
+		return
+	end
+	if next_watch_tg and now < next_watch_tg then
+		return
+	end
+	next_watch_tg = now + WATCH_INTERVAL_MS
+	M.dump("watch", false)
+end
+
+function M.actor_on_first_update()
+	if scheduled then
+		return
+	end
+	scheduled = true
+	if AUTO_INSTALL_ENABLED then
+		M.install()
+	end
+	if AUTO_WATCH_ENABLED then
+		watch_until_tg = tg() + WATCH_DURATION_MS
+		next_watch_tg = tg() + DUMP_DELAY_MS
+	end
+	if RegisterScriptCallback then
+		if UnregisterScriptCallback then
+			pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		end
+		RegisterScriptCallback("actor_on_update", M.actor_on_update)
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function actor_on_update()
+	return M.actor_on_update()
+end
+
+function actor_on_first_update()
+	return M.actor_on_first_update()
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_loot_loop_diag = M
+
+return M

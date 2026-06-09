@@ -274,6 +274,27 @@ local function zhopa2_debug_printf(fmt, ...)
 	end
 end
 
+local function zhopa2_valid_script_target_id(target_id)
+	local id = tonumber(target_id) or target_id
+	if tonumber(id) == (AC_ID or 0) then
+		return true, "actor"
+	end
+	local obj = server_object(id)
+	if not obj then
+		return false, "missing"
+	end
+	if type(obj.am_i_reached) == "function" then
+		return true, "reachable"
+	end
+	if obj.clsid and clsid then
+		local ok, class_id = pcall(obj.clsid, obj)
+		if ok and (class_id == clsid.smart_terrain or class_id == clsid.online_offline_group_s) then
+			return true, "reachable_class"
+		end
+	end
+	return false, "no_am_i_reached"
+end
+
 local function runtime_time_ms()
 	return time_global and time_global() or 0
 end
@@ -799,6 +820,7 @@ function squad_methods.zhopa2_clear_task(self, reason)
 	self.zhopa2_trade_queue_state = nil
 	self.zhopa2_trade_queue_smart = nil
 	self.zhopa2_trade_queue_reason = nil
+	self.zhopa2_invalid_script_target_sig = nil
 	self:zhopa2_release_task_rush()
 	self:zhopa2_sync_base_camping_registry()
 	self:zhopa2_cleanup_debug()
@@ -902,6 +924,7 @@ function squad_methods.zhopa2_assign_task(self, task, target_id, duration_sec, r
 	self.zhopa2_trade_queue_state = nil
 	self.zhopa2_trade_queue_smart = nil
 	self.zhopa2_trade_queue_reason = nil
+	self.zhopa2_invalid_script_target_sig = nil
 	self.scripted_target = self.zhopa2_target
 	self:zhopa2_sync_base_camping_registry()
 	self:zhopa2_sync_task_rush()
@@ -1007,7 +1030,7 @@ function squad_methods.zhopa2_target_is_alive(self)
 		end
 		return true
 	end
-	return alife_object(self.zhopa2_target) ~= nil
+	return zhopa2_valid_script_target_id(self.zhopa2_target) == true
 end
 
 function squad_methods.zhopa2_update_task(self)
@@ -1034,10 +1057,43 @@ function squad_methods.zhopa2_get_script_target(self)
 		if t and type(t.get_script_target) == "function" then
 			local target = t.get_script_target(self)
 			if target then
-				return target
+				local ok, invalid_reason = zhopa2_valid_script_target_id(target)
+				if ok then
+					return target
+				end
+				local sig = tostring(self.zhopa2_task) .. ":" .. tostring(target) .. ":tasks"
+				if self.zhopa2_invalid_script_target_sig ~= sig then
+					self.zhopa2_invalid_script_target_sig = sig
+					self.zhopa2_last_result = "invalid_script_target"
+					zhopa2_debug_printf(
+						"~ ZHOPA2 task error | reason [invalid_script_target] squad [%s:%s] task [%s] target [%s] source [tasks] detail [%s]",
+						tostring(self.name and self:name() or ""),
+						tostring(self.id or "-"),
+						tostring(self.zhopa2_task or "-"),
+						tostring(target or "-"),
+						tostring(invalid_reason or "-")
+					)
+				end
+				return nil
 			end
 		end
-		return self.zhopa2_target
+		local ok, invalid_reason = zhopa2_valid_script_target_id(self.zhopa2_target)
+		if ok then
+			return self.zhopa2_target
+		end
+		local sig = tostring(self.zhopa2_task) .. ":" .. tostring(self.zhopa2_target) .. ":fallback"
+		if self.zhopa2_invalid_script_target_sig ~= sig then
+			self.zhopa2_invalid_script_target_sig = sig
+			self.zhopa2_last_result = "invalid_script_target"
+			zhopa2_debug_printf(
+				"~ ZHOPA2 task error | reason [invalid_script_target] squad [%s:%s] task [%s] target [%s] source [fallback] detail [%s]",
+				tostring(self.name and self:name() or ""),
+				tostring(self.id or "-"),
+				tostring(self.zhopa2_task or "-"),
+				tostring(self.zhopa2_target or "-"),
+				tostring(invalid_reason or "-")
+			)
+		end
 	end
 	return nil
 end
@@ -4176,9 +4232,11 @@ local function zhopa2_event_corpse_ids()
 	return nil
 end
 
-local function zhopa2_forget_corpse_id(corpse_id)
+local function zhopa2_forget_corpse_id(corpse_id, consume_only)
 	local mod = zhopa2_loot_mod()
-	if mod and type(mod.forget_corpse_id) == "function" then
+	if consume_only == true and mod and type(mod.consume_corpse_event_id) == "function" then
+		mod.consume_corpse_event_id(corpse_id)
+	elseif mod and type(mod.forget_corpse_id) == "function" then
 		mod.forget_corpse_id(corpse_id)
 	end
 end
@@ -4188,6 +4246,35 @@ local function zhopa2_mark_corpse_checked(corpse_id)
 	if corpse_id then
 		zhopa2_forget_corpse_id(corpse_id)
 	end
+end
+
+function M.zhopa2_mark_corpse_exhausted(corpse_id)
+	corpse_id = tonumber(corpse_id)
+	if not corpse_id then
+		return
+	end
+	local cache = M.zhopa2_exhausted_corpses
+	if type(cache) ~= "table" then
+		cache = { ids = {}, seen = {} }
+		M.zhopa2_exhausted_corpses = cache
+	end
+	if cache.seen[corpse_id] == true then
+		return
+	end
+	cache.seen[corpse_id] = true
+	cache.ids[#cache.ids + 1] = corpse_id
+	while #cache.ids > 512 do
+		local old_id = table.remove(cache.ids, 1)
+		if old_id then
+			cache.seen[old_id] = nil
+		end
+	end
+end
+
+function M.zhopa2_corpse_exhausted(corpse_id)
+	corpse_id = tonumber(corpse_id)
+	local cache = M.zhopa2_exhausted_corpses
+	return corpse_id ~= nil and type(cache) == "table" and type(cache.seen) == "table" and cache.seen[corpse_id] == true
 end
 
 local function zhopa2_reject_corpse_candidate(mod, st, corpse_id)
@@ -4236,6 +4323,7 @@ local function zhopa2_reject_corpse_candidate(mod, st, corpse_id)
 		end
 	end
 	zhopa2_mark_corpse_checked(corpse_id)
+	M.zhopa2_mark_corpse_exhausted(corpse_id)
 	if mod and type(mod.set_valuable_loot) == "function" then
 		pcall(mod.set_valuable_loot, corpse_id, false)
 	end
@@ -4282,19 +4370,37 @@ local function zhopa2_corpse_has_money(corpse)
 	return money ~= nil and money > 0 and money < 10000
 end
 
-local function zhopa2_corpse_has_takeable_item(npc, corpse, active)
-	if not (corpse and zhopa2_is_inventory_owner(corpse) and type(corpse.iterate_inventory) == "function") then
+function M.zhopa2_corpse_can_take_item(npc, item, section)
+	section = section or (item and item.section and item:section())
+	if type(section) ~= "string" or section == "" then
 		return false
 	end
 	local mod = corpse_mod()
 	local lootable_table = mod and mod.lootable_table
+	if lootable_table and lootable_table[section] ~= nil then
+		return true
+	end
+	return zhopa2_can_take_section(npc, item, section) == true
+end
+
+local function zhopa2_corpse_has_takeable_item(npc, corpse, active)
+	if not (corpse and zhopa2_is_inventory_owner(corpse) and type(corpse.iterate_inventory) == "function") then
+		return false
+	end
+	local lootable_table = nil
+	if not active then
+		local mod = corpse_mod()
+		lootable_table = mod and mod.lootable_table
+	end
 	local has_item = false
 	local function check_item(owner, item)
 		if has_item or not item then
 			return
 		end
 		local section = item:section()
-		if (lootable_table and lootable_table[section] ~= nil) or (active and zhopa2_can_take_section(npc, item, section)) then
+		if active then
+			has_item = M.zhopa2_corpse_can_take_item(npc, item, section) == true
+		elseif lootable_table and lootable_table[section] ~= nil then
 			has_item = true
 		end
 	end
@@ -4303,6 +4409,9 @@ local function zhopa2_corpse_has_takeable_item(npc, corpse, active)
 end
 
 local function zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active)
+	if active and M.zhopa2_corpse_exhausted(corpse_id) then
+		return false
+	end
 	if not active then
 		local mod = corpse_mod()
 		return mod and type(mod.has_valuable_loot) == "function" and mod.has_valuable_loot(corpse) == true
@@ -4395,13 +4504,13 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 					pcall(game_statistics.increment_npc_statistic, npc, "field_dressings")
 				end
 			end
-			zhopa2_mark_corpse_checked(corpse_id)
+			zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
 			return
 		end
 		local items_value = 0
 		local function get_item(owner, item)
 			local section = item and item:section()
-			local allowed = zhopa2_can_take_section(npc, item, section)
+			local allowed = M.zhopa2_corpse_can_take_item(npc, item, section)
 			if SendScriptCallback then
 				SendScriptCallback("npc_on_get_all_from_corpse", npc, corpse, item, allowed)
 			end
@@ -4434,7 +4543,7 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 			end
 			save_var(npc, "s_loot_count", count + 1)
 		end
-		zhopa2_mark_corpse_checked(corpse_id)
+		zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
 		if game_statistics then
 			pcall(game_statistics.increment_npc_statistic, npc, "corpse_looted")
 		end
@@ -4522,6 +4631,7 @@ local function patch_corpse_classes(mod)
 								elseif zhopa2_corpse_has_candidate_loot(npc, obj, corpse_id, active) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
 									self.a.memory[#self.a.memory + 1] = corpse_id
 									seen[corpse_id] = true
+									zhopa2_forget_corpse_id(corpse_id, true)
 									if mod and type(mod.set_valuable_loot) == "function" then
 										mod.set_valuable_loot(corpse_id, true)
 									end
@@ -4531,6 +4641,17 @@ local function patch_corpse_classes(mod)
 					end
 				end
 				local result = original(self, ...)
+				if active and self.a and self.a.selected_corpse_id then
+					local corpse_id = tonumber(self.a.selected_corpse_id)
+					local corpse = corpse_object(corpse_id)
+					if corpse
+						and (zhopa2_is_protected_corpse(corpse, corpse_id)
+							or not zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active))
+					then
+						zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
+						return false
+					end
+				end
 				if self.a and cleanup_protected_state(self.a) then
 					return false
 				end
