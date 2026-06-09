@@ -853,10 +853,20 @@ local function trade_seller_for_npc(npc, params)
 	local npc_id = object_id(npc)
 	local smart = trade_smart_for_npc(npc, params)
 	local npc_info = smart and smart.npc_info and smart.npc_info[npc_id]
-	local seller_id = npc_info and npc_info.job and npc_info.job.seller_id
 	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
-	if not seller_id and st then
-		seller_id = st.zhopa2_trade_trader_id
+	local managed_seller_id = st and tonumber(st.zhopa2_trade_trader_id) or nil
+	local seller_id = nil
+	if managed_seller_id
+		and st.zhopa2_trade_squad_id
+		and tonumber(st.zhopa2_trade_force_until or 0) > tg()
+	then
+		seller_id = managed_seller_id
+	end
+	if not seller_id then
+		seller_id = npc_info and npc_info.job and npc_info.job.seller_id
+	end
+	if not seller_id then
+		seller_id = managed_seller_id
 	end
 	if not seller_id then
 		return nil, smart
@@ -3522,12 +3532,14 @@ local function setup_assigned_trade_job(npc, smart, info, job, slot_section, tra
 	if not (npc_id and smart and info and job and slot_section) then
 		return false, "missing_trade_job"
 	end
+	local trader_id = object_id(trader)
 	local owner_id = smart.npc_by_job_section and tonumber(smart.npc_by_job_section[slot_section]) or nil
 	if owner_id and owner_id ~= tonumber(npc_id) then
 		return false, "trade_slot_busy"
 	end
 
 	unlink_npc_smart_job(smart, npc_id)
+	job.seller_id = trader_id
 	info.job = job
 	info.begin_job = true
 	info.need_job = "nil"
@@ -3539,6 +3551,7 @@ local function setup_assigned_trade_job(npc, smart, info, job, slot_section, tra
 	if st then
 		st.zhopa2_trade_force_job_section = slot_section
 		st.zhopa2_trade_force_until = trade_path.force_until()
+		st.zhopa2_trade_trader_id = trader_id
 	end
 	if not (st and st.object) then
 		return true, "trade_job_assigned_offline"
@@ -3589,6 +3602,7 @@ local function force_trade_job_reselect(npc, smart, trader)
 		pcall(smart.switch_to_desired_job, smart, npc)
 	end
 	if info.job and info.job.section == slot_section and job_is_trade_customer(info.job, smart) then
+		info.job.seller_id = object_id(trader)
 		local active_st = db and db.storage and db.storage[npc_id] or nil
 		if not (active_st and active_st.object) or (active_st.section_logic == slot_section and active_st.active_scheme ~= nil) then
 			if active_st and active_st.object then
