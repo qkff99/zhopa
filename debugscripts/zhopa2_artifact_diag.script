@@ -1,6 +1,7 @@
 local M = {}
 
 local dumped = false
+local MAX_ARTIFACT_CANDIDATES = 12
 
 local function debug_print_enabled()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -140,6 +141,108 @@ local function obj_level(obj)
 	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
 end
 
+local function current_level_name()
+	if level and type(level.name) == "function" then
+		local ok, name = pcall(level.name)
+		if ok and name then
+			return name
+		end
+	end
+	return nil
+end
+
+local function object_position(obj)
+	if not obj then
+		return nil
+	end
+	local ok_member, pos_member = pcall(function()
+		return obj.position
+	end)
+	if ok_member and type(pos_member) == "function" then
+		local ok_pos, pos = pcall(pos_member, obj)
+		if ok_pos and pos then
+			return pos
+		end
+	elseif ok_member and pos_member then
+		return pos_member
+	end
+	local lv_id = tonumber(safe_field(obj, "m_level_vertex_id"))
+	if lv_id and lv_id < 4294967295 and level and type(level.vertex_position) == "function" then
+		local active_level = current_level_name()
+		local object_level = obj_level(obj)
+		if active_level and object_level and active_level ~= object_level then
+			return nil
+		end
+		local ok, pos = pcall(level.vertex_position, lv_id)
+		if ok and pos then
+			return pos
+		end
+	end
+	return nil
+end
+
+local function pos_text(pos)
+	if not pos then
+		return "-"
+	end
+	return string.format("%.1f,%.1f,%.1f", tonumber(pos.x) or 0, tonumber(pos.y) or 0, tonumber(pos.z) or 0)
+end
+
+local function distance_sqr(a, b)
+	local a_pos = object_position(a)
+	local b_pos = object_position(b)
+	if not (a_pos and b_pos) then
+		return nil
+	end
+	local ok, dist = pcall(function()
+		return a_pos:distance_to_sqr(b_pos)
+	end)
+	return ok and tonumber(dist) or nil
+end
+
+local function dump_artifact_candidate_smarts(idx, artifact_id, art)
+	if not (idx and type(idx.smarts_on_levels) == "function") then
+		return
+	end
+	local level_name = idx.artifact_level and idx.artifact_level[artifact_id] or obj_level(art)
+	if not level_name then
+		return
+	end
+	local candidates = idx.smarts_on_levels({ level_name })
+	local resource_candidates = idx.smarts_on_levels({ level_name }, nil, "resource")
+	local rows = {}
+	for i = 1, #(candidates or {}) do
+		local smart = candidates[i]
+		rows[#rows + 1] = { smart = smart, dist = smart and distance_sqr(art, smart) or nil }
+	end
+	table.sort(rows, function(a, b)
+		if a.dist and b.dist then
+			return a.dist < b.dist
+		end
+		if a.dist then
+			return true
+		end
+		if b.dist then
+			return false
+		end
+		return tostring(object_id(a.smart) or "") < tostring(object_id(b.smart) or "")
+	end)
+	local parts = {}
+	for i = 1, math.min(#rows, MAX_ARTIFACT_CANDIDATES) do
+		local row = rows[i]
+		parts[#parts + 1] = string.format("%s:dist=%s:pos=%s", named_id(row.smart), row.dist and string.format("%.1f", row.dist) or "-", pos_text(object_position(row.smart)))
+	end
+	log(
+		"artifact smart candidates id=%s level=%s all_count=%s resource_count=%s artifact_pos=%s list=[%s]",
+		tostring(artifact_id),
+		tostring(level_name),
+		tostring(#(candidates or {})),
+		tostring(#(resource_candidates or {})),
+		pos_text(object_position(art)),
+		table.concat(parts, ";")
+	)
+end
+
 local function artifact_valid(idx, artifact_id)
 	if not idx then
 		return false
@@ -222,7 +325,7 @@ local function dump_artifacts(idx)
 	for _, artifact_id in ipairs(sorted_keys(idx.artifacts)) do
 		local art = alife_object and alife_object(artifact_id) or nil
 		log(
-			"artifact id=%s virtual=%s valid=%s section=%s real_section=%s level=%s smart=%s zone=%s reserved_by=%s obj=%s parent=%s",
+			"artifact id=%s virtual=%s valid=%s section=%s real_section=%s level=%s smart=%s zone=%s reserved_by=%s obj=%s parent=%s pos=%s",
 			tostring(artifact_id),
 			tostring(idx.virtual_artifacts and idx.virtual_artifacts[artifact_id] ~= nil),
 			tostring(artifact_valid(idx, artifact_id)),
@@ -233,8 +336,10 @@ local function dump_artifacts(idx)
 			tostring(idx.artifact_zone and idx.artifact_zone[artifact_id] or "-"),
 			tostring(idx.artifact_reserved_by and idx.artifact_reserved_by[artifact_id] or "-"),
 			named_id(art or artifact_id),
-			tostring(art and art.parent_id or "-")
+			tostring(art and art.parent_id or "-"),
+			pos_text(object_position(art))
 		)
+		dump_artifact_candidate_smarts(idx, artifact_id, art)
 	end
 	for _, smart_id in ipairs(sorted_keys(idx.smart_artifacts)) do
 		local flags = idx.smart_task_flags and idx.smart_task_flags[smart_id] or nil
@@ -292,8 +397,8 @@ function M.dump()
 		log("end no_index")
 		return false
 	end
-	dump_virtual_zones(idx)
 	dump_artifacts(idx)
+	dump_virtual_zones(idx)
 	dump_simboard_tasks(idx)
 	log("end")
 	return true

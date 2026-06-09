@@ -237,7 +237,7 @@ local function artifact_id_target_blacklisted(squad, artifact_id)
 	if not (idx and artifact_id) then
 		return false
 	end
-	local smart_id = idx.artifact_smart and idx.artifact_smart[artifact_id] or nil
+	local smart_id = tonumber(squad and squad.zhopa2_artifact_smart) or (idx.artifact_smart and idx.artifact_smart[artifact_id] or nil)
 	local smart = smart_id and alife_object and alife_object(smart_id) or nil
 	if artifact_target_blacklisted(squad, smart) then
 		return true
@@ -546,29 +546,6 @@ local function remember_artifact_reservation(squad, artifact_id)
 	end
 end
 
-local function retarget_artifact_task(squad, smart_id)
-	smart_id = tonumber(smart_id)
-	if not (squad and squad.zhopa2_task == "ARTEFACT" and smart_id) then
-		return false
-	end
-	local smart = alife_object and alife_object(smart_id) or nil
-	if artifact_target_blacklisted(squad, smart) then
-		return false
-	end
-	if tonumber(squad.zhopa2_target) == smart_id then
-		return false
-	end
-	squad.zhopa2_target = smart_id
-	squad.scripted_target = smart_id
-	squad.assigned_target_id = nil
-	squad.current_target_id = nil
-	squad.current_action = 0
-	if type(squad.zhopa2_sync_task_rush) == "function" then
-		squad:zhopa2_sync_task_rush()
-	end
-	return true
-end
-
 local function sync_task_artifact_metadata(squad, artifact_id)
 	local idx = index_mod()
 	artifact_id = tonumber(artifact_id)
@@ -588,15 +565,18 @@ local function sync_task_artifact_metadata(squad, artifact_id)
 	elseif squad.zhopa2_artifact_section and idx.artifact_section then
 		idx.artifact_section[artifact_id] = squad.zhopa2_artifact_section
 	end
-	if idx.artifact_smart and idx.artifact_smart[artifact_id] then
-		local smart = alife_object and alife_object(idx.artifact_smart[artifact_id]) or nil
+	local task_smart = tonumber(squad.zhopa2_target)
+	local expected_smart = tonumber(squad.zhopa2_artifact_smart) or task_smart
+	local indexed_smart = idx.artifact_smart and tonumber(idx.artifact_smart[artifact_id]) or nil
+	if indexed_smart then
+		local smart = alife_object and alife_object(expected_smart or indexed_smart) or nil
 		if artifact_target_blacklisted(squad, smart) then
 			release_artifact_reservation(squad, "artifact_target_blacklisted")
 			return
 		end
-		squad.zhopa2_artifact_smart = idx.artifact_smart[artifact_id]
-		retarget_artifact_task(squad, idx.artifact_smart[artifact_id])
-	elseif squad.zhopa2_artifact_smart and idx.artifact_smart then
+		squad.zhopa2_artifact_smart = expected_smart or indexed_smart
+	elseif expected_smart and idx.artifact_smart then
+		squad.zhopa2_artifact_smart = expected_smart
 		idx.artifact_smart[artifact_id] = squad.zhopa2_artifact_smart
 	end
 	if idx.artifact_zone and idx.artifact_zone[artifact_id] then
@@ -610,7 +590,11 @@ local function artifact_matches_task_smart(squad, artifact_id)
 	local idx = index_mod()
 	artifact_id = tonumber(artifact_id)
 	local task_smart = tonumber(squad and squad.zhopa2_target)
+	local expected_smart = tonumber(squad and squad.zhopa2_artifact_smart)
 	local artifact_smart = idx and artifact_id and idx.artifact_smart and tonumber(idx.artifact_smart[artifact_id]) or nil
+	if task_smart and expected_smart then
+		return task_smart == expected_smart
+	end
 	if not (task_smart and artifact_smart) then
 		return true
 	end
@@ -620,6 +604,9 @@ end
 local function artifact_from_task_smart(squad)
 	local idx = index_mod()
 	local smart_id = tonumber(squad and squad.zhopa2_target)
+	if idx and type(idx.available_artifact_for_smart) == "function" then
+		return idx.available_artifact_for_smart(smart_id, squad, { real_only = squad and squad.online == true })
+	end
 	local bucket = idx and smart_id and idx.smart_artifacts and idx.smart_artifacts[smart_id] or nil
 	if not bucket then
 		return nil
@@ -712,6 +699,40 @@ local function clear_online_pickup_state(squad)
 	squad.zhopa2_artifact_pickup_last_y = nil
 	squad.zhopa2_artifact_pickup_last_z = nil
 	squad.zhopa2_artifact_pickup_stall_since = nil
+end
+
+local function retarget_missing_artifact_to_current_smart(squad, old_artifact_id, reason)
+	local idx = index_mod()
+	if not (squad and squad.zhopa2_task == "ARTEFACT" and idx and type(idx.available_artifact_for_smart) == "function" and type(idx.reserve_artifact_for_squad) == "function") then
+		return nil
+	end
+	if type(squad.zhopa2_reached_target) == "function" and squad:zhopa2_reached_target() ~= true then
+		return nil
+	end
+	local smart_id = tonumber(squad.zhopa2_target) or tonumber(squad.current_target_id) or tonumber(squad.assigned_target_id) or tonumber(squad.smart_id)
+	if not smart_id then
+		return nil
+	end
+	local smart = alife_object and alife_object(smart_id) or nil
+	if artifact_target_blacklisted(squad, smart) then
+		return nil
+	end
+	local artifact_id = idx.available_artifact_for_smart(smart_id, squad, { real_only = squad.online == true })
+	if not artifact_id or tonumber(artifact_id) == tonumber(old_artifact_id) then
+		return nil
+	end
+	clear_online_pickup_state(squad)
+	squad.zhopa2_target = smart_id
+	squad.scripted_target = smart_id
+	squad.zhopa2_artifact_smart = smart_id
+	if not idx.reserve_artifact_for_squad(squad, artifact_id) then
+		return nil
+	end
+	squad.zhopa2_artifact_zone = idx.artifact_zone and idx.artifact_zone[artifact_id] or squad.zhopa2_artifact_zone
+	squad.zhopa2_artifact_section = idx.artifact_section and idx.artifact_section[artifact_id] or squad.zhopa2_artifact_section
+	sync_task_artifact_metadata(squad, artifact_id)
+	squad.zhopa2_last_result = "artifact_retargeted_missing:" .. tostring(reason or "-")
+	return artifact_id
 end
 
 local function gather_item_active(npc, artifact_id)
@@ -996,7 +1017,7 @@ function M.pick_target(squad, opts)
 
 	local reserved_id = squad.zhopa2_task == "ARTEFACT" and current_artifact_id(squad) or nil
 	if reserved_id and artifact_valid(reserved_id) then
-		local smart_id = idx.artifact_smart and idx.artifact_smart[reserved_id] or nil
+		local smart_id = tonumber(squad.zhopa2_artifact_smart) or (idx.artifact_smart and idx.artifact_smart[reserved_id] or nil)
 		local smart = smart_id and alife_object and alife_object(smart_id) or nil
 		if smart then
 			if artifact_target_blacklisted(squad, smart) then
@@ -1178,11 +1199,16 @@ function M.try_collect(squad)
 			squad.zhopa2_last_result = "artifact_online_wait_inventory"
 			return nil, squad.zhopa2_last_result
 		end
-		if squad.online == true then
-			debug_artifact_error(squad, "artifact_missing", artifact_id, nil, "artifact_valid=false")
+		local replacement_id = retarget_missing_artifact_to_current_smart(squad, artifact_id, "artifact_missing")
+		if replacement_id then
+			artifact_id = replacement_id
+		else
+			if squad.online == true then
+				debug_artifact_error(squad, "artifact_missing", artifact_id, nil, "artifact_valid=false")
+			end
+			release_artifact_reservation(squad, "artifact_missing")
+			return false, "artifact_missing"
 		end
-		release_artifact_reservation(squad, "artifact_missing")
-		return false, "artifact_missing"
 	end
 	local materialized, materialize_reason
 	artifact_id, materialized, materialize_reason = materialize_virtual_artifact_online(squad, artifact_id)
@@ -1286,6 +1312,10 @@ function M.try_collect(squad)
 		end
 		local idle_failed, idle_reason = online_arrived_idle_timeout(squad, artifact_id, online_reason)
 		if idle_failed then
+			local replacement_id = retarget_missing_artifact_to_current_smart(squad, artifact_id, "artifact_online_missing")
+			if replacement_id then
+				return nil, "artifact_retargeted_missing"
+			end
 			debug_artifact_error(squad, "artifact_online_missing", artifact_id, nil, tostr(idle_reason or online_reason))
 			clear_online_pickup_state(squad)
 			release_artifact_reservation(squad, "artifact_online_missing")

@@ -1076,7 +1076,7 @@ local function build_stalker_artefact(squad)
 	if not (cfg_bool("artefact_enabled", false) and artifacts and type(artifacts.pick_target) == "function") then
 		return nil
 	end
-	local target = artifacts.pick_target(squad, { level_mode = "same", exclude_current = true })
+	local target = artifacts.pick_target(squad, { level_mode = "same", exclude_current = false })
 		or artifacts.pick_target(squad, { level_mode = "neighbor", exclude_current = true })
 		or artifacts.pick_target(squad, { level_mode = "nearby", exclude_current = true })
 	local smart = target and target.smart or nil
@@ -1087,6 +1087,8 @@ local function build_stalker_artefact(squad)
 	if choice then
 		choice.artifact_id = target.artifact_id
 		choice.artifact_section = target.section
+		choice.artifact_smart = smart.id
+		choice.artifact_zone = target.zone
 	end
 	return choice
 end
@@ -1305,6 +1307,8 @@ local function assign_choice(squad, choice, fallback_reason)
 		if choice.task == M.TASK_ARTEFACT and choice.artifact_id then
 			squad.zhopa2_artifact_id = tonumber(choice.artifact_id)
 			squad.zhopa2_artifact_section = choice.artifact_section
+			squad.zhopa2_artifact_smart = tonumber(choice.artifact_smart) or tonumber(choice.target)
+			squad.zhopa2_artifact_zone = choice.artifact_zone
 		end
 		return true
 	end
@@ -2291,7 +2295,10 @@ function M.release_artifact_task(squad, reason)
 	end
 	if squad then
 		squad.zhopa2_artifact_id = nil
+		squad.zhopa2_artifact_smart = nil
+		squad.zhopa2_artifact_zone = nil
 		squad.zhopa2_artifact_section = nil
+		squad.zhopa2_artifact_task_collected_id = nil
 		squad.zhopa2_artifact_collect_started = nil
 		squad.zhopa2_artifact_pickup_npc_id = nil
 		squad.zhopa2_artifact_arrived_idle_since = nil

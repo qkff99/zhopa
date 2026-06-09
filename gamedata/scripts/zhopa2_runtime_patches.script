@@ -805,7 +805,10 @@ function squad_methods.zhopa2_clear_task(self, reason)
 	self.zhopa2_hunt_prepared_target = nil
 	self.zhopa2_hunt_prepared_target_signature = nil
 	self.zhopa2_artifact_id = nil
+	self.zhopa2_artifact_smart = nil
+	self.zhopa2_artifact_zone = nil
 	self.zhopa2_artifact_section = nil
+	self.zhopa2_artifact_task_collected_id = nil
 	self.zhopa2_artifact_collect_started = nil
 	self.zhopa2_artifact_arrived_idle_since = nil
 	self.zhopa2_rest_trade_state = nil

@@ -1,11 +1,11 @@
 local M = {}
 
-local VERSION = 7
+local VERSION = 8
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"
 local BASE_FIELD_COUNT = 8
-local FIELD_COUNT = 25
+local FIELD_COUNT = 28
 local RECENT_LIMIT = 8
 
 local function write_string(packet, value)
@@ -57,7 +57,10 @@ function M.reset_squad(squad)
 	squad.zhopa2_artifact_cargo_sections = nil
 	squad.zhopa2_artifact_cargo_last_id = nil
 	squad.zhopa2_artifact_id = nil
+	squad.zhopa2_artifact_smart = nil
+	squad.zhopa2_artifact_zone = nil
 	squad.zhopa2_artifact_section = nil
+	squad.zhopa2_artifact_task_collected_id = nil
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = VERSION
 end
@@ -163,6 +166,10 @@ function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
 		squad.zhopa2_artifact_cargo_sections = existing and existing ~= "" and (existing .. "," .. tostring(section)) or tostring(section)
 	end
 	squad.zhopa2_artifact_cargo_last_id = tonum(artifact_id) or squad.zhopa2_artifact_cargo_last_id
+	local reserved = tonum(squad.zhopa2_artifact_id)
+	if reserved and reserved == tonum(artifact_id) then
+		squad.zhopa2_artifact_task_collected_id = reserved
+	end
 	squad.zhopa2_last_result = reason or "artifact_cargo"
 	return true
 end
@@ -251,6 +258,9 @@ function M.write_squad(packet, squad)
 	write_string(packet, squad and squad.zhopa2_artifact_cargo_last_id)
 	write_string(packet, squad and squad.zhopa2_artifact_id)
 	write_string(packet, squad and squad.zhopa2_artifact_section)
+	write_string(packet, squad and squad.zhopa2_artifact_smart)
+	write_string(packet, squad and squad.zhopa2_artifact_zone)
+	write_string(packet, squad and squad.zhopa2_artifact_task_collected_id)
 	packet:w_stringZ(MARKER_END)
 end
 
@@ -300,6 +310,9 @@ function M.read_squad(packet, squad)
 	squad.zhopa2_artifact_cargo_last_id = field_count >= 23 and tonum(read_string(packet)) or nil
 	squad.zhopa2_artifact_id = field_count >= 24 and tonum(read_string(packet)) or nil
 	squad.zhopa2_artifact_section = field_count >= 25 and read_string(packet) or nil
+	squad.zhopa2_artifact_smart = field_count >= 26 and tonum(read_string(packet)) or nil
+	squad.zhopa2_artifact_zone = field_count >= 27 and read_string(packet) or nil
+	squad.zhopa2_artifact_task_collected_id = field_count >= 28 and tonum(read_string(packet)) or nil
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version
 
@@ -320,6 +333,7 @@ function M.read_squad(packet, squad)
 		squad.scripted_target = squad.zhopa2_target
 	end
 	if squad.zhopa2_task == "ARTEFACT" and squad.zhopa2_artifact_id then
+		squad.zhopa2_artifact_smart = squad.zhopa2_artifact_smart or squad.zhopa2_target
 		local idx = index_mod()
 		if idx and type(idx.reserve_artifact_for_squad) == "function" then
 			pcall(idx.reserve_artifact_for_squad, squad, squad.zhopa2_artifact_id)

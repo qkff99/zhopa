@@ -1916,7 +1916,7 @@ local function recover_task_artifact_from_squad_inventory(squad, artifact_id, re
 	local members = squad_online_member_objects(squad)
 	for i = 1, #members do
 		local item = inventory_item_by_section(members[i], section)
-		if item then
+		if item and tonumber(object_id(item)) == artifact_id then
 			return mark_artifact_cargo_for_squad(squad, item, section, item_cost(item), artifact_id, reason or "artifact_inventory_recover")
 		end
 	end
