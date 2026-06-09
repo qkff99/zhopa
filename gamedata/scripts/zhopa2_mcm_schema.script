@@ -44,6 +44,9 @@ local OPTION_DEFS = {
 	story_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 50 },
 	trade_enabled = { type = "check", val = 1, def = true },
 	npc_sell_price_multiplier = { type = "track", val = 2, min = 0, max = 1, step = 0.05, def = 0.2 },
+	legacy_save_cleanup_enabled = { type = "check", val = 1, def = true },
+	legacy_save_cleanup_dry_run = { type = "check", val = 1, def = false },
+	legacy_save_cleanup_remove_zhopa2_state = { type = "check", val = 1, def = false },
 	service_filler_enabled = { type = "check", val = 1, def = true },
 	loot_enabled = { type = "check", val = 1, def = true },
 	loot_offline_enabled = { type = "check", val = 1, def = true },
@@ -57,6 +60,7 @@ local PANELS = {
 		["groups"] = {
 			{ id = "core", text = "ui_mcm_zhopa2_group_core", options = { "enabled", "stalker_movement_enabled", "mutant_movement_enabled", "debug_hud_enabled" } },
 			{ id = "systems", text = "ui_mcm_zhopa2_group_systems", options = { "service_filler_enabled", "loot_enabled", "loot_offline_enabled", "loot_offline_real_enabled", "artefact_offline_enabled", "trade_enabled", "npc_sell_price_multiplier" } },
+			{ id = "save_cleanup", text = "ui_mcm_zhopa2_group_save_cleanup", options = { "legacy_save_cleanup_enabled", "legacy_save_cleanup_dry_run", "legacy_save_cleanup_remove_zhopa2_state" } },
 			{ id = "story", text = "ui_mcm_zhopa2_group_story", options = { "story_psy_watchdog_enabled", "story_north_migration_enabled", "story_north_migration_percent" } },
 		},
 	},

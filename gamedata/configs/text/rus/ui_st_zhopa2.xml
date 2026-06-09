@@ -7,6 +7,7 @@
 	<string id="ui_mcm_zhopa2_panel_mutants"><text>Симуляция мутантов</text></string>
 	<string id="ui_mcm_zhopa2_group_core"><text>Общее управление</text></string>
 	<string id="ui_mcm_zhopa2_group_systems"><text>Экономика и вспомогательные системы</text></string>
+	<string id="ui_mcm_zhopa2_group_save_cleanup"><text>Очистка сейвов</text></string>
 	<string id="ui_mcm_zhopa2_group_story"><text>Сюжетные события</text></string>
 	<string id="ui_mcm_zhopa2_group_roam"><text>Доступные задачи сталкеров</text></string>
 	<string id="ui_mcm_zhopa2_group_weights"><text>Веса выбора задач</text></string>
@@ -34,8 +35,14 @@
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled_desc"><text>Разрешает оффлайн-задачам на артефакты использовать виртуальные цели, созданные по настройкам аномалий, если подходящего реального артефакта нет. Реальные артефакты все равно выбираются первыми.</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled"><text>Экономика и торговля NPC</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled_desc"><text>Включает торговое поведение отрядов: продажу предметов онлайн, оффлайн-бартер, автоматическую торговлю во время отдыха и отдельные торговые маршруты.</text></string>
-	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>Множитель цены продажи NPC</text></string>
-	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Определяет, какую долю стоимости предметов отряды NPC получают при продаже снаряжения торговцам. Низкое значение замедляет доход отрядов и не влияет на их закупки.</text></string>
+    <string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>Множитель цены продажи NPC</text></string>
+    <string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Определяет, какую долю стоимости предметов отряды NPC получают при продаже снаряжения торговцам. Низкое значение замедляет доход отрядов и не влияет на их закупки.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_enabled"><text>Очистка старых сейвов</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_enabled_desc"><text>Удаляет известные save-блоки SISKI 1.0 и ZHOPA 1.01, а также устаревшие временные метки при загрузке и сохранении. Помогает безопасно перевести старый сейв на ZHOPA ALIFE 2.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_dry_run"><text>Пробная очистка сейва</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_dry_run_desc"><text>Только сообщает о найденных старых данных в debug-режиме и ничего не удаляет. Включай, если нужно сначала посмотреть, что именно будет очищено.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_remove_zhopa2_state"><text>Очистка перед удалением ZHOPA2</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_remove_zhopa2_state_desc"><text>Дополнительно очищает текущие задачи и сюжетное состояние ZHOPA2 перед сохранением. Включать только если готовишь сейв к удалению этого аддона.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled"><text>Выжигатель: зомбирование отрядов</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled_desc"><text>В сюжетном режиме превращает незащищенные отряды сталкеров на активных пси-локациях в зомбированных. Список иммунных фракций задается в конфиге.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_north_migration_enabled"><text>Миграция на север после Выжигателя</text></string>

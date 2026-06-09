@@ -17,6 +17,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_artifacts",
 	"zhopa2_story_psy_watchdog",
 	"zhopa2_story_north_migration",
+	"zhopa2_save_cleanup",
 }
 
 local ZHOPA2_RUNTIME_PATCHES = {
@@ -1142,6 +1143,10 @@ function squad_methods.zhopa2_apply_revenge_hostility(self)
 end
 
 function squad_methods.zhopa2_state_write(self, packet)
+	local cleanup = safe_require("zhopa2_save_cleanup")
+	if cleanup and type(cleanup.should_write_squad_state) == "function" and cleanup.should_write_squad_state() ~= true then
+		return
+	end
 	local mem = memory()
 	if mem and type(mem.write_squad) == "function" then
 		return mem.write_squad(packet, self)

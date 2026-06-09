@@ -7,6 +7,7 @@
 	<string id="ui_mcm_zhopa2_panel_mutants"><text>Mutant simulation</text></string>
 	<string id="ui_mcm_zhopa2_group_core"><text>Global controls</text></string>
 	<string id="ui_mcm_zhopa2_group_systems"><text>Economy and support systems</text></string>
+	<string id="ui_mcm_zhopa2_group_save_cleanup"><text>Save cleanup</text></string>
 	<string id="ui_mcm_zhopa2_group_story"><text>Story event systems</text></string>
 	<string id="ui_mcm_zhopa2_group_roam"><text>Available stalker tasks</text></string>
 	<string id="ui_mcm_zhopa2_group_weights"><text>Task selection weights</text></string>
@@ -34,8 +35,14 @@
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled_desc"><text>Allows offline artefact tasks to use virtual artefacts generated from anomaly settings when no suitable real artefact exists. Real artefacts are still preferred.</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled"><text>NPC economy and trade</text></string>
 	<string id="ui_mcm_zhopa2_general_trade_enabled_desc"><text>Enables squad trade behavior: online sales to traders, offline barter accounting, automatic rest/base trading, and dedicated trade route tasks.</text></string>
-	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>NPC sale price multiplier</text></string>
-	<string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Sets what fraction of item value NPC squads receive when selling gear to traders. A lower value slows squad income without changing NPC purchases.</text></string>
+    <string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier"><text>NPC sale price multiplier</text></string>
+    <string id="ui_mcm_zhopa2_general_npc_sell_price_multiplier_desc"><text>Sets what fraction of item value NPC squads receive when selling gear to traders. A lower value slows squad income without changing NPC purchases.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_enabled"><text>Clean legacy save data</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_enabled_desc"><text>Removes known SISKI 1.0 and ZHOPA 1.01 save blocks and stale runtime markers during load/save so old saves can migrate to ZHOPA ALIFE 2.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_dry_run"><text>Legacy cleanup dry run</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_dry_run_desc"><text>Only reports detected legacy save data in debug mode without deleting it. Use this to inspect a save before applying cleanup.</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_remove_zhopa2_state"><text>Cleanup for ZHOPA2 removal</text></string>
+    <string id="ui_mcm_zhopa2_general_legacy_save_cleanup_remove_zhopa2_state_desc"><text>Also clears current ZHOPA2 task and story state before saving. Enable only when preparing a save for removing this addon.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled"><text>Brain Scorcher zombification</text></string>
 	<string id="ui_mcm_zhopa2_general_story_psy_watchdog_enabled_desc"><text>In story mode, converts non-immune stalker squads on active psi levels into zombified squads. Immune factions are controlled by config.</text></string>
 	<string id="ui_mcm_zhopa2_general_story_north_migration_enabled"><text>Northern migration after Brain Scorcher</text></string>

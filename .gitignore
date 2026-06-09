@@ -1,2 +1,5 @@
-dist/
-*.ljbc
+.codex-stalker/
+tests/
+implementation_plan.md
+override_patch_points.md
+progress.md
