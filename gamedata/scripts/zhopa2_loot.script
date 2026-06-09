@@ -1156,15 +1156,33 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 		return false, "runtime_not_ready"
 	end
 	if not (offline_squad_can_loot(attacker_squad) and se_victim) then
-		return false
+		if not se_victim then
+			return false, "victim_missing"
+		end
+		if M.offline_real_enabled() ~= true then
+			return false, "offline_real_disabled"
+		end
+		if not attacker_squad then
+			return false, "attacker_squad_missing"
+		end
+		if attacker_squad.zhopa2_managed ~= true then
+			return false, "attacker_squad_unmanaged"
+		end
+		if attacker_squad.player_id == "actor" or is_monster_player_id(attacker_squad.player_id) then
+			return false, "attacker_squad_excluded"
+		end
+		if get_object_story_id and attacker_squad.id and get_object_story_id(attacker_squad.id) then
+			return false, "attacker_squad_story"
+		end
+		return false, "offline_squad_rejected"
 	end
 	if object_is_story(se_victim) then
-		return false
+		return false, "victim_story"
 	end
 
 	local se_looter = pick_offline_looter(attacker_squad, se_attacker)
 	if not se_looter then
-		return false
+		return false, "looter_missing"
 	end
 
 	local moved_count = 0
@@ -1209,7 +1227,7 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 	end
 
 	if moved_count <= 0 then
-		return false
+		return false, "nothing_moved:children=" .. tostr(#ids) .. ":death=" .. tostr(death_count or 0) .. ":loadout=" .. tostr(loadout_count or 0)
 	end
 
 	if artifact_count > 0 then

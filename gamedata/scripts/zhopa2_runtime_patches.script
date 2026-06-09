@@ -2704,10 +2704,71 @@ local function offline_loot_on_death(victim, killer)
 	if not (victim and victim.online ~= true and killer and killer.group_id and killer.group_id < 65535) then
 		return
 	end
+	local function debug_name(obj)
+		if not obj then
+			return "-"
+		end
+		local ok_name, name_value = pcall(function()
+			return obj.name
+		end)
+		if ok_name and type(name_value) == "string" then
+			return name_value
+		end
+		if ok_name and type(name_value) == "function" then
+			local ok_call, called_name = pcall(name_value, obj)
+			if ok_call and called_name then
+				return tostring(called_name)
+			end
+		end
+		local ok_section, section_value = pcall(function()
+			return obj.section_name
+		end)
+		if ok_section and type(section_value) == "string" then
+			return section_value
+		end
+		if ok_section and type(section_value) == "function" then
+			local ok_call, called_section = pcall(section_value, obj)
+			if ok_call and called_section then
+				return tostring(called_section)
+			end
+		end
+		return "-"
+	end
 	local attacker_squad = alife_object and alife_object(killer.group_id) or nil
 	local loot = safe_require("zhopa2_loot")
 	if loot and type(loot.offline_loot_victim) == "function" then
-		pcall(loot.offline_loot_victim, attacker_squad, killer, victim, "offline_on_death_loot")
+		local ok, looted, detail = pcall(loot.offline_loot_victim, attacker_squad, killer, victim, "offline_on_death_loot")
+		if not ok then
+			zhopa2_debug_printf(
+				"~ ZHOPA2 offline loot error | reason [offline_loot_call_error] squad [%s:%s] killer [%s:%s] victim [%s:%s] detail [%s]",
+				tostring(debug_name(attacker_squad)),
+				tostring(object_id(attacker_squad) or "-"),
+				tostring(debug_name(killer)),
+				tostring(object_id(killer) or "-"),
+				tostring(debug_name(victim)),
+				tostring(object_id(victim) or "-"),
+				tostring(looted)
+			)
+		elseif looted ~= true and detail then
+			local detail_text = tostring(detail)
+			if detail_text == "attacker_squad_excluded"
+				or detail_text == "victim_story"
+				or detail_text == "offline_real_disabled"
+				or detail_text:find("^nothing_moved") ~= nil
+			then
+				return
+			end
+			zhopa2_debug_printf(
+				"~ ZHOPA2 offline loot error | reason [%s] squad [%s:%s] killer [%s:%s] victim [%s:%s]",
+				detail_text,
+				tostring(debug_name(attacker_squad)),
+				tostring(object_id(attacker_squad) or "-"),
+				tostring(debug_name(killer)),
+				tostring(object_id(killer) or "-"),
+				tostring(debug_name(victim)),
+				tostring(object_id(victim) or "-")
+			)
+		end
 	end
 end
 
