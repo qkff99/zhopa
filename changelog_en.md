@@ -3,7 +3,7 @@
 ### General
 - The project has been renamed and published as **Z.H.O.P.A. ALIFE 2.0**.
 - The mod now lives in the standalone `qkff99/zhopa` repository with an MIT license, new documentation, and Russian/English README files.
-- Old full-file overrides have been replaced with chain-friendly runtime patching to reduce conflicts with other addons and modpacks.
+- The architecture has been reworked, trading lower invasiveness for better performance.
 - Added a deferred runtime readiness system: heavy subsystems wait until context, indexes, callbacks, and configs are actually ready.
 - Added Debug HUD support and dedicated diagnostic scripts for tasks, buckets, trade, loot, mutants, and artifacts.
 

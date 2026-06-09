@@ -1,6 +1,7 @@
 # Z.H.O.P.A. ALIFE 2.0
 
 [Russian](README.md)
+[Changelog](changelog_en.md)
 
 **Zone Hostile Operations & Population AI (Z.H.O.P.A.) ALIFE 2.0** is a modular ALife layer for S.T.A.L.K.E.R. Anomaly 1.5.3 + Modded Exes.
 
