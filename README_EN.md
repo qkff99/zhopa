@@ -114,8 +114,6 @@ Additional diagnostic scripts live in `debugscripts`. They are not meant to be p
 - [Architecture document](docs/zhopa_alife_2_design_document_en.md)
 - [Russian architecture document](docs/zhopa_alife_2_design_document.md)
 - [Function reference](docs/zhopa_alife_2_function_reference_en.md)
-- [Implementation plan](implementation_plan.md)
-- [Runtime patch points](override_patch_points.md)
 
 ## Development Notes
 

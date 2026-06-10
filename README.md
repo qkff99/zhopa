@@ -113,8 +113,6 @@
 - [Архитектурный документ](docs/zhopa_alife_2_design_document.md)
 - [Architecture document EN](docs/zhopa_alife_2_design_document_en.md)
 - [Function reference EN](docs/zhopa_alife_2_function_reference_en.md)
-- [Implementation plan](implementation_plan.md)
-- [Runtime patch points](override_patch_points.md)
 
 ## Для разработки
 
