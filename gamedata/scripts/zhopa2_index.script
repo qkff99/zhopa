@@ -570,6 +570,18 @@ local function is_monster_squad(squad)
 end
 
 local function squad_zhopa2_manageable(squad)
+	if squad and squad.id and rawget(_G, "clash_manager_mcm") and clash_manager_mcm.active_sa and clash_manager_mcm.active_sb then	--CRAP Compat
+		if (squad.id == clash_manager_mcm.active_sa or squad.id == clash_manager_mcm.active_sb) then
+			return false
+		end
+	end
+
+	if squad and squad.id and squad.scripted_target == nil and squad.zhopa2_managed == nil then
+		squad.zhopa2_cached_npc_count = squad_npc_count(squad) -- Fix the dead cache entry
+		if squad.zhopa2_task then squad.zhopa2_task = nil end
+		if squad.zhopa2_target then squad.zhopa2_target = nil end
+	end
+
 	if not (squad and squad.id and not squad.disabled and squad_cached_npc_count(squad) > 0) then
 		return false
 	end
