@@ -8,6 +8,7 @@ local C = {
 	TRADE_FORCE_JOB_PAD_MS = 15000,
 	TRADE_POST_RELEASE_WATCH_MS = 20000,
 	TRADE_POST_RELEASE_WATCH_INTERVAL_MS = 2000,
+	OFFLINE_TRADE_PROFILE_CACHE_TTL_MS = 2000,
 	MED_BANDAGE_KEEP = 3,
 	MEDKIT_KEEP = 3,
 	OTHER_MED_KEEP = 1,
@@ -27,18 +28,6 @@ M.TRADE_ROUTE_VALUE_WEIGHT_STEP = 1500
 M.TRADE_ROUTE_MAX_VALUE_BONUS = 180
 M.trade_release_watch = {}
 M.trade_release_watch_next_tg = 0
-local OFFLINE_MONEY_DENOMS = {
-	{ section = "money_5000", value = 5000 },
-	{ section = "money_1000", value = 1000 },
-	{ section = "money_500", value = 500 },
-	{ section = "money_100", value = 100 },
-	{ section = "money_50", value = 50 },
-	{ section = "money_10", value = 10 },
-}
-local OFFLINE_MONEY_SECTIONS = {}
-for i = 1, #OFFLINE_MONEY_DENOMS do
-	OFFLINE_MONEY_SECTIONS[OFFLINE_MONEY_DENOMS[i].section] = OFFLINE_MONEY_DENOMS[i].value
-end
 
 local no_trade_comm = {
 	zombied = true,
@@ -62,6 +51,8 @@ local SMART_TRADE_PROVIDER_CACHE = {}
 local SMART_TRADE_CUSTOMER_CACHE = {}
 local SMART_TRADE_QUEUE = {}
 local trade_path = {}
+trade_path.offline_profile_cache = {}
+trade_path.offline_profile_cleanup_at = 0
 
 local function cfg_mod()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -88,6 +79,15 @@ local function runtime_mod()
 		rt = rawget(_G, "zhopa2_runtime_patches")
 	end
 	return rt
+end
+
+local function memory_mod()
+	local mem = rawget(_G, "zhopa2_memory")
+	if not mem and require then
+		pcall(require, "zhopa2_memory")
+		mem = rawget(_G, "zhopa2_memory")
+	end
+	return mem
 end
 
 local function runtime_ready(reason)
@@ -822,8 +822,7 @@ local function section_is_drink(section)
 end
 
 local function section_is_never_sell(section, item)
-	return OFFLINE_MONEY_SECTIONS[section] ~= nil
-		or is_item_type("quest", section, item) ~= nil
+	return is_item_type("quest", section, item) ~= nil
 		or is_item_type("money", section, item) ~= nil
 		or is_item_type("device", section, item) ~= nil
 		or is_item_type("map", section, item) ~= nil
@@ -1433,13 +1432,51 @@ local function build_online_buy_needs(npc, counts)
 	return needs
 end
 
-local function offline_money_value(section)
-	return type(section) == "string" and OFFLINE_MONEY_SECTIONS[section] or nil
-end
-
 local function offline_round_money(amount)
 	amount = math.floor(tonumber(amount) or 0)
 	return amount > 0 and math.floor(amount / 10) * 10 or 0
+end
+
+local function virtual_money(squad)
+	local mem = memory_mod()
+	if mem and type(mem.virtual_money) == "function" then
+		return math.max(0, tonumber(mem.virtual_money(squad)) or 0)
+	end
+	return math.max(0, tonumber(squad and squad.zhopa2_virtual_money) or 0)
+end
+
+local function add_virtual_money(squad, amount, reason)
+	amount = offline_round_money(amount)
+	if amount <= 0 then
+		return true
+	end
+	local mem = memory_mod()
+	if mem and type(mem.add_virtual_money) == "function" then
+		return mem.add_virtual_money(squad, amount, reason or "virtual_money") == true
+	end
+	if not squad then
+		return false
+	end
+	squad.zhopa2_virtual_money = virtual_money(squad) + amount
+	squad.zhopa2_last_result = reason or "virtual_money"
+	return true
+end
+
+local function take_virtual_money(squad, amount, reason)
+	amount = offline_round_money(amount)
+	if amount <= 0 then
+		return true, 0
+	end
+	local mem = memory_mod()
+	if mem and type(mem.take_virtual_money) == "function" then
+		return mem.take_virtual_money(squad, amount, reason or "virtual_money_spent")
+	end
+	if not squad or virtual_money(squad) < amount then
+		return false, 0
+	end
+	squad.zhopa2_virtual_money = virtual_money(squad) - amount
+	squad.zhopa2_last_result = reason or "virtual_money_spent"
+	return true, amount
 end
 
 local function offline_trade_item_price(item)
@@ -1498,119 +1535,117 @@ local function offline_member_children(member)
 	return out
 end
 
-local function offline_collect_wallet(members)
-	local wallet = { total = 0, entries = {} }
-	for i = 1, members and #members or 0 do
-		local member = members[i]
-		local children = offline_member_children(member)
-		for n = 1, #children do
-			local item = children[n]
-			local section = object_section(item)
-			local value = offline_money_value(section)
-			local item_id = object_id(item)
-			if value and item_id then
-				wallet.total = wallet.total + value
-				wallet.entries[#wallet.entries + 1] = {
-					item = item,
-					item_id = item_id,
-					owner = member,
-					section = section,
-					value = value,
-				}
-			end
-		end
-	end
-	return wallet
+local function offline_collect_wallet(squad)
+	return { total = virtual_money(squad) }
 end
 
-local function offline_spawn_money_to_member(member, amount)
-	amount = offline_round_money(amount)
-	if amount <= 0 then
-		return true, 0
+local function virtual_loot_raw_value(squad)
+	local mem = memory_mod()
+	if mem and type(mem.virtual_loot_value) == "function" then
+		return math.max(0, tonumber(mem.virtual_loot_value(squad)) or 0)
 	end
-	if not (member and type(alife_create_item) == "function") then
-		return false, 0
-	end
-	local spawned = 0
-	for i = 1, #OFFLINE_MONEY_DENOMS do
-		local denom = OFFLINE_MONEY_DENOMS[i]
-		while amount >= denom.value do
-			local section = denom.section
-			local ok, item = pcall(alife_create_item, section, member)
-			if not (ok and item ~= nil) then
-				print_trade_error("~ ZHOPA2 trade error | reason [offline_money_spawn_failed] member [%s:%s] section [%s] amount [%s]", object_name(member), tostring(object_id(member) or "-"), tostring(section), tostring(amount))
-				return false, spawned
-			end
-			amount = amount - denom.value
-			spawned = spawned + denom.value
-		end
-	end
-	return true, spawned
+	return math.max(0, tonumber(squad and squad.zhopa2_virtual_loot_value) or 0)
 end
 
-local function offline_take_money_from_wallet(wallet, amount, change_owner)
-	amount = offline_round_money(amount)
-	if amount <= 0 then
-		return true, 0
+local function virtual_loot_count(squad)
+	local mem = memory_mod()
+	if mem and type(mem.virtual_loot_count) == "function" then
+		return math.max(0, tonumber(mem.virtual_loot_count(squad)) or 0)
 	end
-	if not (wallet and wallet.entries and wallet.total >= amount and type(alife_release_id) == "function") then
-		return false, 0
-	end
-	local entries = {}
-	for i = 1, #wallet.entries do
-		entries[#entries + 1] = wallet.entries[i]
-	end
-	table.sort(entries, function(a, b)
-		return (a.value or 0) > (b.value or 0)
-	end)
+	return math.max(0, tonumber(squad and squad.zhopa2_virtual_loot_count) or 0)
+end
 
-	local picked = {}
-	local paid = 0
-	local remaining = amount
-	for i = 1, #entries do
+local function virtual_loot_sell_price(squad)
+	return offline_round_money(virtual_loot_raw_value(squad) * M.npc_sell_price_multiplier())
+end
+
+local function virtual_loot_detail(squad)
+	local mem = memory_mod()
+	local entries = mem and type(mem.virtual_loot_entries) == "function" and mem.virtual_loot_entries(squad) or nil
+	if not (entries and #entries > 0) then
+		return "virtual_cargo"
+	end
+	local out = {}
+	local limit = math.min(#entries, 4)
+	for i = 1, limit do
 		local entry = entries[i]
-		if entry.value <= remaining then
-			picked[#picked + 1] = entry
-			paid = paid + entry.value
-			remaining = remaining - entry.value
-			entry._picked = true
-			if remaining <= 0 then
-				break
-			end
-		end
+		out[#out + 1] = tostring(entry.section or "?") .. "x" .. tostring(entry.count or 0)
 	end
-	if paid < amount then
-		local best = nil
-		for i = #entries, 1, -1 do
-			local entry = entries[i]
-			if not entry._picked and entry.value > remaining and (not best or entry.value < best.value) then
-				best = entry
-			end
-		end
-		if best then
-			picked[#picked + 1] = best
-			paid = paid + best.value
-		end
+	if #entries > limit then
+		out[#out + 1] = "..."
 	end
-	if paid < amount then
+	return table.concat(out, ",")
+end
+
+local function clear_virtual_loot(squad, reason)
+	local mem = memory_mod()
+	if mem and type(mem.clear_virtual_loot) == "function" then
+		return mem.clear_virtual_loot(squad, reason) == true
+	end
+	if not squad then
+		return false
+	end
+	squad.zhopa2_virtual_loot_count = 0
+	squad.zhopa2_virtual_loot_value = 0
+	squad.zhopa2_virtual_loot_sections = nil
+	squad.zhopa2_last_result = reason or "virtual_loot_sold"
+	return true
+end
+
+local function give_online_trade_money(npc, amount)
+	amount = offline_round_money(amount)
+	if amount <= 0 then
+		return true
+	end
+	if not (npc and type(npc.give_money) == "function") then
+		return false
+	end
+	local ok = pcall(npc.give_money, npc, amount)
+	return ok == true
+end
+
+local function materialize_virtual_money_to_npc(squad, npc, reason)
+	local amount = offline_round_money(virtual_money(squad))
+	if amount <= 0 then
 		return false, 0
 	end
-
-	for i = 1, #picked do
-		local ok_release = pcall(alife_release_id, picked[i].item_id)
-		if not ok_release then
-			print_trade_error("~ ZHOPA2 trade error | reason [offline_money_release_failed] item [%s] amount [%s]", tostring(picked[i].item_id), tostring(amount))
-			return false, 0
-		end
+	if not give_online_trade_money(npc, amount) then
+		print_trade_error("~ ZHOPA2 trade error | reason [virtual_money_give_failed] squad [%s:%s] npc [%s:%s] amount [%s]", object_name(squad), tostring(object_id(squad) or "-"), object_name(npc), tostring(object_id(npc) or "-"), tostring(amount))
+		return false, 0
 	end
-	local change = offline_round_money(paid - amount)
-	if change > 0 then
-		local ok_change = offline_spawn_money_to_member(change_owner or picked[1].owner, change)
-		if not ok_change then
-			return false, paid
-		end
-	end
+	take_virtual_money(squad, amount, reason or "virtual_money_online")
 	return true, amount
+end
+
+local function execute_virtual_squad_sale(squad, pay_to, trader, reason)
+	local raw_value = virtual_loot_raw_value(squad)
+	local count = virtual_loot_count(squad)
+	local price = virtual_loot_sell_price(squad)
+	if raw_value <= 0 or count <= 0 or price <= 0 then
+		return 0, 0
+	end
+
+	local paid = false
+	if trader then
+		paid = give_online_trade_money(pay_to, price)
+	else
+		paid = add_virtual_money(squad, price, reason or "virtual_loot_sold") == true
+	end
+	if not paid then
+		print_trade_error("~ ZHOPA2 trade error | reason [virtual_loot_payment_failed] squad [%s:%s] pay_to [%s:%s] price [%s]", object_name(squad), tostring(object_id(squad) or "-"), object_name(pay_to), tostring(object_id(pay_to) or "-"), tostring(price))
+		return 0, 0
+	end
+
+	local detail = virtual_loot_detail(squad)
+	clear_virtual_loot(squad, reason or "virtual_loot_sold")
+	M.print_trade_event(
+		"- NPC Trade | %s sold virtual cargo [%s] to %s for %s RU",
+		object_name(pay_to),
+		detail,
+		trader and object_name(trader) or "offline trader",
+		price
+	)
+	return count, price
 end
 
 local function section_is_weapon_entry(section, item)
@@ -1861,6 +1896,121 @@ local function offline_build_buy_needs(members)
 	return needs
 end
 
+function trade_path.clear_offline_trade_profile_cache(squad)
+	local id = object_id(squad)
+	if id then
+		trade_path.offline_profile_cache[id] = nil
+	end
+end
+
+function trade_path.cleanup_offline_trade_profile_cache(now)
+	now = tonumber(now) or tg()
+	if now < trade_path.offline_profile_cleanup_at then
+		return
+	end
+	trade_path.offline_profile_cleanup_at = now + 5000
+	for squad_id, entry in pairs(trade_path.offline_profile_cache) do
+		if not entry or (tonumber(entry.expires) or 0) <= now then
+			trade_path.offline_profile_cache[squad_id] = nil
+		end
+	end
+end
+
+function trade_path.offline_sell_plan_value(plan)
+	local value = 0
+	for i = 1, plan and #plan or 0 do
+		value = value + offline_trade_item_price(plan[i] and plan[i].item)
+	end
+	return value
+end
+
+function trade_path.offline_needs_value(needs)
+	local value = 0
+	for i = 1, needs and #needs or 0 do
+		value = value + offline_buy_section_price(needs[i] and needs[i].section)
+	end
+	return value
+end
+
+function trade_path.offline_trade_profile_needs(profile)
+	if profile and not profile.needs then
+		profile.needs = offline_build_buy_needs(profile.members)
+	end
+	return profile and profile.needs or {}
+end
+
+function trade_path.offline_trade_profile_for_squad(squad, opts)
+	opts = opts or {}
+	local squad_id = object_id(squad)
+	local now = tg()
+	trade_path.cleanup_offline_trade_profile_cache(now)
+	if not opts.force and squad_id then
+		local cached = trade_path.offline_profile_cache[squad_id]
+		if cached and (tonumber(cached.expires) or 0) > now then
+			local profile = cached.profile
+			if opts.want_value == true and profile then
+				if profile.reason == "offline_sell" and (tonumber(profile.value) or 0) <= 0 then
+					profile.value = trade_path.offline_sell_plan_value(profile.plan)
+				elseif profile.reason == "offline_buy" then
+					trade_path.offline_trade_profile_needs(profile)
+					profile.value = math.min((profile.wallet and profile.wallet.total) or 0, trade_path.offline_needs_value(profile.needs))
+				end
+			end
+			return cached.profile
+		end
+	end
+
+	local profile = {
+		members = offline_collect_members(squad),
+		plan = nil,
+		wallet = nil,
+		needs = nil,
+		has_work = false,
+		reason = "offline_nothing_to_trade",
+		value = 0,
+	}
+	if #profile.members == 0 then
+		profile.reason = "no_offline_member"
+	elseif virtual_loot_sell_price(squad) > 0 then
+		profile.has_work = true
+		profile.reason = "offline_virtual_sell"
+		profile.value = virtual_loot_sell_price(squad)
+	else
+		profile.plan = offline_build_sell_plan(profile.members)
+		if offline_sell_plan_should_start(profile.plan) then
+			profile.has_work = true
+			profile.reason = "offline_sell"
+			if opts.want_value == true then
+				profile.value = trade_path.offline_sell_plan_value(profile.plan)
+			end
+		else
+			profile.wallet = offline_collect_wallet(squad)
+			if profile.wallet.total <= 0 then
+				profile.reason = "no_trade_budget"
+			else
+				profile.needs = offline_build_buy_needs(profile.members)
+				for i = 1, #profile.needs do
+					local price = offline_buy_section_price(profile.needs[i].section)
+					if price > 0 and profile.wallet.total >= price then
+						profile.has_work = true
+						profile.reason = "offline_buy"
+						profile.value = math.min(profile.wallet.total, opts.want_value == true and trade_path.offline_needs_value(profile.needs) or price)
+						break
+					end
+				end
+			end
+		end
+	end
+
+	if squad_id then
+		trade_path.offline_profile_cache[squad_id] = {
+			expires = now + C.OFFLINE_TRADE_PROFILE_CACHE_TTL_MS,
+			profile = profile,
+		}
+	end
+	return profile
+end
+
 local function offline_trade_detail_list(entries, field, max_count)
 	local out = {}
 	max_count = tonumber(max_count) or 4
@@ -1899,7 +2049,7 @@ local function set_offline_trade_detail(squad, result, members, plan, wallet, ne
 	)
 end
 
-local function execute_offline_sell_plan(plan, pay_to)
+local function execute_offline_sell_plan(plan, squad)
 	local sold_count = 0
 	local sold_value = 0
 	for i = 1, plan and #plan or 0 do
@@ -1911,7 +2061,7 @@ local function execute_offline_sell_plan(plan, pay_to)
 		if item_id and section and price > 0 and type(alife_release_id) == "function" then
 			local released = pcall(alife_release_id, item_id)
 			if released then
-				local paid = offline_spawn_money_to_member(pay_to or entry.member, price)
+				local paid = add_virtual_money(squad, price, "offline_sell_payment")
 				if paid then
 					sold_count = sold_count + 1
 					sold_value = sold_value + price
@@ -1927,7 +2077,7 @@ local function execute_offline_sell_plan(plan, pay_to)
 	return sold_count, sold_value
 end
 
-local function execute_offline_buy_needs(members, needs, payer)
+local function execute_offline_buy_needs(squad, members, needs)
 	local bought_count = 0
 	local bought_value = 0
 	for i = 1, needs and #needs or 0 do
@@ -1940,11 +2090,11 @@ local function execute_offline_buy_needs(members, needs, payer)
 			if price <= 0 then
 				break
 			end
-			local wallet = offline_collect_wallet(members)
+			local wallet = offline_collect_wallet(squad)
 			if wallet.total < price then
 				break
 			end
-			local paid = offline_take_money_from_wallet(wallet, price, payer or member)
+			local paid = take_virtual_money(squad, price, "offline_buy_payment")
 			if not paid then
 				break
 			end
@@ -1953,7 +2103,7 @@ local function execute_offline_buy_needs(members, needs, payer)
 				ok_create, created = pcall(alife_create_item, section, member)
 			end
 			if not (ok_create and created ~= nil) then
-				offline_spawn_money_to_member(payer or member, price)
+				add_virtual_money(squad, price, "offline_buy_refund")
 				print_trade_error("~ ZHOPA2 trade error | reason [offline_buy_spawn_failed] member [%s:%s] section [%s] price [%s]", object_name(member), tostring(object_id(member) or "-"), tostring(section), tostring(price))
 				break
 			end
@@ -1969,31 +2119,12 @@ function M.offline_squad_has_trade_work(squad, smart)
 	if M.enabled() ~= true then
 		return false, "disabled"
 	end
-	local members = offline_collect_members(squad)
-	if #members == 0 then
-		set_offline_trade_detail(squad, "no_offline_member", members, nil, nil, nil)
-		return false, "no_offline_member"
+	local profile = trade_path.offline_trade_profile_for_squad(squad)
+	if profile.reason == "offline_buy" or profile.reason == "offline_nothing_to_trade" then
+		trade_path.offline_trade_profile_needs(profile)
 	end
-	local plan = offline_build_sell_plan(members)
-	if offline_sell_plan_should_start(plan) then
-		set_offline_trade_detail(squad, "offline_sell", members, plan, nil, nil)
-		return true, "offline_sell"
-	end
-	local wallet = offline_collect_wallet(members)
-	if wallet.total <= 0 then
-		set_offline_trade_detail(squad, "no_trade_budget", members, plan, wallet, nil)
-		return false, "no_trade_budget"
-	end
-	local needs = offline_build_buy_needs(members)
-	for i = 1, #needs do
-		local price = offline_buy_section_price(needs[i].section)
-		if price > 0 and wallet.total >= price then
-			set_offline_trade_detail(squad, "offline_buy", members, plan, wallet, needs)
-			return true, "offline_buy"
-		end
-	end
-	set_offline_trade_detail(squad, "offline_nothing_to_trade", members, plan, wallet, needs)
-	return false, "offline_nothing_to_trade"
+	set_offline_trade_detail(squad, profile.reason, profile.members, profile.plan, profile.wallet, profile.needs)
+	return profile.has_work == true, profile.reason
 end
 
 function M.execute_offline_squad_trade(squad, smart, reason)
@@ -2001,20 +2132,27 @@ function M.execute_offline_squad_trade(squad, smart, reason)
 	if M.enabled() ~= true then
 		return false, "disabled"
 	end
-	local members = offline_collect_members(squad)
+	local profile = trade_path.offline_trade_profile_for_squad(squad)
+	local members = profile.members or {}
 	if #members == 0 then
 		return false, "no_offline_member"
 	end
 	local leader = members[1]
-	local wallet_before = offline_collect_wallet(members).total
-	local plan = offline_build_sell_plan(members)
+	local wallet_before = (profile.wallet and profile.wallet.total) or offline_collect_wallet(squad).total
+	local plan = profile.plan or offline_build_sell_plan(members)
 	local sold_count, sold_value = 0, 0
+	local virtual_count, virtual_value = execute_virtual_squad_sale(squad, leader, nil, reason or "offline_virtual_trade")
+	sold_count = sold_count + virtual_count
+	sold_value = sold_value + virtual_value
 	if offline_sell_plan_should_start(plan) then
-		sold_count, sold_value = execute_offline_sell_plan(plan, leader)
+		local real_count, real_value = execute_offline_sell_plan(plan, squad)
+		sold_count = sold_count + real_count
+		sold_value = sold_value + real_value
 	end
-	local needs = offline_build_buy_needs(members)
-	local bought_count, bought_value = execute_offline_buy_needs(members, needs, leader)
-	local wallet_after = offline_collect_wallet(members).total
+	local needs = trade_path.offline_trade_profile_needs(profile)
+	local bought_count, bought_value = execute_offline_buy_needs(squad, members, needs)
+	local wallet_after = offline_collect_wallet(squad).total
+	trade_path.clear_offline_trade_profile_cache(squad)
 	local traded = sold_count > 0 or bought_count > 0
 	if traded then
 		set_offline_trade_detail(squad, "offline_traded", members, plan, { total = wallet_after }, needs)
@@ -2038,61 +2176,6 @@ function M.execute_offline_squad_trade(squad, smart, reason)
 		)
 	end
 	return traded, traded and "offline_traded" or "offline_nothing_to_trade"
-end
-
-local function release_online_money_note(item)
-	local item_id = object_id(item)
-	if not (item_id and type(item) == "userdata" and type(item.destroy_object) == "function") then
-		return false
-	end
-	local ok_destroy = pcall(item.destroy_object, item)
-	return ok_destroy == true
-end
-
-local function offline_transfer_money_notes_to_online_npc(npc)
-	if not (npc and type(npc.iterate_inventory) == "function" and type(npc.give_money) == "function") then
-		return false, 0
-	end
-	local notes = {}
-	local total = 0
-	local function scan(_, item)
-		local section = object_section(item)
-		local value = offline_money_value(section)
-		if value and object_id(item) then
-			notes[#notes + 1] = item
-			total = total + value
-		end
-	end
-	pcall(npc.iterate_inventory, npc, scan, npc)
-	if total <= 0 then
-		return false, 0
-	end
-	local released_total = 0
-	for i = 1, #notes do
-		local section = object_section(notes[i])
-		local value = offline_money_value(section) or 0
-		if release_online_money_note(notes[i]) then
-			released_total = released_total + value
-		end
-	end
-	if released_total <= 0 then
-		return false, 0
-	end
-	local ok_money = pcall(npc.give_money, npc, released_total)
-	if not ok_money then
-		print_trade_error("~ ZHOPA2 trade error | reason [online_money_note_convert_failed] npc [%s:%s] amount [%s]", object_name(npc), tostring(object_id(npc) or "-"), tostring(released_total))
-		return false, 0
-	end
-	-- Money note conversion is internal bookkeeping, not a trade event.
-	-- M.print_trade_event("~ ZHOPA2 trade | converted money notes npc [%s:%s] amount [%s]", object_name(npc), tostring(object_id(npc) or "-"), tostring(released_total))
-	return true, released_total
-end
-
-function M.convert_online_money_notes(npc)
-	if M.enabled() ~= true then
-		return false, 0
-	end
-	return offline_transfer_money_notes_to_online_npc(npc)
 end
 
 local function clear_npc_trade_state(npc)
@@ -2144,6 +2227,28 @@ local function squad_for_online_npc(npc)
 		end
 	end
 	return nil, nil
+end
+
+local function squad_for_spawned_npc(npc, se_obj)
+	local group_id = se_obj and tonumber(se_obj.group_id) or nil
+	if group_id and group_id ~= 0 and group_id ~= 65535 then
+		local squad = server_object_by_id(group_id)
+		if M.is_squad_object(squad) then
+			return squad, group_id
+		end
+	end
+	return squad_for_online_npc(npc)
+end
+
+function M.materialize_online_virtual_money(npc, squad, reason)
+	if M.enabled() ~= true then
+		return false, 0
+	end
+	squad = M.is_squad_object(squad) and squad or squad_for_online_npc(npc)
+	if not M.is_squad_object(squad) then
+		return false, 0
+	end
+	return materialize_virtual_money_to_npc(squad, npc, reason or "virtual_money_online")
 end
 
 local function set_trade_job_idle(npc, params)
@@ -2315,7 +2420,7 @@ local function online_squad_trade_members(squad, smart)
 			local id = member and member.id
 			local obj = id and online_object_by_id(id)
 			if obj and type(obj.alive) == "function" and obj:alive() then
-				M.convert_online_money_notes(obj)
+				M.materialize_online_virtual_money(obj, squad, "online_trade_members")
 				members[#members + 1] = obj
 			end
 		end
@@ -2384,7 +2489,10 @@ local function squad_members_money(members)
 	return total
 end
 
-local function squad_members_have_trade_work(members)
+local function squad_members_have_trade_work(members, squad)
+	if virtual_loot_sell_price(squad) > 0 then
+		return true, "virtual_sell"
+	end
 	for i = 1, members and #members or 0 do
 		local ok_plan, plan = pcall(M.build_online_sell_plan, members[i], nil)
 		if ok_plan and type(plan) == "table" and sell_plan_should_start_auto_trade(members[i], plan) then
@@ -2392,7 +2500,7 @@ local function squad_members_have_trade_work(members)
 		end
 	end
 
-	local money = squad_members_money(members)
+	local money = squad_members_money(members) + virtual_money(squad)
 	if money <= 0 then
 		return false, "no_trade_budget"
 	end
@@ -2419,7 +2527,7 @@ function M._online_squad_members(squad)
 			local id = member and member.id
 			local obj = id and online_object_by_id(id)
 			if obj and type(obj.alive) == "function" and obj:alive() then
-				M.convert_online_money_notes(obj)
+				M.materialize_online_virtual_money(obj, squad, "online_squad_members")
 				members[#members + 1] = obj
 			end
 		end
@@ -2427,7 +2535,12 @@ function M._online_squad_members(squad)
 	return members
 end
 
-function M._online_trade_profile(members)
+function M._online_trade_profile(members, squad)
+	local virtual_value = virtual_loot_sell_price(squad)
+	if virtual_value > 0 then
+		return true, "virtual_sell", virtual_value
+	end
+
 	local sell_value = 0
 	local has_sell = false
 	for i = 1, members and #members or 0 do
@@ -2443,7 +2556,7 @@ function M._online_trade_profile(members)
 		return true, "sell", sell_value
 	end
 
-	local money = squad_members_money(members)
+	local money = squad_members_money(members) + virtual_money(squad)
 	if money <= 0 then
 		return false, "no_trade_budget", 0
 	end
@@ -2469,41 +2582,8 @@ function M._online_trade_profile(members)
 end
 
 function M._offline_trade_profile(squad)
-	local members = offline_collect_members(squad)
-	if #members == 0 then
-		return false, "no_offline_member", 0
-	end
-
-	local plan = offline_build_sell_plan(members)
-	if offline_sell_plan_should_start(plan) then
-		local sell_value = 0
-		for i = 1, #plan do
-			sell_value = sell_value + offline_trade_item_price(plan[i] and plan[i].item)
-		end
-		return true, "offline_sell", sell_value
-	end
-
-	local wallet = offline_collect_wallet(members)
-	if wallet.total <= 0 then
-		return false, "no_trade_budget", 0
-	end
-
-	local needs = offline_build_buy_needs(members)
-	local need_value = 0
-	local affordable = false
-	for i = 1, #needs do
-		local price = offline_buy_section_price(needs[i].section)
-		if price > 0 then
-			need_value = need_value + price
-			if wallet.total >= price then
-				affordable = true
-			end
-		end
-	end
-	if affordable then
-		return true, "offline_buy", math.min(wallet.total, need_value)
-	end
-	return false, "offline_nothing_to_trade", 0
+	local profile = trade_path.offline_trade_profile_for_squad(squad, { want_value = true })
+	return profile.has_work == true, profile.reason, profile.value or 0
 end
 
 function M.squad_trade_route_profile(squad)
@@ -2515,7 +2595,7 @@ function M.squad_trade_route_profile(squad)
 	end
 	local online_members = M._online_squad_members(squad)
 	if #online_members > 0 then
-		return M._online_trade_profile(online_members)
+		return M._online_trade_profile(online_members, squad)
 	end
 	return M._offline_trade_profile(squad)
 end
@@ -3310,7 +3390,7 @@ function M.squad_has_trade_work(squad)
 	if not find_live_trader_at_smart(smart, ignore_ids) then
 		return false, "no_live_trader_at_smart"
 	end
-	return squad_members_have_trade_work(members)
+	return squad_members_have_trade_work(members, squad)
 end
 
 function M._trade_route_current_level(squad, board)
@@ -3437,7 +3517,7 @@ local function resolve_auto_trade_context(squad, reason, now)
 		return smart, nil, nil, mark_trade_lookup_failure(squad, "trade_no_online_member", reason, smart), "no_online_member"
 	end
 
-	local has_work, work_reason = squad_members_have_trade_work(members)
+	local has_work, work_reason = squad_members_have_trade_work(members, squad)
 	if not has_work then
 		return smart, members, nil, mark_trade_lookup_failure(squad, work_reason or "nothing_to_trade", reason, smart), work_reason or "nothing_to_trade"
 	end
@@ -3487,6 +3567,8 @@ local function prepare_npc_vanilla_trade(npc, squad, smart, trader, reason, opts
 	if not st then
 		return false
 	end
+
+	M.materialize_online_virtual_money(npc, squad, "prepare_trade")
 
 	local ok_plan, plan = pcall(M.build_online_sell_plan, npc, nil)
 	plan = ok_plan and type(plan) == "table" and plan or {}
@@ -3636,7 +3718,7 @@ end
 local function prepare_squad_vanilla_trade(squad, members, trader, smart, reason, opts)
 	opts = opts or {}
 	local tostr = tostring
-	local has_work, work_reason = squad_members_have_trade_work(members)
+	local has_work, work_reason = squad_members_have_trade_work(members, squad)
 	if not has_work then
 		mark_squad_queue_state(squad, "done", object_id(smart), reason)
 		mark_squad_trade_result(squad, work_reason or "nothing_to_trade", reason, smart)
@@ -3877,7 +3959,9 @@ local function refresh_trade_items_from_inventory(npc, params, force)
 	end
 	local can_buy = false
 	local needs = build_online_buy_needs(npc)
-	local money = npc_money(npc)
+	local squad = squad_for_online_npc(npc)
+	M.materialize_online_virtual_money(npc, squad, "online_inventory_scan")
+	local money = npc_money(npc) + virtual_money(squad)
 	for i = 1, #needs do
 		local price = M.online_trade_buy_section_price(needs[i].section)
 		if price > 0 and money >= price then
@@ -3944,12 +4028,17 @@ local function execute_online_squad_trade(source_npc, trader, params, squad_id, 
 	local traded_any = false
 	local leader = source_npc
 
+	M.materialize_online_virtual_money(leader, squad, "online_trade")
+
 	for i = 1, #members do
 		local member = members[i]
 		if member and object_id(member) ~= object_id(leader) then
 			transfer_all_money_to(member, leader)
 		end
 	end
+
+	local ok_virtual, virtual_count, virtual_value = pcall(execute_virtual_squad_sale, squad, leader, trader, "online_virtual_trade")
+	traded_any = (ok_virtual and (tonumber(virtual_count) or 0) > 0 and (tonumber(virtual_value) or 0) > 0) or traded_any
 
 	for i = 1, #members do
 		local member = members[i]
@@ -4288,16 +4377,19 @@ function M.actor_on_update()
 end
 
 local function npc_on_net_spawn(npc, se_obj)
-	M.convert_online_money_notes(npc)
+	local squad = squad_for_spawned_npc(npc, se_obj)
+	M.materialize_online_virtual_money(npc, squad, "npc_net_spawn")
 end
 
 local function on_game_load()
 	M.patch_trade_condition()
 	M.patch_trade_effect()
+	trade_path.offline_profile_cache = {}
+	trade_path.offline_profile_cleanup_at = 0
 	M.flush_trade_events()
 end
 
-function M.convert_online_squad_money_notes()
+function M.materialize_online_squad_virtual_money()
 	local board = rawget(_G, "SIMBOARD")
 	local squads = board and board.squads
 	if type(squads) ~= "table" then
@@ -4314,7 +4406,7 @@ local function actor_on_first_update()
 	M.patch_trade_condition()
 	M.patch_trade_effect()
 	M.flush_trade_events()
-	M.convert_online_squad_money_notes()
+	M.materialize_online_squad_virtual_money()
 end
 
 local function register_trade_callbacks(force)

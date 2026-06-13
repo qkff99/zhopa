@@ -29,13 +29,13 @@ Some tasks are selected by weight, while others are assigned as direct reactions
 
 ### Economy and Trade
 
-Squads can sell excess artefacts, weapons, outfits, ammo, medicine, food, and other loot. The squad leader can trade for the whole squad. Offline trade uses real server-side items where possible.
+Squads can sell excess artefacts, weapons, outfits, ammo, medicine, food, and other loot. The squad leader can trade for the whole squad. Offline trade sells serializable virtual loot cargo and uses virtual squad money so long saves do not inflate the engine object id pool.
 
 NPC sale income is controlled by `npc_sell_price_multiplier`; the default value is `0.2`.
 
 ### Looting
 
-Online looting works on top of vanilla pickup behavior and tries to preserve normal NPC logic. Offline looting can transfer real items between squads after offline combat. The system also clears rejected loot targets so NPCs do not loop forever on one corpse or item.
+Online looting works on top of vanilla pickup behavior and tries to preserve normal NPC logic. Offline looting records bounded virtual cargo after offline combat; that cargo is sold by trade or materialized only when an online NPC death needs real items. The system also clears rejected loot targets so NPCs do not loop forever on one corpse or item.
 
 ### Artefacts
 
@@ -58,7 +58,6 @@ Main MCM groups:
 
 - core systems;
 - economy and helper systems;
-- legacy save cleanup;
 - story events;
 - stalker simulation;
 - task weights;
@@ -96,12 +95,6 @@ How to check that the addon is working:
 - Not compatible with `Alife Plus`, and it never will be.
 - Mods that fully replace `sim_squad_scripted`, `smart_terrain`, `sim_board`, `xr_gather_items`, `xr_corpse_detection`, or related callbacks may conflict.
 - Combat AI mods are usually less risky if they do not break SIMBOARD, smart terrain, or core callbacks.
-
-## Old Saves and Removal
-
-The addon includes `zhopa2_save_cleanup`, which can clean known SISKI 1.0 and old ZHOPA 1.01 save blocks. This is intended for migrating an old save to ZHOPA ALIFE 2.0.
-
-MCM includes a dry-run cleanup mode. Use it first if you want to inspect what old data would be detected. The option that removes current ZHOPA2 state is only for preparing a save before removing this addon.
 
 ## Debugging
 

@@ -101,6 +101,13 @@ local function cfg_bool(key, default)
 	return default == true
 end
 
+local function debug_service_guard(fmt, ...)
+	if cfg_bool("debug_hud_enabled", false) ~= true or type(printf) ~= "function" then
+		return
+	end
+	pcall(printf, fmt, ...)
+end
+
 local function runtime_ready(reason)
 	local rt = rawget(_G, "zhopa2_runtime_patches")
 	if rt and type(rt.runtime_ready) == "function" then
@@ -257,6 +264,43 @@ local function smart_name(smart)
 		end
 	end
 	return nil
+end
+
+local function object_debug_name(obj)
+	if not obj then
+		return "-"
+	end
+	local raw_name = obj.name
+	if type(raw_name) == "string" and raw_name ~= "" then
+		return raw_name
+	end
+	if type(raw_name) == "function" then
+		local ok, name = pcall(raw_name, obj)
+		if ok and type(name) == "string" and name ~= "" then
+			return name
+		end
+	end
+	if type(obj.name) ~= "function" and type(obj.name) ~= "nil" then
+		return tostring(obj.name)
+	end
+	return "-"
+end
+
+local function object_debug_id(obj)
+	if not obj then
+		return "-"
+	end
+	local raw_id = obj.id
+	if type(raw_id) == "number" or type(raw_id) == "string" then
+		return raw_id
+	end
+	if type(raw_id) == "function" then
+		local ok, id = pcall(raw_id, obj)
+		if ok and id ~= nil then
+			return id
+		end
+	end
+	return "-"
 end
 
 local function section_exists(section)
@@ -546,6 +590,12 @@ local function service_squad_from_member(se_obj)
 	return safe_squad_by_id(group_id)
 end
 
+local function same_id(a, b)
+	a = tonumber(a) or a
+	b = tonumber(b) or b
+	return a ~= nil and b ~= nil and a == b
+end
+
 local function pin_service_squad(squad, smart, section)
 	if not (squad and smart and smart.id) then
 		return false
@@ -554,8 +604,30 @@ local function pin_service_squad(squad, smart, section)
 	if not name then
 		return false
 	end
+	local expected_role = select(1, role_from_section(section or squad.zhopa2_section_name))
+	if squad.zhopa2_service_filler == true
+		and same_id(squad.zhopa2_service_smart_id, smart.id)
+		and same_id(squad.assigned_target_id, smart.id)
+		and squad.scripted_target == name
+		and squad.zhopa2_service_role == expected_role
+		and squad.zhopa2_task == nil
+		and squad.zhopa2_target == nil
+	then
+		return true
+	end
+	local old_task = squad.zhopa2_task
+	local old_target = squad.zhopa2_target
+	if old_task and type(squad.zhopa2_clear_task) == "function" then
+		squad:zhopa2_clear_task("service_filler_pin")
+	else
+		squad.zhopa2_task = nil
+		squad.zhopa2_target = nil
+		squad.zhopa2_managed = false
+	end
 	squad.zhopa2_section_name = squad.zhopa2_section_name or section
 	squad.zhopa2_service_filler = true
+	squad.zhopa2_service_smart_id = smart.id
+	squad.zhopa2_service_role = expected_role
 	squad.scripted_target = name
 	squad.assigned_target_id = smart.id
 	squad.current_target_id = nil
@@ -567,6 +639,17 @@ local function pin_service_squad(squad, smart, section)
 			SIMBOARD:assign_squad_to_smart(squad, smart.id)
 		end)
 	end
+	debug_service_guard(
+		"~ ZHOPA2 service guard | squad [%s:%s] smart [%s:%s] role [%s] section [%s] cleared [%s:%s]",
+		tostring(object_debug_name(squad)),
+		tostring(object_debug_id(squad)),
+		tostring(name),
+		tostring(smart.id or "-"),
+		tostring(squad.zhopa2_service_role or "-"),
+		tostring(section or squad.zhopa2_section_name or "-"),
+		tostring(old_task or "-"),
+		tostring(old_target or "-")
+	)
 	return true
 end
 

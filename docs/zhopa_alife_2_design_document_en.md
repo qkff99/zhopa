@@ -57,7 +57,6 @@ Runtime modules:
 - `zhopa2_artifacts`
 - `zhopa2_story_psy_watchdog`
 - `zhopa2_story_north_migration`
-- `zhopa2_save_cleanup`
 
 Runtime patches:
 
@@ -344,7 +343,7 @@ Goals:
 - the leader can trade for the whole squad;
 - squad money can be pooled for the leader;
 - online trade uses real NPC inventory where possible;
-- offline trade uses real server-side inventory where possible;
+- offline trade sells virtual cargo and uses virtual squad money without creating unnecessary server-side items;
 - trader inventory is not polluted by all sold NPC junk;
 - NPC purchases can create bounded supplies so invisible NPC buying does not drain the player-facing shop;
 - trade emits vanilla-style console/news feedback when enabled.
@@ -357,7 +356,7 @@ Sellable examples:
 - excess medicine;
 - excess grenades;
 - excess food/water;
-- loot cargo from offline combat or artifact collection.
+- virtual loot cargo from offline combat and artifact cargo from artifact collection.
 
 Protected examples:
 
@@ -379,16 +378,16 @@ Price:
 - generated after rest/night rest selection, not as a permanent smart job;
 - requires sellable value or supply need;
 - candidate trader smarts are current level plus direct neighbors only;
-- weight increases with cargo/inventory value and artifact cargo;
+- weight increases with virtual cargo value, real online inventory value and artifact cargo;
 - failure sets cooldown and keeps cargo.
 
 Offline trade:
 
 - allowed only when the squad is actually on a smart recognized as trader-capable;
-- sells/removes real sellable children from squad members;
-- buys bounded supplies into squad members;
-- uses real inventory data where available;
-- keeps only serializable trade summaries in memory.
+- sells and clears virtual squad cargo;
+- buys bounded supplies through an abstract market without draining the trader's inventory;
+- uses virtual squad money instead of money-note sections and transfers it to NPC balance when the squad comes online;
+- keeps only serializable numbers, strings and tables in memory, never engine userdata.
 
 ## 8. Loot Subsystem
 
@@ -404,9 +403,9 @@ Online loot:
 
 Offline loot:
 
-- after offline combat, the winner can receive real server-side loot into squad inventory;
-- value/count are recorded for future trade and debug HUD;
-- aggregate value fallback is allowed only when the real inventory path is unavailable.
+- after offline combat, the winner receives bounded virtual cargo instead of mass-creating server-side items;
+- value, count and section summaries are recorded for future trade and debug HUD;
+- real items are created only during controlled materialization, for example when an online NPC death needs visible loot.
 
 Important rule: when ZHOPA rejects an item or corpse, it must not leave that target in vanilla memory in a way that makes vanilla retry it forever.
 
@@ -509,14 +508,6 @@ Save safety rules:
 - tolerate stale squad/smart/artifact ids;
 - clean stale reservations, cargo and debug HUD markers after unregister/death/load.
 
-`zhopa2_save_cleanup` exists for migration from old SISKI / old ZHOPA saves:
-
-- detects legacy save state patterns;
-- removes or neutralizes old state that can break ZHOPA2 runtime;
-- supports dry-run mode;
-- can optionally remove ZHOPA2 state for mod removal/reinstall tests;
-- logs only high-signal actions.
-
 ## 14. Debug and Diagnostics
 
 Normal logging should stay quiet. Success spam is allowed only where explicitly useful, such as trade/loot/artifact test feedback, and should be debug-gated where practical.
@@ -587,5 +578,5 @@ The system is healthy when:
 - `LOOT` does not cause corpse/item loops;
 - online/offline trade performs bounded, visible deals;
 - story systems stay gated by story mode and configured triggers;
-- old saves are either cleaned or rejected through controlled diagnostics.
+- old saves with incompatible state are rejected through controlled diagnostics.
 

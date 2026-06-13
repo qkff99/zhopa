@@ -11,6 +11,8 @@ local function ensure_schema()
 	return type(_G.zhopa2_mcm_schema) == "table" and _G.zhopa2_mcm_schema or nil
 end
 
+local MCM_BANNER = "zhopa2_mcm_banner.dds"
+
 local function clone_option(meta, key)
 	local node = {}
 	for k, v in pairs(meta) do
@@ -38,7 +40,7 @@ end
 
 local function make_panel(schema, panel)
 	local gr = {
-		{ id = panel.id .. "_slide", type = "slide", link = "ui_options_slider_player", text = panel.text, size = { 512, 50 }, spacing = 20 },
+		{ id = panel.id .. "_slide", type = "slide", link = MCM_BANNER, text = panel.text, size = { 512, 50 }, spacing = 20 },
 	}
 
 	for i = 1, #panel.groups do
@@ -66,7 +68,7 @@ function on_mcm_load()
 			sh = true,
 			text = "ui_mcm_zhopa2_panel_general",
 			gr = {
-				{ id = "general_slide", type = "slide", link = "ui_options_slider_player", text = "ui_mcm_zhopa2_title", size = { 512, 50 }, spacing = 20 },
+				{ id = "general_slide", type = "slide", link = MCM_BANNER, text = "ui_mcm_zhopa2_title", size = { 512, 50 }, spacing = 20 },
 			},
 		}
 		return op

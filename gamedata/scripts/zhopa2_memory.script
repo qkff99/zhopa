@@ -1,12 +1,15 @@
 local M = {}
 
-local VERSION = 8
+local VERSION = 11
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"
 local BASE_FIELD_COUNT = 8
-local FIELD_COUNT = 28
+local FIELD_COUNT = 37
 local RECENT_LIMIT = 8
+local VIRTUAL_LOOT_SECTION_LIMIT = 64
+local VIRTUAL_LOOT_TOTAL_LIMIT = 128
+local VIRTUAL_LOOT_VALUE_LIMIT = 500000
 
 local function write_string(packet, value)
 	packet:w_stringZ(value ~= nil and tostring(value) or NIL)
@@ -62,6 +65,15 @@ function M.reset_squad(squad)
 	squad.zhopa2_artifact_section = nil
 	squad.zhopa2_artifact_task_collected_id = nil
 	squad.zhopa2_artifact_collect_started = nil
+	squad.zhopa2_virtual_loot_count = 0
+	squad.zhopa2_virtual_loot_value = 0
+	squad.zhopa2_virtual_loot_sections = nil
+	squad.zhopa2_virtual_money = 0
+	squad.zhopa2_post_guide_rest_pending = nil
+	squad.zhopa2_post_guide_rest_target = nil
+	squad.zhopa2_post_guide_rest_reason = nil
+	squad.zhopa2_post_guide_rest_npc = nil
+	squad.zhopa2_post_guide_rest_marked_tg = nil
 	squad.zhopa2_state_version = VERSION
 end
 
@@ -151,6 +163,174 @@ function M.add_loot_value(squad, value, reason)
 	squad.zhopa2_loot_value = (tonumber(squad.zhopa2_loot_value) or 0) + value
 	squad.zhopa2_last_result = reason or "loot_value"
 	return true
+end
+
+local function unpack_virtual_loot(value)
+	local out = {}
+	if type(value) ~= "string" or value == "" then
+		return out
+	end
+	for raw in value:gmatch("[^;]+") do
+		local section, count, total = raw:match("([^|]+)|([^|]*)|([^|]*)")
+		count = tonumber(count) or 0
+		total = tonumber(total) or 0
+		if section and section ~= "" and count > 0 then
+			out[section] = {
+				count = math.max(0, math.floor(count)),
+				value = math.max(0, total),
+			}
+		end
+	end
+	return out
+end
+
+local function pack_virtual_loot(entries)
+	local out = {}
+	for section, entry in pairs(entries or {}) do
+		local count = math.max(0, math.floor(tonumber(entry and entry.count) or 0))
+		local value = math.max(0, tonumber(entry and entry.value) or 0)
+		if type(section) == "string" and section ~= "" and count > 0 then
+			out[#out + 1] = string.format("%s|%s|%s", section, count, math.floor(value + 0.5))
+		end
+	end
+	return #out > 0 and table.concat(out, ";") or nil
+end
+
+local function virtual_loot_section_count(entries)
+	local count = 0
+	for _ in pairs(entries or {}) do
+		count = count + 1
+	end
+	return count
+end
+
+local function clamp_virtual_loot_state(squad)
+	if not squad then
+		return 0, 0
+	end
+	local count = math.min(VIRTUAL_LOOT_TOTAL_LIMIT, math.max(0, math.floor(tonumber(squad.zhopa2_virtual_loot_count) or 0)))
+	local value = math.min(VIRTUAL_LOOT_VALUE_LIMIT, math.max(0, tonumber(squad.zhopa2_virtual_loot_value) or 0))
+	squad.zhopa2_virtual_loot_count = count
+	squad.zhopa2_virtual_loot_value = value
+	return count, value
+end
+
+function M.add_virtual_loot(squad, section, count, value, reason)
+	if not squad then
+		return false
+	end
+	local original_count = math.max(1, math.floor(tonumber(count) or 1))
+	count = original_count
+	value = math.max(0, tonumber(value) or 0)
+	local current_count, current_value = clamp_virtual_loot_state(squad)
+	local count_room = VIRTUAL_LOOT_TOTAL_LIMIT - current_count
+	local value_room = VIRTUAL_LOOT_VALUE_LIMIT - current_value
+	if count_room <= 0 or value_room <= 0 then
+		squad.zhopa2_last_result = reason or "virtual_loot_full"
+		return false
+	end
+	if count > count_room then
+		count = count_room
+		value = original_count > 0 and (value * count / original_count) or value
+	end
+	if value > value_room then
+		value = value_room
+	end
+	section = type(section) == "string" and section ~= "" and section or nil
+	squad.zhopa2_virtual_loot_count = current_count + count
+	squad.zhopa2_virtual_loot_value = current_value + value
+	if section then
+		local entries = unpack_virtual_loot(squad.zhopa2_virtual_loot_sections)
+		if entries[section] or virtual_loot_section_count(entries) < VIRTUAL_LOOT_SECTION_LIMIT then
+			local entry = entries[section] or { count = 0, value = 0 }
+			entry.count = (tonumber(entry.count) or 0) + count
+			entry.value = (tonumber(entry.value) or 0) + value
+			entries[section] = entry
+			squad.zhopa2_virtual_loot_sections = pack_virtual_loot(entries)
+		end
+	end
+	squad.zhopa2_last_result = reason or "virtual_loot"
+	return true
+end
+
+function M.virtual_loot_entries(squad)
+	local entries = {}
+	local packed = squad and squad.zhopa2_virtual_loot_sections
+	local map = unpack_virtual_loot(packed)
+	local remaining = VIRTUAL_LOOT_TOTAL_LIMIT
+	for section, entry in pairs(map) do
+		if remaining <= 0 then
+			break
+		end
+		local original_count = math.max(0, math.floor(tonumber(entry.count) or 0))
+		local count = math.min(remaining, original_count)
+		local value = math.max(0, tonumber(entry.value) or 0)
+		if original_count > count and original_count > 0 then
+			value = value * count / original_count
+		end
+		if count > 0 then
+			entries[#entries + 1] = {
+				section = section,
+				count = count,
+				value = value,
+			}
+			remaining = remaining - count
+		end
+	end
+	return entries
+end
+
+function M.virtual_loot_count(squad)
+	return math.min(VIRTUAL_LOOT_TOTAL_LIMIT, math.max(0, math.floor(tonumber(squad and squad.zhopa2_virtual_loot_count) or 0)))
+end
+
+function M.virtual_loot_value(squad)
+	return math.min(VIRTUAL_LOOT_VALUE_LIMIT, math.max(0, tonumber(squad and squad.zhopa2_virtual_loot_value) or 0))
+end
+
+function M.clear_virtual_loot(squad, reason)
+	if not squad then
+		return false
+	end
+	squad.zhopa2_virtual_loot_count = 0
+	squad.zhopa2_virtual_loot_value = 0
+	squad.zhopa2_virtual_loot_sections = nil
+	squad.zhopa2_last_result = reason or "virtual_loot_cleared"
+	return true
+end
+
+function M.virtual_money(squad)
+	return math.max(0, math.floor(tonumber(squad and squad.zhopa2_virtual_money) or 0))
+end
+
+function M.add_virtual_money(squad, amount, reason)
+	if not squad then
+		return false
+	end
+	amount = math.max(0, math.floor(tonumber(amount) or 0))
+	if amount <= 0 then
+		return true
+	end
+	squad.zhopa2_virtual_money = M.virtual_money(squad) + amount
+	squad.zhopa2_last_result = reason or "virtual_money"
+	return true
+end
+
+function M.take_virtual_money(squad, amount, reason)
+	if not squad then
+		return false, 0
+	end
+	amount = math.max(0, math.floor(tonumber(amount) or 0))
+	if amount <= 0 then
+		return true, 0
+	end
+	local current = M.virtual_money(squad)
+	if current < amount then
+		return false, 0
+	end
+	squad.zhopa2_virtual_money = current - amount
+	squad.zhopa2_last_result = reason or "virtual_money_spent"
+	return true, amount
 end
 
 function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
@@ -261,6 +441,15 @@ function M.write_squad(packet, squad)
 	write_string(packet, squad and squad.zhopa2_artifact_smart)
 	write_string(packet, squad and squad.zhopa2_artifact_zone)
 	write_string(packet, squad and squad.zhopa2_artifact_task_collected_id)
+	write_string(packet, squad and squad.zhopa2_virtual_loot_count)
+	write_string(packet, squad and squad.zhopa2_virtual_loot_value)
+	write_string(packet, squad and squad.zhopa2_virtual_loot_sections)
+	write_string(packet, squad and squad.zhopa2_virtual_money)
+	write_string(packet, squad and squad.zhopa2_post_guide_rest_pending == true and "true" or "false")
+	write_string(packet, squad and squad.zhopa2_post_guide_rest_target)
+	write_string(packet, squad and squad.zhopa2_post_guide_rest_reason)
+	write_string(packet, squad and squad.zhopa2_post_guide_rest_npc)
+	write_string(packet, squad and squad.zhopa2_post_guide_rest_marked_tg)
 	packet:w_stringZ(MARKER_END)
 end
 
@@ -313,6 +502,16 @@ function M.read_squad(packet, squad)
 	squad.zhopa2_artifact_smart = field_count >= 26 and tonum(read_string(packet)) or nil
 	squad.zhopa2_artifact_zone = field_count >= 27 and read_string(packet) or nil
 	squad.zhopa2_artifact_task_collected_id = field_count >= 28 and tonum(read_string(packet)) or nil
+	squad.zhopa2_virtual_loot_count = field_count >= 29 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_virtual_loot_value = field_count >= 30 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_virtual_loot_sections = field_count >= 31 and read_string(packet) or nil
+	squad.zhopa2_virtual_money = field_count >= 32 and (tonum(read_string(packet)) or 0) or 0
+	squad.zhopa2_post_guide_rest_pending = field_count >= 33 and read_string(packet) == "true" or nil
+	squad.zhopa2_post_guide_rest_target = field_count >= 34 and tonum(read_string(packet)) or nil
+	squad.zhopa2_post_guide_rest_reason = field_count >= 35 and read_string(packet) or nil
+	squad.zhopa2_post_guide_rest_npc = field_count >= 36 and tonum(read_string(packet)) or nil
+	squad.zhopa2_post_guide_rest_marked_tg = field_count >= 37 and tonum(read_string(packet)) or nil
+	clamp_virtual_loot_state(squad)
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version
 

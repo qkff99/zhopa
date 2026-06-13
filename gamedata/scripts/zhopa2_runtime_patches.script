@@ -17,7 +17,6 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_artifacts",
 	"zhopa2_story_psy_watchdog",
 	"zhopa2_story_north_migration",
-	"zhopa2_save_cleanup",
 }
 
 local ZHOPA2_RUNTIME_PATCHES = {
@@ -25,6 +24,7 @@ local ZHOPA2_RUNTIME_PATCHES = {
 	{ name = "sim_board", fn = "patch_sim_board" },
 	{ name = "smart_terrain", fn = "patch_smart_terrain" },
 	{ name = "sim_squad_scripted", fn = "patch_sim_squad_scripted" },
+	{ name = "axr_companions", fn = "patch_axr_companions" },
 	{ name = "bind_anomaly_zone", fn = "patch_bind_anomaly_zone" },
 	{ name = "bind_monster", fn = "patch_bind_monster" },
 	{ name = "xr_reach_task", fn = "patch_xr_reach_task" },
@@ -124,7 +124,7 @@ end
 
 local function server_object(id)
 	id = tonumber(id)
-	if not id then
+	if not id or id <= 0 or id == 65535 then
 		return nil
 	end
 	if type(alife_object) == "function" then
@@ -156,6 +156,27 @@ function M.zhopa2_online_object_by_id(id)
 		return level.object_by_id(id)
 	end
 	return nil
+end
+
+function M.zhopa2_first_squad_member_id(squad)
+	if not (squad and type(squad.squad_members) == "function") then
+		return nil
+	end
+	local ok, member_id = pcall(function()
+		for member in squad:squad_members() do
+			local id = tonumber(member and member.id)
+			if id and id > 0 and id ~= 65535 then
+				return id
+			end
+		end
+		return nil
+	end)
+	return ok and member_id or nil
+end
+
+function M.zhopa2_first_online_squad_member(squad)
+	local id = M.zhopa2_first_squad_member_id(squad)
+	return id and M.zhopa2_online_object_by_id(id) or nil
 end
 
 function M.zhopa2_object_location(obj)
@@ -197,14 +218,12 @@ end
 
 function M.zhopa2_direct_hunt_target_anchor(target)
 	local type_ = type
-	if not (target and target.clsid and target:clsid() == clsid.online_offline_group_s and type_(target.commander_id) == "function") then
+	if not (target and target.clsid and target:clsid() == clsid.online_offline_group_s) then
 		return target
 	end
-	local ok_id, commander_id = pcall(target.commander_id, target)
-	commander_id = ok_id and tonumber(commander_id) or nil
-	local commander = commander_id and M.zhopa2_online_object_by_id(commander_id) or nil
-	if commander and type_(commander.position) == "function" and type_(commander.level_vertex_id) == "function" and type_(commander.game_vertex_id) == "function" then
-		return commander
+	local member = M.zhopa2_first_online_squad_member(target)
+	if member and type_(member.position) == "function" and type_(member.level_vertex_id) == "function" and type_(member.game_vertex_id) == "function" then
+		return member
 	end
 	return target
 end
@@ -586,6 +605,41 @@ local function cache_squad_section_name(squad)
 	return nil
 end
 
+local function object_debug_name(obj)
+	if not obj then
+		return "-"
+	end
+	local section = obj.zhopa2_section_name
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	section = obj.section
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	section = obj.section_name
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	return tostring(object_id(obj) or "-")
+end
+
+local function cache_squad_member_count(squad)
+	if not squad then
+		return 0
+	end
+	local count = tonumber(squad.zhopa2_cached_npc_count)
+	if type(squad.npc_count) == "function" then
+		local ok, value = pcall(squad.npc_count, squad)
+		if ok then
+			count = tonumber(value) or 0
+			squad.zhopa2_cached_npc_count = count
+			return count
+		end
+	end
+	return count or 0
+end
+
 local function squad_player_id(squad)
 	cache_squad_section_name(squad)
 	local p = perception()
@@ -631,6 +685,9 @@ local function plain_sim_stalker_squad(squad)
 	if is_monster_squad(squad) then
 		return false
 	end
+	if squad and squad.zhopa2_service_filler == true then
+		return false
+	end
 	local section = cache_squad_section_name(squad)
 	return type(section) == "string"
 		and string.find(section, "_sim_squad_", 1, true) ~= nil
@@ -638,7 +695,21 @@ local function plain_sim_stalker_squad(squad)
 		and string.find(section, "_sim_squad_dead", 1, true) == nil
 end
 
+local function service_squad(squad)
+	if not squad then
+		return false
+	end
+	if squad.zhopa2_service_filler == true then
+		return true
+	end
+	local section = cache_squad_section_name(squad)
+	return type(section) == "string" and string.find(section, "_sim_squad_service_", 1, true) ~= nil
+end
+
 local function managed_stalker_squad(squad)
+	if service_squad(squad) then
+		return false
+	end
 	return squad and (squad.common == true or plain_sim_stalker_squad(squad) == true)
 end
 
@@ -865,7 +936,15 @@ function squad_methods.zhopa2_can_manage(self)
 	if cfg_bool("enabled", true) ~= true then
 		return false
 	end
-	if self.disabled or self:commander_id() == nil or self:npc_count() <= 0 then
+	if service_squad(self) then
+		return false
+	end
+	local npc_count = cache_squad_member_count(self)
+	if self.disabled or npc_count <= 0 then
+		return false
+	end
+	local representative_id = M.zhopa2_first_squad_member_id(self)
+	if not representative_id then
 		return false
 	end
 	if self.player_id == "actor" then
@@ -877,7 +956,7 @@ function squad_methods.zhopa2_can_manage(self)
 	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[self.id] then
 		return false
 	end
-	if axr_task_manager and axr_task_manager.hostages_by_id and axr_task_manager.hostages_by_id[self:commander_id()] then
+	if axr_task_manager and axr_task_manager.hostages_by_id and axr_task_manager.hostages_by_id[representative_id] then
 		return false
 	end
 	if self:zhopa2_global_level_blacklisted() then
@@ -1071,7 +1150,7 @@ function squad_methods.zhopa2_get_script_target(self)
 					self.zhopa2_last_result = "invalid_script_target"
 					zhopa2_debug_printf(
 						"~ ZHOPA2 task error | reason [invalid_script_target] squad [%s:%s] task [%s] target [%s] source [tasks] detail [%s]",
-						tostring(self.name and self:name() or ""),
+						tostring(object_debug_name(self)),
 						tostring(self.id or "-"),
 						tostring(self.zhopa2_task or "-"),
 						tostring(target or "-"),
@@ -1091,7 +1170,7 @@ function squad_methods.zhopa2_get_script_target(self)
 			self.zhopa2_last_result = "invalid_script_target"
 			zhopa2_debug_printf(
 				"~ ZHOPA2 task error | reason [invalid_script_target] squad [%s:%s] task [%s] target [%s] source [fallback] detail [%s]",
-				tostring(self.name and self:name() or ""),
+				tostring(object_debug_name(self)),
 				tostring(self.id or "-"),
 				tostring(self.zhopa2_task or "-"),
 				tostring(self.zhopa2_target or "-"),
@@ -1143,10 +1222,6 @@ function squad_methods.zhopa2_apply_revenge_hostility(self)
 end
 
 function squad_methods.zhopa2_state_write(self, packet)
-	local cleanup = safe_require("zhopa2_save_cleanup")
-	if cleanup and type(cleanup.should_write_squad_state) == "function" and cleanup.should_write_squad_state() ~= true then
-		return
-	end
 	local mem = memory()
 	if mem and type(mem.write_squad) == "function" then
 		return mem.write_squad(packet, self)
@@ -1219,6 +1294,7 @@ local function retrofit_existing_squads()
 		local squad = type(stored) == "table" and stored or server_object(squad_id)
 		if squad then
 			cache_squad_section_name(squad)
+			cache_squad_member_count(squad)
 			if type(squad.zhopa2_sync_base_camping_registry) == "function" then
 				squad:zhopa2_sync_base_camping_registry()
 			end
@@ -1241,6 +1317,7 @@ function M.patch_sim_squad_scripted()
 			if type(self.zhopa2_reset_state) == "function" then
 				self:zhopa2_reset_state()
 			end
+			cache_squad_member_count(self)
 			return unpack(result)
 		end
 	end, "sim_squad_scripted")
@@ -1248,6 +1325,7 @@ function M.patch_sim_squad_scripted()
 		return function(self, ...)
 			local result = { original(self, ...) }
 			cache_squad_section_name(self)
+			cache_squad_member_count(self)
 			return unpack(result)
 		end
 	end, "sim_squad_scripted")
@@ -1255,6 +1333,7 @@ function M.patch_sim_squad_scripted()
 		return function(self, ...)
 			local result = { original(self, ...) }
 			cache_squad_section_name(self)
+			cache_squad_member_count(self)
 			if SIMBOARD and type(SIMBOARD.zhopa2_update_squad_level) == "function" then
 				SIMBOARD:zhopa2_update_squad_level(self)
 			end
@@ -1295,6 +1374,7 @@ function M.patch_sim_squad_scripted()
 			local result = { original(self, ...) }
 			self.zhopa2_inside_squad_update = prev_inside
 			self.zhopa2_get_target_task_updated = nil
+			cache_squad_member_count(self)
 			local sim = alife and alife() or nil
 			if sim and game_graph and self.m_game_vertex_id then
 				local ok, cur_lvl = pcall(function()
@@ -1327,7 +1407,7 @@ function M.patch_sim_squad_scripted()
 	patch_required_method(cls, "remove_npc", PATCH_ID .. "_squad_remove_npc", function(original)
 		return function(self, npc_id, force, ...)
 			local result = { original(self, npc_id, force, ...) }
-			if self:npc_count() <= 0 then
+			if cache_squad_member_count(self) <= 0 then
 				if type(self.zhopa2_cleanup_debug) == "function" then
 					self:zhopa2_cleanup_debug()
 				end
@@ -1405,6 +1485,115 @@ function M.patch_sim_squad_scripted()
 	end, "sim_squad_scripted")
 	retrofit_existing_squads()
 	return true
+end
+
+function M.patch_axr_companions()
+	local mod = safe_require("axr_companions")
+	if not mod then
+		zhopa2_debug_printf("~ ZHOPA2 runtime patch error | surface [axr_companions] reason [missing_module]")
+		return false
+	end
+
+	local function squad_from_npc(npc)
+		if not (npc and type(get_object_squad) == "function") then
+			return nil
+		end
+		local ok, squad = pcall(get_object_squad, npc)
+		return ok and squad or nil
+	end
+
+	local function online_npc_id(npc)
+		local id = object_id(npc)
+		return tonumber(id)
+	end
+
+	local function vanilla_guide_complete(npc)
+		local guide = rawget(_G, "tasks_guide")
+		if not (guide and type(guide.prec_5) == "function" and db and db.actor) then
+			return false, nil
+		end
+		local ok, complete = pcall(guide.prec_5, db.actor, npc)
+		if not (ok and complete == true) then
+			return false, nil
+		end
+		if debug and debug.getupvalue then
+			for i = 1, 20 do
+				local name, value = debug.getupvalue(guide.prec_5, i)
+				if not name then
+					break
+				end
+				if name == "curr_guid" and type(value) == "table" then
+					return true, tonumber(value.id_smart)
+				end
+			end
+		end
+		return true, nil
+	end
+
+	local function pda_guide_complete(npc)
+		local pda = rawget(_G, "pda_inter_x_tasks")
+		local tasks = (type(pda) == "table" and rawget(pda, "Active_pda_tasks")) or rawget(_G, "Active_pda_tasks")
+		local npc_id = online_npc_id(npc)
+		if not (type(tasks) == "table" and npc_id) then
+			return false, nil
+		end
+		for _, task in pairs(tasks) do
+			if type(task) == "table" and tonumber(task.task_type) == 3 and tonumber(task.giver_id) == npc_id then
+				local target_id = tonumber(task.target_id)
+				local target = target_id and server_object(target_id) or nil
+				local near_target = false
+				if target and type(get_distx) == "function" then
+					local ok_dist, dist = pcall(get_distx, npc_id, target)
+					near_target = ok_dist and tonumber(dist) ~= nil and tonumber(dist) < 75
+				end
+				return near_target, near_target and target_id or nil
+			end
+		end
+		return false, nil
+	end
+
+	local function mark_post_guide_rest(npc, reason, target_id)
+		local squad = squad_from_npc(npc)
+		if not (squad and squad.id) then
+			return false
+		end
+		squad.zhopa2_post_guide_rest_pending = true
+		squad.zhopa2_post_guide_rest_target = tonumber(target_id)
+		squad.zhopa2_post_guide_rest_reason = reason or "guide_completed"
+		squad.zhopa2_post_guide_rest_npc = online_npc_id(npc)
+		squad.zhopa2_post_guide_rest_marked_tg = runtime_time_ms()
+		zhopa2_debug_printf(
+			"~ ZHOPA2 guide rest | squad [%s:%s] npc [%s] target [%s] reason [%s]",
+			tostring(object_debug_name(squad)),
+			tostring(squad.id or "-"),
+			tostring(squad.zhopa2_post_guide_rest_npc or "-"),
+			tostring(squad.zhopa2_post_guide_rest_target or "-"),
+			tostring(squad.zhopa2_post_guide_rest_reason or "-")
+		)
+		return true
+	end
+
+	local function maybe_mark(npc)
+		if not npc then
+			return
+		end
+		local pda_ok, pda_target = pda_guide_complete(npc)
+		if pda_ok then
+			mark_post_guide_rest(npc, "pda_guide_completed", pda_target)
+			return
+		end
+		local vanilla_ok, vanilla_target = vanilla_guide_complete(npc)
+		if vanilla_ok then
+			mark_post_guide_rest(npc, "vanilla_guide_completed", vanilla_target)
+		end
+	end
+
+	return patch_required_method(mod, "remove_from_actor_squad", PATCH_ID .. "_post_guide_rest", function(original)
+		return function(npc, ...)
+			pcall(maybe_mark, npc)
+			return wrapped_returns(original, npc, ...)
+		end
+	end, "axr_companions")
 end
 
 -- sim_board ------------------------------------------------------------------
@@ -1885,6 +2074,7 @@ function board_methods.zhopa2_rebuild_buckets(self)
 				local squad = server_object(squad_id)
 				if squad then
 					cache_squad_section_name(squad)
+					cache_squad_member_count(squad)
 					self:zhopa2_update_squad_level(squad)
 				end
 			end
@@ -1983,6 +2173,53 @@ local function service_job_fallback(npc_info, job, smart)
 	end
 	local ok, result = pcall(svc.job_accepts_service_npc, npc_info, job, smart)
 	return ok and result == true
+end
+
+local service_job_debug_signatures = {}
+
+local function debug_service_job(smart, npc_info, job, source)
+	if cfg_bool("debug_hud_enabled", false) ~= true or type(zhopa2_debug_printf) ~= "function" then
+		return
+	end
+	if source == "current" then
+		return
+	end
+	local se_obj = npc_info and npc_info.se_obj or nil
+	local npc_id = object_id(se_obj)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	local group_id = tonumber(se_obj and se_obj.group_id)
+	local squad = group_id and group_id > 0 and group_id < 65535 and server_object(group_id) or nil
+	local key = tostring(object_id(smart) or "-") .. ":" .. tostring(npc_id or "-")
+	local signature = table.concat({
+		tostring(source or "-"),
+		tostring(job and job.section or "-"),
+		tostring(st and st.active_scheme or "-"),
+		tostring(st and st.section_logic or "-"),
+		tostring(squad and squad.zhopa2_service_role or "-"),
+		tostring(squad and squad.scripted_target or "-"),
+		tostring(squad and (squad.assigned_target_id or squad.current_target_id) or "-"),
+	}, "|")
+	if service_job_debug_signatures[key] == signature then
+		return
+	end
+	service_job_debug_signatures[key] = signature
+	pcall(
+		zhopa2_debug_printf,
+		"~ ZHOPA2 service job | source [%s] smart [%s:%s] npc [%s:%s] squad [%s:%s] role [%s] job [%s] scheme [%s:%s] target [%s:%s]",
+		tostring(source or "-"),
+		tostring(object_debug_name(smart)),
+		tostring(object_id(smart) or "-"),
+		tostring(object_debug_name(se_obj)),
+		tostring(npc_id or "-"),
+		tostring(object_debug_name(squad)),
+		tostring(object_id(squad) or "-"),
+		tostring(squad and squad.zhopa2_service_role or "-"),
+		tostring(job and job.section or "-"),
+		tostring(st and st.active_scheme or "-"),
+		tostring(st and st.section_logic or "-"),
+		tostring(squad and squad.scripted_target or "-"),
+		tostring(squad and (squad.assigned_target_id or squad.current_target_id) or "-")
+	)
 end
 
 local function live_targeted_gather_id(npc_info)
@@ -2190,6 +2427,7 @@ local function try_service_fallback_job(smart, npc_info)
 					smart:setup_logic(st.object)
 				end
 			end
+			debug_service_job(smart, npc_info, job, "fallback")
 			return true
 		end
 	end
@@ -2214,6 +2452,7 @@ local function ensure_service_job(smart, npc_info)
 				empty_table(db.offline_objects[npc_info.se_obj.id])
 				smart:setup_logic(st.object)
 			end
+			debug_service_job(smart, npc_info, npc_info.job, "current")
 			return true
 		end
 	end
@@ -2268,7 +2507,7 @@ function M.patch_smart_terrain()
 	M.patch_method(cls, "select_npc_job", PATCH_ID .. "_smart_select_job", function(original)
 		return function(self, npc_info, ...)
 			if not (npc_info and npc_info.se_obj and npc_info.stype) then
-				zhopa2_debug_printf("%s no npc_info!", self and self.name and self:name() or "-")
+				zhopa2_debug_printf("%s no npc_info!", object_debug_name(self))
 				return original(self, npc_info, ...)
 			end
 			if targeted_gather_blocks_job(self, npc_info) then
@@ -2294,7 +2533,7 @@ function M.patch_smart_terrain()
 			end
 			local info = self.npc_info and self.npc_info[npc:id()]
 			if not (info and info.se_obj and info.job) then
-				zhopa2_debug_printf("%s.setup_logic: invalid npc_info for id=%s", self:name(), npc:id())
+				zhopa2_debug_printf("%s.setup_logic: invalid npc_info for id=%s", object_debug_name(self), tostring(object_id(npc) or "-"))
 			end
 			return original(self, npc, ...)
 		end
@@ -2674,12 +2913,13 @@ local function direct_monster_update(self)
 		return true
 	end
 	xr_logic.mob_capture(self.object, true)
-	local commander = db.storage[squad:commander_id()] and db.storage[squad:commander_id()].object
-	if commander == nil or commander:id() == id then
+	local leader_id = M.zhopa2_first_squad_member_id(squad)
+	local leader = leader_id and db and db.storage and db.storage[leader_id] and db.storage[leader_id].object or nil
+	if leader == nil or leader:id() == id then
 		local target_move = run and move.run_with_leader or move.walk_with_leader
 		action(self.object, move(target_move, squad_target.position or self.object:position()), cond(cond.move_end))
 	else
-		local pos = commander:position()
+		local pos = leader:position()
 		if run then
 			action(self.object, move(move.run_with_leader, pos), cond(cond.move_end))
 		elseif pos:distance_to_sqr(self.object:position()) > 100 then
@@ -2708,72 +2948,67 @@ end
 
 -- offline combat -------------------------------------------------------------
 
+local function offline_loot_attacker_squad(killer)
+	local group_id = tonumber(killer and killer.group_id)
+	if not (group_id and group_id > 0 and group_id < 65535) then
+		return nil
+	end
+	local squad = server_object(group_id)
+	if not (squad and squad.zhopa2_managed == true) then
+		return nil
+	end
+	if is_monster_squad(squad) then
+		return nil
+	end
+	return squad
+end
+
+local function ignore_offline_loot_detail(detail)
+	local detail_text = tostring(detail or "")
+	return detail_text == "attacker_squad_missing"
+		or detail_text == "attacker_squad_unmanaged"
+		or detail_text == "attacker_squad_excluded"
+		or detail_text == "victim_story"
+		or detail_text == "offline_real_disabled"
+		or detail_text == "runtime_not_ready"
+		or detail_text:find("^nothing_moved") ~= nil
+end
+
 local function offline_loot_on_death(victim, killer)
-	if not (victim and victim.online ~= true and killer and killer.group_id and killer.group_id < 65535) then
+	if not (victim and victim.online ~= true and killer) then
 		return
 	end
-	local function debug_name(obj)
-		if not obj then
-			return "-"
-		end
-		local ok_name, name_value = pcall(function()
-			return obj.name
-		end)
-		if ok_name and type(name_value) == "string" then
-			return name_value
-		end
-		if ok_name and type(name_value) == "function" then
-			local ok_call, called_name = pcall(name_value, obj)
-			if ok_call and called_name then
-				return tostring(called_name)
-			end
-		end
-		local ok_section, section_value = pcall(function()
-			return obj.section_name
-		end)
-		if ok_section and type(section_value) == "string" then
-			return section_value
-		end
-		if ok_section and type(section_value) == "function" then
-			local ok_call, called_section = pcall(section_value, obj)
-			if ok_call and called_section then
-				return tostring(called_section)
-			end
-		end
-		return "-"
+	local attacker_squad = offline_loot_attacker_squad(killer)
+	if not attacker_squad then
+		return
 	end
-	local attacker_squad = alife_object and alife_object(killer.group_id) or nil
 	local loot = safe_require("zhopa2_loot")
 	if loot and type(loot.offline_loot_victim) == "function" then
 		local ok, looted, detail = pcall(loot.offline_loot_victim, attacker_squad, killer, victim, "offline_on_death_loot")
 		if not ok then
 			zhopa2_debug_printf(
 				"~ ZHOPA2 offline loot error | reason [offline_loot_call_error] squad [%s:%s] killer [%s:%s] victim [%s:%s] detail [%s]",
-				tostring(debug_name(attacker_squad)),
+				tostring(object_debug_name(attacker_squad)),
 				tostring(object_id(attacker_squad) or "-"),
-				tostring(debug_name(killer)),
+				tostring(object_debug_name(killer)),
 				tostring(object_id(killer) or "-"),
-				tostring(debug_name(victim)),
+				tostring(object_debug_name(victim)),
 				tostring(object_id(victim) or "-"),
 				tostring(looted)
 			)
 		elseif looted ~= true and detail then
 			local detail_text = tostring(detail)
-			if detail_text == "attacker_squad_excluded"
-				or detail_text == "victim_story"
-				or detail_text == "offline_real_disabled"
-				or detail_text:find("^nothing_moved") ~= nil
-			then
+			if ignore_offline_loot_detail(detail_text) then
 				return
 			end
 			zhopa2_debug_printf(
 				"~ ZHOPA2 offline loot error | reason [%s] squad [%s:%s] killer [%s:%s] victim [%s:%s]",
 				detail_text,
-				tostring(debug_name(attacker_squad)),
+				tostring(object_debug_name(attacker_squad)),
 				tostring(object_id(attacker_squad) or "-"),
-				tostring(debug_name(killer)),
+				tostring(object_debug_name(killer)),
 				tostring(object_id(killer) or "-"),
-				tostring(debug_name(victim)),
+				tostring(object_debug_name(victim)),
 				tostring(object_id(victim) or "-")
 			)
 		end

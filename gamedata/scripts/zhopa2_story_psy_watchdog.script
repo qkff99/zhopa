@@ -383,20 +383,6 @@ local function squad_level_name(squad, known_level)
 	return level_name_by_gvid(squad and squad.m_game_vertex_id or nil)
 end
 
-local function read_commander_id(squad)
-	if not squad then
-		return nil
-	end
-	if type(squad.commander_id) == "function" then
-		local ok, id = pcall(squad.commander_id, squad)
-		id = ok and normalize_id(id) or nil
-		if id then
-			return id
-		end
-	end
-	return normalize_id(squad.commander_id)
-end
-
 local function extract_member_candidate_id(k, v)
 	if type(v) == "table" or type(v) == "userdata" then
 		local idv = normalize_id(v.id) or normalize_id(v.object_id) or normalize_id(v.squad_id)
@@ -538,14 +524,15 @@ end
 local function build_context(squad, community, level_name)
 	local tonum = tonumber
 	local section = squad_section_name(squad)
-	local commander = resolve_alife_object(read_commander_id(squad))
-	local position = safe_position(squad) or safe_position(commander)
-	local lvid = tonum(squad and squad.m_level_vertex_id) or tonum(commander and commander.m_level_vertex_id)
-	local gvid = tonum(squad and squad.m_game_vertex_id) or tonum(commander and commander.m_game_vertex_id)
+	local member_ids = squad_member_ids(squad)
+	local representative = resolve_alife_object(member_ids[1])
+	local position = safe_position(squad) or safe_position(representative)
+	local lvid = tonum(squad and squad.m_level_vertex_id) or tonum(representative and representative.m_level_vertex_id)
+	local gvid = tonum(squad and squad.m_game_vertex_id) or tonum(representative and representative.m_game_vertex_id)
 	local source_smart_id = normalize_id(squad and squad.smart_id)
 	local source_smart = smart_object_by_id(source_smart_id)
 	local source_smart_level = smart_level_name(source_smart)
-	local member_count = squad_member_count(squad)
+	local member_count = #member_ids > 0 and #member_ids or squad_member_count(squad)
 	level_name = level_name or level_name_by_gvid(gvid)
 	if not (section and community and position and lvid and gvid and level_name and member_count and member_count > 0) then
 		return nil

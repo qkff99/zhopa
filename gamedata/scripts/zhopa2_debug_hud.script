@@ -61,6 +61,27 @@ local function spot_for_squad(squad)
 	return faction_spots[faction] or DEFAULT_SPOT
 end
 
+local function safe_squad_spot_id(squad)
+	if not squad then
+		return nil
+	end
+	if type(squad.squad_members) == "function" then
+		local ok, id = pcall(function()
+			for member in squad:squad_members() do
+				local member_id = tonumber(member and member.id)
+				if member_id and member_id > 0 and member_id ~= 65535 then
+					return member_id
+				end
+			end
+			return nil
+		end)
+		if ok and id then
+			return id
+		end
+	end
+	return nil
+end
+
 local function forget_spot_owner(id, squad_id)
 	squad_id = tonumber(squad_id)
 	if squad_id then
@@ -107,8 +128,18 @@ function cleanup_squad_id(squad_id)
 end
 
 local function smart_name(id)
-	local smart = id and alife_object(id)
-	return smart and smart.name and smart:name() or tostring(id or "-")
+	return tostring(id or "-")
+end
+
+local function squad_debug_name(squad)
+	if not squad then
+		return "-"
+	end
+	local section = squad.zhopa2_section_name
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	return tostring(squad.id or "-")
 end
 
 local function perception()
@@ -234,7 +265,7 @@ local function build_hint(squad)
 	local tostr = tostring
 	local lines = {
 		"ZHOPA ALIFE 2",
-		strformat("squad: %s", tostr(squad.name and squad:name() or "-")),
+		strformat("squad: %s", squad_debug_name(squad)),
 		strformat("id: %s", tostr(squad.id or "-")),
 		strformat("faction: %s", tostr(squad.player_id or "-")),
 		strformat("task: %s", tostr(squad.zhopa2_task or "NO_TASK")),
@@ -262,7 +293,12 @@ function update_squad(squad)
 	end
 
 	local squad_id = tonumber(squad.id)
-	local id = squad.commander_id and squad:commander_id() or nil
+	if not (enabled() and squad.zhopa2_managed == true and squad.zhopa2_task) then
+		cleanup_squad_id(squad_id)
+		return
+	end
+
+	local id = safe_squad_spot_id(squad)
 	if not id then
 		cleanup_squad_id(squad_id)
 		return
@@ -271,11 +307,6 @@ function update_squad(squad)
 	local old_id = squad_id and squad_spot_ids[squad_id] or nil
 	if old_id and old_id ~= id then
 		remove_spot(old_id, squad_id)
-	end
-
-	if not (enabled() and squad.zhopa2_managed == true and squad.zhopa2_task) then
-		remove_spot(id, squad_id)
-		return
 	end
 	local lvl = rawget(_G, "level")
 	if not (lvl and lvl.map_add_object_spot and lvl.map_has_object_spot) then
@@ -325,8 +356,9 @@ function cleanup_squad(squad)
 
 	local squad_id = tonumber(squad.id)
 	cleanup_squad_id(squad_id)
-	if squad.commander_id then
-		remove_spot(squad:commander_id(), squad_id)
+	local spot_id = safe_squad_spot_id(squad)
+	if spot_id then
+		remove_spot(spot_id, squad_id)
 	end
 end
 

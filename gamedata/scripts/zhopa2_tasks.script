@@ -998,6 +998,73 @@ local function task_target_blacklisted(squad)
 	return target_blacklisted_for_squad(squad, squad.zhopa2_target)
 end
 
+local function clear_post_guide_rest(squad, result)
+	if not squad then
+		return
+	end
+	squad.zhopa2_post_guide_rest_pending = nil
+	squad.zhopa2_post_guide_rest_target = nil
+	squad.zhopa2_post_guide_rest_reason = nil
+	squad.zhopa2_post_guide_rest_npc = nil
+	squad.zhopa2_post_guide_rest_marked_tg = nil
+	squad.zhopa2_last_result = result or squad.zhopa2_last_result
+end
+
+local function post_guide_rest_target(squad)
+	local target_id = tonumber(squad and squad.zhopa2_post_guide_rest_target)
+	local smart = target_id and safe_alife_object(target_id) or nil
+	if object_is_smart(smart) and not target_blacklisted_for_squad(squad, target_id) then
+		return smart
+	end
+
+	local current_id = tonumber(squad and squad.smart_id)
+	smart = current_id and safe_alife_object(current_id) or nil
+	if object_is_smart(smart) and not target_blacklisted_for_squad(squad, current_id) then
+		return smart
+	end
+
+	local p = perception()
+	if not p then
+		return nil
+	end
+	local opts = {
+		level_mode = "same",
+		kind = "rest",
+		ignore_population = true,
+		skip_prior = true,
+		safe_rest = true,
+		skip_target_precondition = true,
+	}
+	smart = p.pick_balanced_rest_smart and p.pick_balanced_rest_smart(squad, opts)
+		or p.pick_closest_smart and p.pick_closest_smart(squad, opts)
+		or p.pick_smart and p.pick_smart(squad, opts)
+		or nil
+	smart = final_smart(p, squad, smart, opts)
+	return object_is_smart(smart) and smart or nil
+end
+
+local function apply_post_guide_rest(squad)
+	if not (squad and squad.zhopa2_post_guide_rest_pending == true) then
+		return false
+	end
+	if squad.zhopa2_task then
+		clear_post_guide_rest(squad, "post_guide_rest_skipped_busy")
+		return false
+	end
+
+	local reason = squad.zhopa2_post_guide_rest_reason or "post_guide_rest"
+	local smart = post_guide_rest_target(squad)
+	if smart and type(squad.zhopa2_assign_task) == "function" then
+		local hours = is_monster_squad(squad) and cfg_num("mutant_rest_duration_game_hours", 0.25) or cfg_num("rest_duration_game_hours", 0.25)
+		local ok = squad:zhopa2_assign_task(M.TASK_REST, smart.id, math.max(60, hours * 3600), reason)
+		clear_post_guide_rest(squad, ok and "post_guide_rest_assigned" or "post_guide_rest_failed")
+		return ok == true
+	end
+
+	clear_post_guide_rest(squad, "post_guide_rest_no_smart")
+	return assign_rest(squad, "post_guide_rest_no_smart")
+end
+
 local function build_stalker_explore(squad)
 	local p = perception()
 	if not (cfg_bool("explore_enabled", true) and p) then
@@ -2381,6 +2448,11 @@ function M.update_squad(squad, memory)
 			squad:zhopa2_clear_task("target_blacklisted")
 		end
 		assign_rest(squad, blacklist_reason or "target_blacklisted")
+		update_debug(squad)
+		return true
+	end
+
+	if apply_post_guide_rest(squad) then
 		update_debug(squad)
 		return true
 	end

@@ -188,10 +188,14 @@ local function item_cost(obj_or_section)
 end
 
 local function artifact_valid(artifact_id)
-	artifact_id = tonumber(artifact_id) or artifact_id
+	local numeric_id = tonumber(artifact_id)
+	artifact_id = numeric_id or artifact_id
 	local idx = index_mod()
 	if idx and type(idx.is_virtual_artifact) == "function" and idx.is_virtual_artifact(artifact_id) then
 		return true
+	end
+	if numeric_id and (numeric_id <= 0 or numeric_id == 65535) then
+		return false
 	end
 	local se_artifact = artifact_id and alife_object and alife_object(artifact_id) or nil
 	if se_artifact then
@@ -210,7 +214,10 @@ local function artifact_same_level_as_squad(squad, artifact_id)
 	local idx = index_mod()
 	local artifact_level = idx and idx.artifact_level and idx.artifact_level[artifact_id] or nil
 	if not artifact_level then
-		artifact_level = p.obj_level(alife_object and alife_object(artifact_id) or nil)
+		local numeric_id = tonumber(artifact_id)
+		if numeric_id and numeric_id > 0 and numeric_id ~= 65535 then
+			artifact_level = p.obj_level(alife_object and alife_object(numeric_id) or nil)
+		end
 	end
 	return squad_level ~= nil and artifact_level ~= nil and squad_level == artifact_level, squad_level, artifact_level
 end
@@ -251,19 +258,17 @@ local function object_name(obj)
 	if not obj then
 		return nil
 	end
-	if type(obj.name) == "function" then
-		local ok, name = pcall(obj.name, obj)
-		if ok and name then
-			return name
-		end
-	end
 	return object_section(obj) or object_id(obj)
 end
 
 local function named_id(id)
-	id = tonumber(id) or id
+	local numeric_id = tonumber(id)
+	id = numeric_id or id
 	if not id then
 		return "-"
+	end
+	if numeric_id and (numeric_id <= 0 or numeric_id == 65535) then
+		return string.format("%s:%s", numeric_id < 0 and "virtual" or "-", tostring(id))
 	end
 	local obj = alife_object and alife_object(id) or nil
 	return string.format("%s:%s", tostring(object_name(obj) or "-"), tostring(id))
@@ -332,8 +337,9 @@ local function artifact_object_debug(idx, artifact_id)
 	if not artifact_id then
 		return "artifact id=-"
 	end
-	local se_artifact = alife_object and alife_object(artifact_id) or nil
-	local online = online_object_by_id(artifact_id)
+	local lookup_real = artifact_id > 0 and artifact_id ~= 65535
+	local se_artifact = lookup_real and alife_object and alife_object(artifact_id) or nil
+	local online = lookup_real and online_object_by_id(artifact_id) or nil
 	return string.format(
 		"artifact id=%s section=%s expected_smart=%s zone=%s level=%s reserved_by=%s valid=%s server=%s online=%s parent=%s",
 		tostr(artifact_id),
@@ -464,10 +470,6 @@ local function squad_online_looters(squad, prefer_id)
 	if prefer_id then
 		add_online_looter(list, seen, online_object_by_id(prefer_id))
 	end
-	local commander_id = type(squad.commander_id) == "function" and squad:commander_id() or nil
-	if commander_id then
-		add_online_looter(list, seen, online_object_by_id(commander_id))
-	end
 	for member in squad:squad_members() do
 		add_online_looter(list, seen, squad_member_online_object(member))
 	end
@@ -552,7 +554,7 @@ local function sync_task_artifact_metadata(squad, artifact_id)
 	if not (idx and squad and artifact_id) then
 		return
 	end
-	local live_obj = (alife_object and alife_object(artifact_id)) or online_object_by_id(artifact_id)
+	local live_obj = artifact_id > 0 and artifact_id ~= 65535 and ((alife_object and alife_object(artifact_id)) or online_object_by_id(artifact_id)) or nil
 	local live_section = object_section(live_obj)
 	if live_obj and type(idx.refresh_artifact_entity) == "function" then
 		pcall(idx.refresh_artifact_entity, live_obj)
@@ -733,6 +735,15 @@ local function retarget_missing_artifact_to_current_smart(squad, old_artifact_id
 	sync_task_artifact_metadata(squad, artifact_id)
 	squad.zhopa2_last_result = "artifact_retargeted_missing:" .. tostring(reason or "-")
 	return artifact_id
+end
+
+local function stale_virtual_artifact_id(artifact_id)
+	artifact_id = tonumber(artifact_id)
+	if not (artifact_id and artifact_id < 0) then
+		return false
+	end
+	local idx = index_mod()
+	return not (idx and type(idx.is_virtual_artifact) == "function" and idx.is_virtual_artifact(artifact_id) == true)
 end
 
 local function gather_item_active(npc, artifact_id)
@@ -1073,7 +1084,8 @@ function M.offline_collect(squad, artifact_id, reason)
 		release_artifact_reservation(squad, "artifact_target_blacklisted")
 		return false, "artifact_target_blacklisted"
 	end
-	local se_artifact = artifact_id and alife_object and alife_object(artifact_id) or nil
+	local numeric_id = tonumber(artifact_id)
+	local se_artifact = numeric_id and numeric_id > 0 and numeric_id ~= 65535 and alife_object and alife_object(numeric_id) or nil
 	if not (squad and se_artifact and artifact_valid(artifact_id)) then
 		debug_artifact_error(squad, "artifact_missing", artifact_id, nil, reason or "offline_collect")
 		release_artifact_reservation(squad, "artifact_offline_missing")
@@ -1086,7 +1098,7 @@ function M.offline_collect(squad, artifact_id, reason)
 	end
 
 	local section = object_section(se_artifact)
-	local se_looter = squad_member_server(squad, squad.commander_id and squad:commander_id() or nil)
+	local se_looter = squad_member_server(squad, nil)
 	if not (section and se_looter) then
 		debug_artifact_error(squad, "artifact_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-")))
 		return false, "artifact_no_looter"
@@ -1142,7 +1154,7 @@ function M.offline_collect_virtual(squad, artifact_id, reason)
 	end
 
 	local section = virtual.section
-	local se_looter = squad_member_server(squad, squad.commander_id and squad:commander_id() or nil)
+	local se_looter = squad_member_server(squad, nil)
 	if not (section and se_looter) then
 		debug_artifact_error(squad, "artifact_virtual_no_looter", artifact_id, nil, string.format("section=%s looter=%s", tostr(section), tostr(se_looter and object_id(se_looter) or "-")))
 		return false, "artifact_virtual_no_looter"
@@ -1191,6 +1203,7 @@ function M.try_collect(squad)
 		return true, "artifact_collected"
 	end
 	if not artifact_valid(artifact_id) then
+		local missing_reason = stale_virtual_artifact_id(artifact_id) and "artifact_stale_virtual" or "artifact_missing"
 		if recover_vanilla_artifact_pickup(squad, artifact_id) or squad_has_artifact_cargo(squad, artifact_id) then
 			release_artifact_reservation(squad, "artifact_collected")
 			return true, "artifact_collected"
@@ -1199,15 +1212,15 @@ function M.try_collect(squad)
 			squad.zhopa2_last_result = "artifact_online_wait_inventory"
 			return nil, squad.zhopa2_last_result
 		end
-		local replacement_id = retarget_missing_artifact_to_current_smart(squad, artifact_id, "artifact_missing")
+		local replacement_id = retarget_missing_artifact_to_current_smart(squad, artifact_id, missing_reason)
 		if replacement_id then
 			artifact_id = replacement_id
 		else
 			if squad.online == true then
-				debug_artifact_error(squad, "artifact_missing", artifact_id, nil, "artifact_valid=false")
+				debug_artifact_error(squad, missing_reason, artifact_id, nil, "artifact_valid=false")
 			end
-			release_artifact_reservation(squad, "artifact_missing")
-			return false, "artifact_missing"
+			release_artifact_reservation(squad, missing_reason)
+			return false, missing_reason
 		end
 	end
 	local materialized, materialize_reason

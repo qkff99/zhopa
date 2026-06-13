@@ -47,10 +47,6 @@
 - Added north migration: after the Brain Scorcher shutdown, part of the population can move to northern bases.
 - Story modules are gated by story mode and do not run in freeplay.
 
-### Save Migration
-- Added a legacy save cleanup module for saves that previously used older SISKI/ZHOPA versions.
-- Added initial migration rules for removing old runtime keys that can prevent the new version from starting correctly.
-
 ### Compatibility And QA
 - Tested against vanilla Anomaly and the GAMMA profile.
 - Fixed GAMMA trade conflicts, wrong trader selection, post-service/trade job stalls, and smart job desynchronization.

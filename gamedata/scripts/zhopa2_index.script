@@ -553,12 +553,15 @@ local function squad_npc_count(squad)
 	return ok and (tonumber(count) or 0) or 0
 end
 
-local function squad_commander_id(squad)
-	if not (squad and type(squad.commander_id) == "function") then
-		return nil
+local function squad_cached_npc_count(squad)
+	if not squad then
+		return 0
 	end
-	local ok, id = pcall(squad.commander_id, squad)
-	return ok and id or nil
+	local count = tonumber(squad.zhopa2_cached_npc_count)
+	if count == nil then
+		return 0
+	end
+	return math.max(0, count)
 end
 
 local function is_monster_squad(squad)
@@ -567,13 +570,47 @@ local function is_monster_squad(squad)
 end
 
 local function squad_zhopa2_manageable(squad)
-	if not (squad and squad.id and not squad.disabled and squad_npc_count(squad) > 0 and squad_commander_id(squad)) then
+	if not (squad and squad.id and not squad.disabled and squad_cached_npc_count(squad) > 0) then
 		return false
 	end
-	if type(squad.zhopa2_can_manage) ~= "function" then
+	if squad.player_id == "actor" then
 		return false
 	end
-	return squad:zhopa2_can_manage() == true
+	if get_object_story_id and get_object_story_id(squad.id) then
+		return false
+	end
+	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad.id] then
+		return false
+	end
+	if squad.random_targets or squad.action_condlist then
+		return false
+	end
+	if squad.scripted_target and not (squad.zhopa2_task and squad.zhopa2_target and tostring(squad.scripted_target) == tostring(squad.zhopa2_target)) then
+		return false
+	end
+	return true
+end
+
+local function squad_zhopa2_manageable_soft(squad)
+	if not (squad and squad.id and squad.disabled ~= true and squad_cached_npc_count(squad) > 0) then
+		return false
+	end
+	if squad.player_id == "actor" then
+		return false
+	end
+	if get_object_story_id and get_object_story_id(squad.id) then
+		return false
+	end
+	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad.id] then
+		return false
+	end
+	if squad.random_targets or squad.action_condlist then
+		return false
+	end
+	if squad.scripted_target and not (squad.zhopa2_task and squad.zhopa2_target and tostring(squad.scripted_target) == tostring(squad.zhopa2_target)) then
+		return false
+	end
+	return true
 end
 
 local function squad_targets_smart_id(squad, smart_id)
@@ -590,7 +627,11 @@ local function squad_targets_smart_id(squad, smart_id)
 end
 
 local function squad_base_camping_at_smart(squad, smart_id)
-	return squad_zhopa2_manageable(squad)
+	return squad
+		and squad.id
+		and squad.zhopa2_managed == true
+		and squad.disabled ~= true
+		and squad_cached_npc_count(squad) > 0
 		and squad.zhopa2_task == "BASE_CAMPING"
 		and squad_targets_smart_id(squad, smart_id)
 end
@@ -954,7 +995,7 @@ local function base_camping_target_has_live_squad(smart_id)
 		if squad
 			and squad.zhopa2_task == "BASE_CAMPING"
 			and tonumber(squad.zhopa2_target) == tonumber(smart_id)
-			and squad_npc_count(squad) > 0
+			and squad_cached_npc_count(squad) > 0
 			and not is_monster_squad(squad)
 		then
 			has_live = true
@@ -2083,7 +2124,7 @@ function M.update_base_ownership(smart)
 		for squad_id in pairs(squad_bucket) do
 			local squad = alife_object(squad_id)
 			local community = object_community(squad)
-			local count = squad_npc_count(squad)
+			local count = squad_cached_npc_count(squad)
 			if community and count > 0 then
 				add_count(counts, community, count)
 				total = total + count
@@ -2095,14 +2136,18 @@ function M.update_base_ownership(smart)
 		end
 	end
 
-	local level_name = obj_level(smart)
-	if level_name then
-		local squads = M.squads_on_levels({ level_name })
-		for i = 1, #squads do
-			local squad = squads[i]
-			if squad_base_camping_at_smart(squad, smart.id) and not seen_zhopa2[squad.id] then
-				seen_zhopa2[squad.id] = true
-				zhopa2_count = zhopa2_count + squad_npc_count(squad)
+	local base_bucket = M.base_camping_targets[smart.id]
+	if base_bucket then
+		for squad_id in pairs(base_bucket) do
+			if not seen_zhopa2[squad_id] then
+				local squad = alife_object(squad_id)
+				if squad_base_camping_at_smart(squad, smart.id) then
+					seen_zhopa2[squad_id] = true
+					zhopa2_count = zhopa2_count + squad_cached_npc_count(squad)
+				else
+					base_bucket[squad_id] = nil
+					M.base_camping_squad_target[squad_id] = nil
+				end
 			end
 		end
 	end
@@ -2158,7 +2203,7 @@ end
 local function current_base_pull_valid(smart)
 	local squad_id = smart and smart.id and M.base_pull_squad[smart.id] or nil
 	local squad = squad_id and alife_object(squad_id) or nil
-	if squad and squad_npc_count(squad) > 0 and squad.zhopa2_task == "BASE_CAMPING" and tonumber(squad.zhopa2_target) == tonumber(smart.id) then
+	if squad and squad_cached_npc_count(squad) > 0 and squad.zhopa2_task == "BASE_CAMPING" and tonumber(squad.zhopa2_target) == tonumber(smart.id) then
 		return true
 	end
 	if smart and smart.id then
@@ -2202,7 +2247,7 @@ function M.try_empty_base_pull(smart)
 	for i = 1, #candidates do
 		local squad = candidates[i]
 		local dist = distance_to_sqr(squad, smart)
-		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
+		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable_soft(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
 			local priority = 0
 			local reason = "base_camping_empty_base"
 			local monster = is_monster_squad(squad)

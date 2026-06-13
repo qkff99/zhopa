@@ -164,12 +164,12 @@ local function squad_npc_count(squad)
 	return ok and (tonumber(count) or 0) or 0
 end
 
-local function squad_commander_id(squad)
-	if not (squad and type(squad.commander_id) == "function") then
-		return nil
+local function squad_member_count_soft(squad)
+	local cached = tonumber(squad and squad.zhopa2_cached_npc_count)
+	if cached ~= nil then
+		return math.max(0, cached)
 	end
-	local ok, id = pcall(squad.commander_id, squad)
-	return ok and id or nil
+	return squad_npc_count(squad)
 end
 
 local function obj_level(obj)
@@ -195,6 +195,86 @@ local function obj_level(obj)
 		return nil
 	end
 	return sim:level_name(gg:vertex(obj.m_game_vertex_id):level_id())
+end
+
+local function squad_section_name(squad)
+	local section = squad and squad.zhopa2_section_name
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	section = squad and squad.section
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	section = squad and squad.section_name
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	return nil
+end
+
+local function service_squad_soft(squad)
+	if not squad then
+		return false
+	end
+	if squad.zhopa2_service_filler == true then
+		return true
+	end
+	local section = squad_section_name(squad)
+	return type(section) == "string" and string.find(section, "_sim_squad_service_", 1, true) ~= nil
+end
+
+local function scripted_target_manageable_soft(squad)
+	if not squad or not squad.scripted_target then
+		return true
+	end
+	if type(squad.zhopa2_is_managed_scripted_target) ~= "function" then
+		return false
+	end
+	local ok, managed = pcall(squad.zhopa2_is_managed_scripted_target, squad)
+	return ok and managed == true
+end
+
+local function global_level_blacklisted_soft(squad)
+	if not squad then
+		return false
+	end
+	if type(squad.zhopa2_global_level_blacklisted) == "function" then
+		local ok, blocked = pcall(squad.zhopa2_global_level_blacklisted, squad)
+		return ok and blocked == true
+	end
+	local cfg = cfg_mod()
+	return cfg
+		and type(cfg.is_global_level_blacklisted) == "function"
+		and cfg.is_global_level_blacklisted(obj_level(squad)) == true
+end
+
+local function responder_manageable_soft(squad)
+	if not (squad and squad.id and squad.disabled ~= true) then
+		return false
+	end
+	if service_squad_soft(squad) then
+		return false
+	end
+	if squad_member_count_soft(squad) <= 0 then
+		return false
+	end
+	if squad.player_id == "actor" then
+		return false
+	end
+	if get_object_story_id and get_object_story_id(squad.id) then
+		return false
+	end
+	if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad.id] then
+		return false
+	end
+	if global_level_blacklisted_soft(squad) then
+		return false
+	end
+	if squad.random_targets or squad.action_condlist then
+		return false
+	end
+	return scripted_target_manageable_soft(squad)
 end
 
 local function position_distance(a, b)
@@ -291,10 +371,7 @@ local function responder_ok(candidate, victim_squad, offender_squad)
 	if candidate.disabled or candidate.player_id ~= victim_squad.player_id then
 		return false
 	end
-	if squad_npc_count(candidate) <= 0 or not squad_commander_id(candidate) then
-		return false
-	end
-	if type(candidate.zhopa2_can_manage) == "function" and not candidate:zhopa2_can_manage() then
+	if not responder_manageable_soft(candidate) then
 		return false
 	end
 	return true
@@ -364,8 +441,7 @@ local function actor_revenge_squad_active(squad)
 	return squad
 		and squad.zhopa2_task == TASK_REVENGE
 		and tonumber(squad.zhopa2_target) == ACTOR_TARGET_ID
-		and squad_npc_count(squad) > 0
-		and squad_commander_id(squad) ~= nil
+		and squad_member_count_soft(squad) > 0
 end
 
 local function active_actor_revenge_exists()
@@ -472,10 +548,7 @@ local function restore_paused_actor_revenge_after_sleep()
 	sleep_paused_actor_revenge_touched_night = false
 
 	local squad = alife_object and alife_object(squad_id) or nil
-	if not (squad and squad_npc_count(squad) > 0 and squad_commander_id(squad)) then
-		return false
-	end
-	if type(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
+	if not (squad and responder_manageable_soft(squad)) then
 		return false
 	end
 	if squad.zhopa2_task == TASK_BASE_CAMPING then
