@@ -76,6 +76,25 @@ simulation_controller = mar_smart_terrain_base, agr_smart_terrain_1_6, val_smart
 simulation_chimera = mar_smart_terrain_base, val_smart_terrain_7_3, val_smart_terrain_7_4, ds2_domik_st, bar_visitors, bar_dolg_general, pri_a16, pri_a18_smart_terrain, jup_a6, jup_b41, zat_b40_smart_terrain, zat_stalker_base_smart, red_smart_terrain_3_2, esc_smart_terrain_2_12, gar_smart_terrain_3_5, gar_smart_terrain_6_3
 simulation_gigant =  mar_smart_terrain_base, val_smart_terrain_7_3, val_smart_terrain_7_4, ds2_domik_st, bar_visitors, bar_dolg_general, pri_a16, pri_a18_smart_terrain, jup_a6, jup_b41, zat_b40_smart_terrain, zat_stalker_base_smart, red_smart_terrain_3_2, esc_smart_terrain_2_12, gar_smart_terrain_3_5, gar_smart_terrain_6_3
 
+[zhopa2_trade_smart_blacklists]
+; =============================================
+; Trade-only smart blacklist.
+; level = smart_a, smart_b   | level = all
+; * = smart_a, smart_b       | global = smart_a, smart_b
+; Use this for broken trader smarts without excluding the smart from
+; movement, rest, base camping, artefact, or hunt tasks.
+; =============================================
+l05_bar = bar_dolg_general, bar_dolg_bunker
+
+[zhopa2_trade_provider_section_blacklists]
+; =============================================
+; Trade-only provider NPC section blacklist.
+; section = true|1|yes|on
+; Use this for broken trader/bar NPC sections. Medics, technicians,
+; guides, and faction leaders are not accepted as ZHOPA2 auto-trade
+; providers even without being listed here.
+; =============================================
+
 
 
 

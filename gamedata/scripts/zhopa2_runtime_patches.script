@@ -1768,9 +1768,30 @@ local function read_job_string(job_or_section, key, smart)
 	return ini_string(smart and smart.ltx, section, key)
 end
 
+function M.trade_provider_section_blacklisted(section)
+	local cfg = safe_require("zhopa2_cfg")
+	if not (cfg and type(cfg.is_trade_provider_section_blacklisted) == "function") then
+		return false
+	end
+	local ok, blocked = pcall(cfg.is_trade_provider_section_blacklisted, section)
+	return ok and blocked == true
+end
+
+function M.trade_smart_blacklisted(smart)
+	local cfg = safe_require("zhopa2_cfg")
+	if not (cfg and type(cfg.is_trade_smart_blacklisted) == "function") then
+		return false
+	end
+	local ok, blocked = pcall(cfg.is_trade_smart_blacklisted, smart, obj_level(smart))
+	return ok and blocked == true
+end
+
 local function trade_job_flags(job, smart)
 	local out = {}
 	local section = type(job) == "table" and job.section or job
+	if M.trade_provider_section_blacklisted(section) then
+		return out
+	end
 	local sec_l = lower(section) or ""
 	local suitable_l = lower(read_job_string(job, "suitable", smart))
 	local level_spot_l = lower(read_job_string(job, "level_spot", smart))
@@ -1790,7 +1811,6 @@ local function trade_job_flags(job, smart)
 		out.provider = true
 		out.barman = true
 	elseif contains(suitable_l, "check_npc_medic") or level_spot_l == "medic" or (has_trade_file and contains(sec_l, "medic")) then
-		out.provider = true
 		out.medic = true
 	end
 	return out
@@ -1922,6 +1942,9 @@ function board_methods.zhopa2_register_trade_smart(self, smart)
 	end
 	if type(self.zhopa2_unregister_trade_smart) == "function" then
 		self:zhopa2_unregister_trade_smart(smart)
+	end
+	if M.trade_smart_blacklisted(smart) then
+		return false
 	end
 	local level_name = obj_level(smart)
 	if not level_name then
@@ -2222,6 +2245,18 @@ local function debug_service_job(smart, npc_info, job, source)
 	)
 end
 
+function M.npc_storage_from_info(npc_info)
+	local npc_id = npc_info and npc_info.se_obj and npc_info.se_obj.id
+	return npc_id and db and db.storage and db.storage[npc_id] or nil
+end
+
+function M.has_targeted_gather_state(npc_info)
+	local root = M.npc_storage_from_info(npc_info)
+	local gather = root and root.gather_items or nil
+	local item_id = gather and tonumber(gather.zhopa2_targeted_item_id) or nil
+	return item_id ~= nil and item_id ~= 0 and item_id ~= 65535 and root.object ~= nil
+end
+
 local function live_targeted_gather_id(npc_info)
 	if not (npc_info and npc_info.se_obj and db and db.storage) then
 		return nil
@@ -2388,6 +2423,30 @@ local function forced_trade_blocks_job(smart, npc_info)
 	return true
 end
 
+function M.safe_section_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.section_name) == "function" then
+		local ok, section = pcall(obj.section_name, obj)
+		return ok and section or nil
+	end
+	return nil
+end
+
+function M.service_job_check_relevant(npc_info)
+	if not (npc_info and npc_info.stype == 0 and npc_info.se_obj) then
+		return false
+	end
+	local group_id = tonumber(npc_info.se_obj.group_id)
+	local squad = group_id and group_id > 0 and group_id < 65535 and server_object(group_id) or nil
+	if squad and (squad.zhopa2_service_filler == true or type(squad.zhopa2_service_role) == "string") then
+		return true
+	end
+	local section = squad and squad.zhopa2_section_name or M.safe_section_name(npc_info.se_obj)
+	return type(section) == "string" and string.find(section, "_sim_squad_service_", 1, true) ~= nil
+end
+
 local function try_service_fallback_job(smart, npc_info)
 	if not (smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then
 		return false
@@ -2510,17 +2569,19 @@ function M.patch_smart_terrain()
 				zhopa2_debug_printf("%s no npc_info!", object_debug_name(self))
 				return original(self, npc_info, ...)
 			end
-			if targeted_gather_blocks_job(self, npc_info) then
+			if M.has_targeted_gather_state(npc_info) and targeted_gather_blocks_job(self, npc_info) then
 				return
 			end
-			if forced_trade_blocks_job(self, npc_info) then
+			local st = M.npc_storage_from_info(npc_info)
+			if st and st.zhopa2_trade_force_job_section and forced_trade_blocks_job(self, npc_info) then
 				return
 			end
-			if ensure_service_job(self, npc_info) then
+			local service_relevant = M.service_job_check_relevant(npc_info)
+			if service_relevant and ensure_service_job(self, npc_info) then
 				return true
 			end
 			local result = { original(self, npc_info, ...) }
-			if ensure_service_job(self, npc_info) then
+			if service_relevant and ensure_service_job(self, npc_info) then
 				return true
 			end
 			return unpack(result)
@@ -3111,6 +3172,16 @@ end
 
 local function zhopa2_loot_mod()
 	return safe_require("zhopa2_loot")
+end
+
+function M.zhopa2_has_recent_item_events()
+	local mod = zhopa2_loot_mod()
+	return mod and type(mod.has_recent_item_events) == "function" and mod.has_recent_item_events() == true
+end
+
+function M.zhopa2_has_targeted_item_requests()
+	local mod = zhopa2_loot_mod()
+	return mod and type(mod.has_targeted_item_requests) == "function" and mod.has_targeted_item_requests() == true
 end
 
 local function zhopa2_loot_active(npc)
@@ -3850,6 +3921,274 @@ local function zhopa2_reset_gather_state(st)
 	zhopa2_reset_artifact_approach(st)
 end
 
+function M.zhopa2_mark_ground_gather_release(npc, item_id, reason)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false
+	end
+	M.ground_gather_release_pending = M.ground_gather_release_pending or {}
+	M.ground_gather_release_pending[npc_id] = {
+		item_id = tonumber(item_id),
+		reason = reason or "ground_item_loot",
+		due = (time_global and time_global() or 0) + 100,
+		expires = (time_global and time_global() or 0) + 15000,
+	}
+	return true
+end
+
+function M.zhopa2_peek_ground_gather_release(npc)
+	local npc_id = object_id(npc)
+	local pending = M.ground_gather_release_pending
+	if not (npc_id and type(pending) == "table") then
+		return nil
+	end
+	return pending[npc_id]
+end
+
+function M.zhopa2_take_ground_gather_release(npc)
+	local npc_id = object_id(npc)
+	local pending = M.ground_gather_release_pending
+	if not (npc_id and type(pending) == "table") then
+		return nil
+	end
+	local entry = pending[npc_id]
+	pending[npc_id] = nil
+	return entry
+end
+
+function M.zhopa2_ground_gather_release_ready(npc, st, entry)
+	if not entry then
+		return false
+	end
+	local now = time_global and time_global() or 0
+	if now > 0 and tonumber(entry.due or 0) > now then
+		return false
+	end
+	local item_id = tonumber(entry.item_id)
+	local selected_id = st and tonumber(st.selected_id) or nil
+	if item_id and selected_id and selected_id ~= item_id then
+		return true
+	end
+	if not item_id then
+		return selected_id == nil
+	end
+	local se_itm = alife_object and alife_object(item_id) or nil
+	return selected_id == nil or not se_itm or tonumber(se_itm.parent_id) ~= 65535
+end
+
+function M.zhopa2_watch_ground_gather_release()
+	local pending = M.ground_gather_release_pending
+	if type(pending) ~= "table" or next(pending) == nil then
+		return
+	end
+	local now = time_global and time_global() or 0
+	for npc_id, entry in pairs(pending) do
+		local npc = M.zhopa2_online_object_by_id(npc_id)
+		local alive = npc ~= nil
+		if alive and type(npc.alive) == "function" then
+			local ok_alive, is_alive = pcall(npc.alive, npc)
+			alive = ok_alive and is_alive == true
+		end
+		if not alive then
+			pending[npc_id] = nil
+		elseif now > 0 and tonumber(entry.expires or 0) > 0 and now > tonumber(entry.expires) then
+			pending[npc_id] = nil
+		else
+			local st = db and db.storage and db.storage[npc_id] and db.storage[npc_id].gather_items or nil
+			if M.zhopa2_ground_gather_release_ready(npc, st, entry) then
+				pending[npc_id] = nil
+				M.zhopa2_release_ground_gather_npc(npc, entry.reason)
+			end
+		end
+	end
+end
+
+function M.zhopa2_smart_for_online_npc(npc)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return nil, nil
+	end
+	if xr_gulag and type(xr_gulag.get_npc_smart) == "function" then
+		local ok, smart = pcall(xr_gulag.get_npc_smart, npc)
+		if ok and smart and smart.npc_info and smart.npc_info[npc_id] then
+			return smart, nil
+		end
+	end
+	local se_obj = server_object(npc_id)
+	local group_id = tonumber(se_obj and se_obj.group_id)
+	local squad = group_id and group_id > 0 and group_id < 65535 and server_object(group_id) or nil
+	local smart_id = tonumber(squad and squad.smart_id)
+		or tonumber(squad and squad.current_target_id)
+		or tonumber(squad and squad.assigned_target_id)
+	local smart = smart_id and server_object(smart_id) or nil
+	return smart, squad
+end
+
+function M.zhopa2_clear_pickup_state(npc)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false
+	end
+	pcall(function()
+		npc:clear_animations()
+	end)
+	local root = db and db.storage and db.storage[npc_id] or nil
+	local sm = root and root.state_mgr or nil
+	if sm then
+		pcall(sm.set_state, sm, "idle", nil, nil, nil, { fast_set = true })
+		if sm.animation then
+			pcall(sm.animation.set_state, sm.animation, nil, true)
+			pcall(sm.animation.set_control, sm.animation)
+		end
+	else
+		pcall(function()
+			if state_mgr and state_mgr.set_state then
+				state_mgr.set_state(npc, "idle", nil, nil, nil, { fast_set = true })
+			end
+		end)
+	end
+	pcall(function()
+		npc:set_desired_position()
+	end)
+	pcall(function()
+		npc:set_desired_direction()
+	end)
+	pcall(function()
+		if look and look.direction and type(npc.direction) == "function" then
+			npc:set_sight(look.direction, npc:direction(), 0)
+		end
+	end)
+	pcall(function()
+		local bw = type(npc.best_weapon) == "function" and npc:best_weapon() or nil
+		if bw and object and object.idle then
+			npc:set_item(object.idle, bw)
+		end
+	end)
+	return true
+end
+
+function M.zhopa2_refresh_meet_after_pickup(npc)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false, false
+	end
+	local root = db and db.storage and db.storage[npc_id] or nil
+	local meet = root and root.meet or nil
+	local manager = meet and meet.meet_manager or nil
+	if not manager then
+		return false, false
+	end
+	pcall(function()
+		manager.__stimer = nil
+		manager.use = nil
+	end)
+	if type(manager.set_start_distance) == "function" then
+		pcall(manager.set_start_distance, manager)
+	end
+	if type(manager.update) == "function" then
+		pcall(manager.update, manager)
+	end
+	local xr_meet_mod = safe_require("xr_meet")
+	if xr_meet_mod and type(xr_meet_mod.process_npc_usability) == "function" then
+		pcall(xr_meet_mod.process_npc_usability, npc)
+	end
+	local talk_enabled = false
+	pcall(function()
+		talk_enabled = npc:is_talk_enabled() == true
+	end)
+	return true, talk_enabled
+end
+
+function M.zhopa2_mark_ground_gather_meet_refresh(npc)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false
+	end
+	local now = time_global and time_global() or 0
+	M.ground_gather_meet_refresh_pending = M.ground_gather_meet_refresh_pending or {}
+	M.ground_gather_meet_refresh_pending[npc_id] = {
+		expires = now > 0 and (now + 10000) or 0,
+		next_check = 0,
+		attempts = 0,
+	}
+	M.zhopa2_refresh_meet_after_pickup(npc)
+	return true
+end
+
+function M.zhopa2_watch_ground_gather_meet_refresh()
+	local pending = M.ground_gather_meet_refresh_pending
+	if type(pending) ~= "table" or next(pending) == nil then
+		return
+	end
+	local now = time_global and time_global() or 0
+	for npc_id, entry in pairs(pending) do
+		local npc = M.zhopa2_online_object_by_id(npc_id)
+		local alive = npc ~= nil
+		if alive and type(npc.alive) == "function" then
+			local ok_alive, is_alive = pcall(npc.alive, npc)
+			alive = ok_alive and is_alive == true
+		end
+		if not alive then
+			pending[npc_id] = nil
+		elseif now > 0 and tonumber(entry.expires or 0) > 0 and now > tonumber(entry.expires) then
+			pending[npc_id] = nil
+		elseif now <= 0 or now >= tonumber(entry.next_check or 0) then
+			entry.next_check = now > 0 and (now + 500) or 0
+			entry.attempts = (tonumber(entry.attempts) or 0) + 1
+			local refreshed, talk_enabled = M.zhopa2_refresh_meet_after_pickup(npc)
+			if not refreshed or talk_enabled or entry.attempts >= 20 then
+				pending[npc_id] = nil
+			end
+		end
+	end
+end
+
+function M.zhopa2_release_ground_gather_npc(npc, reason)
+	local npc_id = object_id(npc)
+	if not npc_id then
+		return false, "missing_npc"
+	end
+	local st = db and db.storage and db.storage[npc_id] or nil
+	local gather = st and st.gather_items or nil
+	if gather then
+		zhopa2_reset_gather_state(gather)
+	end
+	M.zhopa2_clear_pickup_state(npc)
+	M.zhopa2_mark_ground_gather_meet_refresh(npc)
+	reset_beh_path_index(npc)
+	if st and type(st.beh) == "table" then
+		st.beh.desired_target = nil
+	end
+	local smart = M.zhopa2_smart_for_online_npc(npc)
+	local info = smart and smart.npc_info and smart.npc_info[npc_id] or nil
+	if not info then
+		return false, "missing_smart_info"
+	end
+	if type(smart.clear_job) == "function" then
+		pcall(smart.clear_job, smart, npc_id)
+	end
+	if type(smart.npc_by_job_section) == "table" then
+		for section, owner_id in pairs(smart.npc_by_job_section) do
+			if tonumber(owner_id) == tonumber(npc_id) then
+				smart.npc_by_job_section[section] = nil
+			end
+		end
+	end
+	if db and db.offline_objects and db.offline_objects[npc_id] and type(empty_table) == "function" then
+		empty_table(db.offline_objects[npc_id])
+	end
+	info.job = nil
+	info.begin_job = false
+	info.need_job = "nil"
+	info.current_index = 1
+	if type(smart.select_npc_job) == "function" then
+		local ok, err = pcall(smart.select_npc_job, smart, info, true)
+		M.zhopa2_mark_ground_gather_meet_refresh(npc)
+		return ok == true, ok and (reason or "ground_gather_release") or err
+	end
+	return true, reason or "ground_gather_release"
+end
+
 local function zhopa2_item_reservation_owner_impl(item_id)
 	local tonum = tonumber
 	local owner_id = zhopa2_item_reserved_by(item_id)
@@ -3977,6 +4316,10 @@ function M.zhopa2_try_force_online_gather_item(npc, st)
 	if not (npc and st and zhopa2_loot_active(npc) and level and type(level.object_by_id) == "function" and alife_object) then
 		return false
 	end
+	local item_ids = zhopa2_event_item_ids()
+	if not (item_ids and #item_ids > 0) then
+		return false
+	end
 	local best_id = nil
 	local best_dist = nil
 	local seen = {}
@@ -4010,11 +4353,8 @@ function M.zhopa2_try_force_online_gather_item(npc, st)
 			best_dist = dist
 		end
 	end
-	local item_ids = zhopa2_event_item_ids()
-	if item_ids then
-		for i = 1, #item_ids do
-			consider(item_ids[i])
-		end
+	for i = 1, #item_ids do
+		consider(item_ids[i])
 	end
 	if type(npc.memory_visible_objects) == "function" then
 		for o in npc:memory_visible_objects() do
@@ -4149,6 +4489,10 @@ local function zhopa2_gather_item_replacement(original, force_selected)
 		end
 		local cls = zhopa2_item_clsid(se_itm or itm)
 		local is_artifact = IsArtefact and IsArtefact(nil, cls) == true
+		local release_after_finalize = not zhopa2_was_targeted
+		if release_after_finalize then
+			M.zhopa2_mark_ground_gather_release(npc, selected_id, is_artifact and "ground_artefact_loot" or "ground_item_loot")
+		end
 		if is_artifact
 			and zhopa2_was_targeted
 			and force_pickup ~= true
@@ -4190,6 +4534,9 @@ local function zhopa2_gather_item_replacement(original, force_selected)
 			end
 		elseif IsWeapon and IsWeapon(itm) and alife_clone_weapon then
 			zhopa2_record_loot(npc, itm, "ground_weapon_loot")
+			if release_after_finalize then
+				M.zhopa2_mark_ground_gather_release(npc, selected_id, "ground_weapon_loot")
+			end
 			alife_clone_weapon(se_itm, nil, id)
 			zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 			return
@@ -4215,8 +4562,14 @@ local function patch_gather_classes(mod)
 				local tonum = tonumber
 				local npc = self.object
 				local st = self.st
-				local active = zhopa2_loot_active(npc)
 				local selected_id = st and tonum(st.selected_id) or nil
+				local selected_targeted = st and tonum(st.zhopa2_targeted_item_id) or nil
+				local has_targeted_requests = selected_targeted ~= nil or M.zhopa2_has_targeted_item_requests()
+				local has_item_events = M.zhopa2_has_recent_item_events()
+				if not (selected_targeted or has_targeted_requests or has_item_events) then
+					return original(self, ...)
+				end
+				local active = has_item_events and zhopa2_loot_active(npc) or false
 				if selected_id then
 					if zhopa2_item_reserved_for_other(npc, selected_id) then
 						local items = gather_items_table()
@@ -4235,7 +4588,7 @@ local function patch_gather_classes(mod)
 					st.selected_id = nil
 					zhopa2_reset_artifact_approach(st)
 				end
-				local targeted_ids = zhopa2_targeted_item_ids(npc)
+				local targeted_ids = has_targeted_requests and zhopa2_targeted_item_ids(npc) or nil
 				local has_targeted_request = false
 				if targeted_ids then
 					for i = 1, #targeted_ids do
@@ -4302,8 +4655,14 @@ local function patch_gather_classes(mod)
 		M.patch_method(eva, "evaluate", PATCH_ID .. "_gather_eval", function(original)
 			return function(self, ...)
 				local npc = self.object
-				local targeted_ids = zhopa2_targeted_item_ids(npc)
-				local active = zhopa2_loot_active(npc)
+				local st = self.st
+				local has_targeted_requests = (st and st.zhopa2_targeted_item_id ~= nil) or M.zhopa2_has_targeted_item_requests()
+				local has_item_events = M.zhopa2_has_recent_item_events()
+				if not (has_targeted_requests or has_item_events) then
+					return original(self, ...)
+				end
+				local targeted_ids = has_targeted_requests and zhopa2_targeted_item_ids(npc) or nil
+				local active = (not targeted_ids and has_item_events) and zhopa2_loot_active(npc) or false
 				if targeted_ids or active then
 					if npc:alive() ~= true or IsWounded(npc) then
 						return false
@@ -4345,6 +4704,12 @@ local function patch_gather_classes(mod)
 				local tostr = tostring
 				local st = self.st
 				local npc = self.object
+				local release = M.zhopa2_peek_ground_gather_release(npc)
+				if release and M.zhopa2_ground_gather_release_ready(npc, st, release) then
+					M.zhopa2_take_ground_gather_release(npc)
+					M.zhopa2_release_ground_gather_npc(npc, release.reason)
+					return
+				end
 				local item_id = st and tonumber(st.selected_id) or nil
 				local itm = item_id and level and level.object_by_id(item_id)
 				local se_itm = item_id and alife_object and alife_object(item_id)
@@ -4474,7 +4839,12 @@ local function patch_gather_classes(mod)
 					zhopa2_reset_gather_state(st)
 					zhopa2_restore_active_scheme_after_targeted_gather(self.object, st)
 				end
-				return original(self, ...)
+				local result = { original(self, ...) }
+				local release = M.zhopa2_take_ground_gather_release(self.object)
+				if release then
+					M.zhopa2_release_ground_gather_npc(self.object, release.reason)
+				end
+				return unpack(result)
 			end
 		end)
 	end
@@ -5068,6 +5438,8 @@ function M.ensure_all(reason)
 end
 
 function M._on_game_load()
+	M.ground_gather_release_pending = {}
+	M.ground_gather_meet_refresh_pending = {}
 	M.ensure_all("on_game_load")
 	M.zhopa2_sync_existing_anomaly_zones("on_game_load")
 end
@@ -5080,6 +5452,11 @@ function M._actor_on_first_update()
 	end
 	M.ensure_all("actor_on_first_update")
 	M.zhopa2_sync_existing_anomaly_zones("actor_on_first_update")
+end
+
+function M._actor_on_update()
+	M.zhopa2_watch_ground_gather_release()
+	M.zhopa2_watch_ground_gather_meet_refresh()
 end
 
 function M._runtime_recheck_due(reason)
@@ -5124,9 +5501,11 @@ function M.on_game_start()
 		if UnregisterScriptCallback then
 			pcall(UnregisterScriptCallback, "on_game_load", M._on_game_load)
 			pcall(UnregisterScriptCallback, "actor_on_first_update", M._actor_on_first_update)
+			pcall(UnregisterScriptCallback, "actor_on_update", M._actor_on_update)
 		end
 		RegisterScriptCallback("on_game_load", M._on_game_load)
 		RegisterScriptCallback("actor_on_first_update", M._actor_on_first_update)
+		RegisterScriptCallback("actor_on_update", M._actor_on_update)
 		runtime_callbacks_registered = true
 		runtime_mark_context()
 	end

@@ -51,6 +51,7 @@ local SMART_TRADE_PROVIDER_CACHE = {}
 local SMART_TRADE_CUSTOMER_CACHE = {}
 local SMART_TRADE_QUEUE = {}
 local trade_path = {}
+trade_path.session_banned_npcs = {}
 trade_path.offline_profile_cache = {}
 trade_path.offline_profile_cleanup_at = 0
 
@@ -120,6 +121,30 @@ local function cfg_bool(key, default)
 		return cfg.get_bool(key, default) == true
 	end
 	return default == true
+end
+
+function trade_path.trade_smart_blacklisted(smart)
+	local cfg = cfg_mod()
+	if not (cfg and type(cfg.is_trade_smart_blacklisted) == "function") then
+		return false
+	end
+	local level_name = nil
+	local p = M.perception_mod()
+	if p and type(p.obj_level) == "function" then
+		local ok, value = pcall(p.obj_level, smart)
+		level_name = ok and value or nil
+	end
+	local ok, blocked = pcall(cfg.is_trade_smart_blacklisted, smart, level_name)
+	return ok and blocked == true
+end
+
+function trade_path.trade_provider_section_blacklisted(section)
+	local cfg = cfg_mod()
+	if not (cfg and type(cfg.is_trade_provider_section_blacklisted) == "function") then
+		return false
+	end
+	local ok, blocked = pcall(cfg.is_trade_provider_section_blacklisted, section)
+	return ok and blocked == true
 end
 
 local function debug_print_enabled()
@@ -937,18 +962,24 @@ local function classify_provider_job_role(job_or_section, smart)
 	end
 
 	local role = nil
-	if contains_plain(suitable_l, "check_npc_trader") or contains_plain(suitable_l, "check_npc_barman") then
+	if contains_plain(suitable_l, "check_npc_trader") then
 		role = "trader"
+	elseif contains_plain(suitable_l, "check_npc_barman") then
+		role = "barman"
 	elseif contains_plain(suitable_l, "check_npc_medic") then
-		role = "trader"
+		role = "medic"
 	elseif contains_plain(suitable_l, "check_npc_mechanic") then
 		role = "tech"
 	end
 
 	if not role then
 		local level_spot = slower(read_job_ini_string(job_or_section, "level_spot", smart))
-		if level_spot == "trader" or level_spot == "barman" or level_spot == "medic" then
+		if level_spot == "trader" then
 			role = "trader"
+		elseif level_spot == "barman" then
+			role = "barman"
+		elseif level_spot == "medic" then
+			role = "medic"
 		elseif level_spot == "mechanic" then
 			role = "tech"
 		end
@@ -957,7 +988,11 @@ local function classify_provider_job_role(job_or_section, smart)
 	if not role and type(read_job_ini_string(job_or_section, "trade", smart)) == "string" then
 		if contains_plain(sec_l, "mechanic") or contains_plain(sec_l, "_tech") then
 			role = "tech"
-		elseif contains_plain(sec_l, "trader") or contains_plain(sec_l, "barman") or contains_plain(sec_l, "medic") then
+		elseif contains_plain(sec_l, "medic") then
+			role = "medic"
+		elseif contains_plain(sec_l, "barman") then
+			role = "barman"
+		elseif contains_plain(sec_l, "trader") then
 			role = "trader"
 		end
 	end
@@ -965,13 +1000,29 @@ local function classify_provider_job_role(job_or_section, smart)
 	if not role then
 		if contains_plain(sec_l, "mechanic") or contains_plain(sec_l, "_tech") then
 			role = "tech"
-		elseif contains_plain(sec_l, "trader") or contains_plain(sec_l, "barman") or contains_plain(sec_l, "medic") then
+		elseif contains_plain(sec_l, "medic") then
+			role = "medic"
+		elseif contains_plain(sec_l, "barman") then
+			role = "barman"
+		elseif contains_plain(sec_l, "trader") then
 			role = "trader"
 		end
 	end
 
 	JOB_ROLE_CACHE[section] = role or C.ROLE_NONE
 	return role
+end
+
+function trade_path.role_is_auto_trade_provider(role)
+	return role == "trader" or role == "barman"
+end
+
+function trade_path.job_is_auto_trade_provider(job_or_section, smart)
+	local section = type(job_or_section) == "table" and job_or_section.section or job_or_section
+	if trade_path.trade_provider_section_blacklisted(section) then
+		return false
+	end
+	return trade_path.role_is_auto_trade_provider(classify_provider_job_role(job_or_section, smart))
 end
 
 local function resolve_npc_provider_role(npc, smart, npc_id)
@@ -1042,21 +1093,30 @@ local function npc_is_trade_provider(npc, smart)
 			return false
 		end
 	end
-	local community = type(npc.character_community) == "function" and npc:character_community() or nil
-	if community == "trader" or community == "barman" or community == "medic" then
-		return true
-	end
 	local section = object_section(npc)
+	if trade_path.trade_provider_section_blacklisted(section) then
+		return false
+	end
+	local role = resolve_npc_provider_role(npc, smart, npc_id)
+	if role then
+		return trade_path.role_is_auto_trade_provider(role)
+	end
 	if type(section) == "string" then
 		local s = string.lower(section)
-		if string.find(s, "_trader", 1, true)
-			or string.find(s, "_barman", 1, true)
-			or string.find(s, "_medic", 1, true)
+		if string.find(s, "_medic", 1, true)
+			or string.find(s, "medic", 1, true)
+			or string.find(s, "_mechanic", 1, true)
+			or string.find(s, "_tech", 1, true)
+			or string.find(s, "_guide", 1, true)
+			or string.find(s, "_leader", 1, true)
 		then
+			return false
+		end
+		if string.find(s, "_trader", 1, true) or string.find(s, "_barman", 1, true) then
 			return true
 		end
 	end
-	return resolve_npc_provider_role(npc, smart, npc_id) == "trader"
+	return false
 end
 
 function M.build_online_sell_plan(npc, params)
@@ -2178,9 +2238,7 @@ function M.execute_offline_squad_trade(squad, smart, reason)
 	return traded, traded and "offline_traded" or "offline_nothing_to_trade"
 end
 
-local function clear_npc_trade_state(npc)
-	local npc_id = object_id(npc)
-	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+function trade_path.clear_trade_storage(st)
 	if not st then
 		return
 	end
@@ -2197,6 +2255,12 @@ local function clear_npc_trade_state(npc)
 	end
 end
 
+local function clear_npc_trade_state(npc)
+	local npc_id = object_id(npc)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	trade_path.clear_trade_storage(st)
+end
+
 local function suppress_npc_trade_state(npc, until_tg)
 	local npc_id = object_id(npc)
 	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
@@ -2206,6 +2270,26 @@ local function suppress_npc_trade_state(npc, until_tg)
 	clear_npc_trade_state(npc)
 	st.zhopa2_trade_suppress_until = tonumber(until_tg) or (tg() + C.AUTO_TRADE_COOLDOWN_MS)
 	st.zhopa2_trade_completed_until = st.zhopa2_trade_suppress_until
+end
+
+function trade_path.session_ban_id(npc_or_id)
+	return tonumber(npc_or_id) or object_id(npc_or_id)
+end
+
+function trade_path.npc_session_banned(npc_or_id)
+	local id = trade_path.session_ban_id(npc_or_id)
+	return id ~= nil and trade_path.session_banned_npcs[id] ~= nil
+end
+
+function trade_path.ban_npc_for_session(npc_or_id, reason)
+	local id = trade_path.session_ban_id(npc_or_id)
+	if not id then
+		return false
+	end
+	trade_path.session_banned_npcs[id] = reason or true
+	local st = db and db.storage and db.storage[id] or nil
+	trade_path.clear_trade_storage(st)
+	return true
 end
 
 local function trade_context_active(st)
@@ -2410,7 +2494,7 @@ mark_squad_trade_result = function(squad, result, reason, smart)
 	finalize_squad_trade_task(squad, result, reason)
 end
 
-local function online_squad_trade_members(squad, smart)
+local function online_squad_trade_members(squad, smart, include_session_banned)
 	local members = {}
 	if not (smart and M.is_squad_object(squad)) then
 		return members
@@ -2419,7 +2503,7 @@ local function online_squad_trade_members(squad, smart)
 		for member in squad:squad_members() do
 			local id = member and member.id
 			local obj = id and online_object_by_id(id)
-			if obj and type(obj.alive) == "function" and obj:alive() then
+			if obj and type(obj.alive) == "function" and obj:alive() and (include_session_banned == true or not trade_path.npc_session_banned(id)) then
 				M.materialize_online_virtual_money(obj, squad, "online_trade_members")
 				members[#members + 1] = obj
 			end
@@ -2601,7 +2685,7 @@ function M.squad_trade_route_profile(squad)
 end
 
 local function find_online_trader_at_smart(smart, ignore_ids)
-	if not smart then
+	if not smart or trade_path.trade_smart_blacklisted(smart) then
 		return nil
 	end
 	local checked = {}
@@ -2628,7 +2712,7 @@ local function find_online_trader_at_smart(smart, ignore_ids)
 
 	if type(smart.npc_by_job_section) == "table" then
 		for job_sec, npc_id in pairs(smart.npc_by_job_section) do
-			if classify_provider_job_role(find_smart_job_by_section(smart, job_sec) or job_sec, smart) == "trader" then
+			if trade_path.job_is_auto_trade_provider(find_smart_job_by_section(smart, job_sec) or job_sec, smart) then
 				local obj = check_id(npc_id)
 				if obj then
 					return obj
@@ -2655,6 +2739,9 @@ local function smart_trade_flags(smart)
 end
 
 local function smart_has_indexed_trade_route(smart)
+	if trade_path.trade_smart_blacklisted(smart) then
+		return false
+	end
 	local flags = smart_trade_flags(smart)
 	return flags ~= nil and flags.trade_route == true
 end
@@ -2670,9 +2757,13 @@ local function smart_has_trade_provider_job(smart)
 	end
 
 	local has_provider = false
+	if trade_path.trade_smart_blacklisted(smart) then
+		SMART_TRADE_PROVIDER_CACHE[smart_id] = false
+		return false
+	end
 	if type(smart.npc_by_job_section) == "table" then
 		for job_sec in pairs(smart.npc_by_job_section) do
-			if classify_provider_job_role(find_smart_job_by_section(smart, job_sec) or job_sec, smart) == "trader" then
+			if trade_path.job_is_auto_trade_provider(find_smart_job_by_section(smart, job_sec) or job_sec, smart) then
 				has_provider = true
 				break
 			end
@@ -2680,7 +2771,7 @@ local function smart_has_trade_provider_job(smart)
 	end
 	if not has_provider and type(smart.npc_info) == "table" then
 		for _, info in pairs(smart.npc_info) do
-			if classify_provider_job_role(info and info.job or nil, smart) == "trader" then
+			if trade_path.job_is_auto_trade_provider(info and info.job or nil, smart) then
 				has_provider = true
 				break
 			end
@@ -3260,8 +3351,11 @@ local function recover_stale_prepared_trade(squad, now)
 	local npc_id = tonum(squad.zhopa2_trade_prepared_npc_id)
 	local smart = smart_by_id(smart_id)
 	local npc = npc_id and online_object_by_id(npc_id) or nil
+	trade_path.ban_npc_for_session(npc_id, "trade_prepared_timeout")
 	if npc then
 		clear_npc_trade_state(npc)
+	else
+		trade_path.clear_trade_storage(npc_id and db and db.storage and db.storage[npc_id] or nil)
 	end
 	M.clear_prepared_trade_job(smart, npc_id, "trade_prepared_timeout")
 	release_smart_trade_slot(smart_id, squad_id)
@@ -3298,6 +3392,9 @@ local function server_object_alive(obj)
 end
 
 local function find_live_trader_at_smart(smart, ignore_ids)
+	if trade_path.trade_smart_blacklisted(smart) then
+		return nil
+	end
 	local trader = live_object(find_online_trader_at_smart(smart, ignore_ids))
 	if trader then
 		return trader
@@ -3314,7 +3411,7 @@ local function find_live_trader_at_smart(smart, ignore_ids)
 			return nil
 		end
 		checked[npc_id] = true
-		if classify_provider_job_role(job, smart) ~= "trader" then
+		if not trade_path.job_is_auto_trade_provider(job, smart) then
 			return nil
 		end
 		local online = live_object(online_object_by_id(npc_id))
@@ -3511,25 +3608,28 @@ local function resolve_auto_trade_context(squad, reason, now)
 		return smart, nil, nil, mark_trade_lookup_failure(squad, "trade_no_trade_smart", reason, smart), "no_trade_smart"
 	end
 
+	local acquired, queue_reason = acquire_smart_trade_slot(squad, smart, reason, now)
+	if not acquired then
+		return smart, nil, nil, mark_trade_lookup_failure(squad, "trade_queued", reason, smart), queue_reason or "queued"
+	end
+
 	local ignore_ids = squad_member_id_set(squad)
 	local members = online_squad_trade_members(squad, smart)
 	if #members == 0 then
+		release_smart_trade_slot(object_id(smart), object_id(squad))
 		return smart, nil, nil, mark_trade_lookup_failure(squad, "trade_no_online_member", reason, smart), "no_online_member"
 	end
 
 	local has_work, work_reason = squad_members_have_trade_work(members, squad)
 	if not has_work then
+		release_smart_trade_slot(object_id(smart), object_id(squad))
 		return smart, members, nil, mark_trade_lookup_failure(squad, work_reason or "nothing_to_trade", reason, smart), work_reason or "nothing_to_trade"
 	end
 
 	local trader = find_online_trader_at_smart(smart, ignore_ids)
 	if not trader then
+		release_smart_trade_slot(object_id(smart), object_id(squad))
 		return smart, members, nil, mark_trade_lookup_failure(squad, "trade_no_trader", reason, smart), "no_trader"
-	end
-
-	local acquired, queue_reason = acquire_smart_trade_slot(squad, smart, reason, now)
-	if not acquired then
-		return smart, members, nil, mark_trade_lookup_failure(squad, "trade_queued", reason, smart), queue_reason or "queued"
 	end
 
 	return smart, members, trader, nil, nil
@@ -3818,7 +3918,7 @@ local function try_auto_trade_resolved(squad, reason, opts, now)
 	M.patch_trade_effect()
 	local current_smart = squad_current_trade_smart(squad)
 	if current_smart then
-		local members = online_squad_trade_members(squad, current_smart)
+		local members = online_squad_trade_members(squad, current_smart, true)
 		if #members == 0 then
 			return execute_offline_auto_trade(squad, current_smart, reason, now)
 		end
@@ -4386,6 +4486,8 @@ local function on_game_load()
 	M.patch_trade_effect()
 	trade_path.offline_profile_cache = {}
 	trade_path.offline_profile_cleanup_at = 0
+	trade_path.session_banned_npcs = {}
+	SMART_TRADE_QUEUE = {}
 	M.flush_trade_events()
 end
 

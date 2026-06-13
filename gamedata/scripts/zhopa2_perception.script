@@ -4,6 +4,9 @@ local MAX_PATROL_POINTS = 4
 local HUNT_BASE_SAFE_RADIUS = 50
 local HUNT_BASE_SAFE_RADIUS_SQR = HUNT_BASE_SAFE_RADIUS * HUNT_BASE_SAFE_RADIUS
 local HUNT_RUNTIME_CACHE_TTL_MS = 2000
+M.BASE_POPULATE_PICK_TTL_MS = 2000
+M.base_populate_pick_cache = {}
+M.base_populate_pick_cache_cleanup_at = 0
 
 local target_maps_cache = {}
 local neighbors_cache = {}
@@ -118,6 +121,19 @@ local function cleanup_runtime_hunt_cache(now)
 	for key, entry in pairs(hunt_pick_cache) do
 		if not entry or (tonumber(entry.expires) or 0) <= now then
 			hunt_pick_cache[key] = nil
+		end
+	end
+end
+
+function M.cleanup_base_populate_pick_cache(now)
+	now = tonumber(now) or now_ms()
+	if now < M.base_populate_pick_cache_cleanup_at then
+		return
+	end
+	M.base_populate_pick_cache_cleanup_at = now + 5000
+	for key, entry in pairs(M.base_populate_pick_cache) do
+		if not entry or (tonumber(entry.expires) or 0) <= now then
+			M.base_populate_pick_cache[key] = nil
 		end
 	end
 end
@@ -2063,7 +2079,16 @@ function M.pick_base_camping_populate_smart(squad, opts)
 	options.current_level = options.current_level or M.obj_level(squad)
 	ensure_option_neighbors(options)
 	local levels = levels_for_options(options)
-	local cache_key = "pick_base_camping_populate_smart|" .. smart_options_signature(squad, options, levels)
+	local idx = index_mod()
+	local revision = idx and tonumber(idx.base_camping_revision) or 0
+	local signature = smart_options_signature(squad, options, levels) .. "|base_rev|" .. tostring(revision)
+	local now = now_ms()
+	M.cleanup_base_populate_pick_cache(now)
+	local runtime_cached = M.base_populate_pick_cache[signature]
+	if runtime_cached and tonumber(runtime_cached.expires or 0) > now then
+		return runtime_cached.smart_id and alife_object and alife_object(runtime_cached.smart_id) or nil
+	end
+	local cache_key = "pick_base_camping_populate_smart|" .. signature
 	return cached_frame_value(cache_key, function()
 		local candidates = base_camping_populate_candidates(squad, options)
 		local best
@@ -2091,6 +2116,10 @@ function M.pick_base_camping_populate_smart(squad, opts)
 				end
 			end
 		end
+		M.base_populate_pick_cache[signature] = {
+			expires = now + M.BASE_POPULATE_PICK_TTL_MS,
+			smart_id = best and best.id or false,
+		}
 		return best
 	end)
 end

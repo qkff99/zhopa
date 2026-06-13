@@ -1,6 +1,7 @@
 local M = {}
 
 local PENDING_FILL_TTL_MS = 10000
+local SMART_UPDATE_RECONCILE_INTERVAL_MS = 10000
 local SERVICE_TOKEN = "_sim_squad_service_"
 local ROLE_NONE = false
 
@@ -14,6 +15,7 @@ local ssub = string.sub
 M.marked_smarts = {}
 M.pending_emission_fill = nil
 M.registered = false
+M.smart_update_reconcile_next = {}
 
 local ROLE_ORDER = { "trader", "tech", "medic", "barman", "guide" }
 
@@ -502,6 +504,14 @@ local function role_from_section(section)
 	return nil, nil
 end
 
+local function zhop_service_squad(squad, section)
+	if squad and squad.zhopa2_service_filler == true then
+		return true
+	end
+	section = section or (squad and squad.zhopa2_section_name)
+	return type(section) == "string" and sfind(section, SERVICE_TOKEN, 1, true) ~= nil
+end
+
 local function safe_npc_section(se_obj)
 	if not se_obj then
 		return nil
@@ -566,6 +576,19 @@ local function is_stalker_se(se_obj)
 		return se_obj:clsid()
 	end)
 	return ok and IsStalker(nil, cls) == true
+end
+
+local function se_object_alive(se_obj)
+	if not se_obj then
+		return false
+	end
+	if type(se_obj.alive) == "function" then
+		local ok, alive = pcall(se_obj.alive, se_obj)
+		if ok then
+			return alive == true
+		end
+	end
+	return se_obj.id ~= nil
 end
 
 local function set_online_community(se_obj, engine_owner)
@@ -690,7 +713,7 @@ end
 
 local function role_from_member_info(info, smart)
 	local se_obj = type(info) == "table" and info.se_obj or nil
-	if not is_stalker_se(se_obj) then
+	if not (is_stalker_se(se_obj) and se_object_alive(se_obj)) then
 		return nil, nil, nil
 	end
 	local role = type(info.job) == "table" and classify_job_role(info.job, smart) or nil
@@ -733,8 +756,8 @@ local function collect_existing_roles(smart, engine_owner)
 				existing[role] = true
 				service_count = service_count + 1
 				if engine_owner then
-					adopt_service_member(info.se_obj, smart, engine_owner, section)
-					if squad then
+					if zhop_service_squad(squad, section) then
+						adopt_service_member(info.se_obj, smart, engine_owner, section)
 						adopt_service_squad(squad, smart, engine_owner, section)
 					end
 				end
@@ -753,7 +776,7 @@ local function collect_existing_roles(smart, engine_owner)
 					service_count = service_count + 1
 				end
 				existing[role] = true
-				if engine_owner then
+				if engine_owner and zhop_service_squad(squad, section) then
 					adopt_service_squad(squad, smart, engine_owner, section)
 				end
 			end
@@ -988,10 +1011,22 @@ function M.on_smart_update(smart, ownership)
 	if not runtime_ready("service_smart_update") then
 		return false, "runtime_not_ready"
 	end
+	local smart_id = tonumber(smart and smart.id)
+	local now = tg()
+	if smart_id and tonumber(M.smart_update_reconcile_next[smart_id] or 0) > now then
+		return false, "throttled"
+	end
+	if smart_id then
+		M.smart_update_reconcile_next[smart_id] = now + SMART_UPDATE_RECONCILE_INTERVAL_MS
+	end
 	return M.reconcile_smart(smart, ownership, false, "smart_update")
 end
 
 function M.on_smart_unregister(smart)
+	local smart_id = tonumber(smart and smart.id)
+	if smart_id then
+		M.smart_update_reconcile_next[smart_id] = nil
+	end
 	unmark_smart(smart)
 	clear_smart_fields(smart)
 end
@@ -1020,6 +1055,7 @@ end
 function M.on_game_load()
 	M.marked_smarts = {}
 	M.pending_emission_fill = nil
+	M.smart_update_reconcile_next = {}
 end
 
 local function server_entity_on_unregister(se_obj, type_name)

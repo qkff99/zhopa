@@ -367,6 +367,27 @@ function is_smart_blacklisted_for_squad(squad, smart, level_name)
 	return false
 end
 
+function is_trade_smart_blacklisted(smart, level_name)
+	if not smart then
+		return true
+	end
+	level_name = level_name or ""
+	local smart_name = smart_name_for_blacklist(smart)
+	if section_has("zhopa2_trade_smart_blacklists", "*", smart_name) then
+		return true
+	end
+	if section_has("zhopa2_trade_smart_blacklists", "global", smart_name) then
+		return true
+	end
+	return section_has("zhopa2_trade_smart_blacklists", level_name, smart_name)
+end
+
+function is_trade_provider_section_blacklisted(section)
+	return type(section) == "string"
+		and section ~= ""
+		and section_is_true("zhopa2_trade_provider_section_blacklists", section)
+end
+
 function reload()
 	settings_ini = ini_file_ex("zhopa2_settings.ltx")
 	blacklists_ini = ini_file_ex("zhopa2_smart_blacklists.ltx")
@@ -382,6 +403,8 @@ _G.zhopa2_cfg = {
 	is_global_level_blacklisted = is_global_level_blacklisted,
 	is_level_blacklisted_for_squad = is_level_blacklisted_for_squad,
 	is_smart_blacklisted_for_squad = is_smart_blacklisted_for_squad,
+	is_trade_smart_blacklisted = is_trade_smart_blacklisted,
+	is_trade_provider_section_blacklisted = is_trade_provider_section_blacklisted,
 	reload = reload,
 }
 

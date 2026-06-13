@@ -541,6 +541,8 @@ local function section_is_lootable_inventory(section, obj)
 	return loot_inventory_classes[cls] == true or cls:find("^WP_") ~= nil or cls:find("^DET_") ~= nil
 end
 
+local cleanup_targeted_item_requests
+
 local function object_is_story(obj, id)
 	id = tonumber(id) or object_id(obj)
 	return get_object_story_id and id and get_object_story_id(id) ~= nil
@@ -1601,13 +1603,24 @@ function M.recent_item_ids()
 	return recent_ids(STORE_ITEM)
 end
 
+function M.has_recent_item_events()
+	cleanup_store(STORE_ITEM)
+	local store = event_stores.item
+	return store ~= nil and #store.ids >= (tonumber(store.head) or 1)
+end
+
 function M.is_recent_item_id(id)
 	cleanup_store(STORE_ITEM)
 	id = tonumber(id)
 	return id ~= nil and event_stores.item.seen[id] ~= nil
 end
 
-local function cleanup_targeted_item_requests()
+function M.has_targeted_item_requests()
+	cleanup_targeted_item_requests()
+	return next(targeted_item_requests) ~= nil
+end
+
+cleanup_targeted_item_requests = function()
 	local ttl = math.max(1, cfg_num("loot_event_ttl_sec", 900)) * 1000
 	local now = now_ms()
 	for npc_id, request in pairs(targeted_item_requests) do
