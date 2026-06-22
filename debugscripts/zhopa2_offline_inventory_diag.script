@@ -6,6 +6,7 @@ local MAX_UPDATE_SQUADS = 20
 local MAX_MEMBERS = 4
 local MAX_ITEMS = 40
 local INVALID_ID = 65535
+local DANGEROUS_WRITE_PROBES = false
 local dumped_update_squads = {}
 local dumped_update_count = 0
 
@@ -264,8 +265,10 @@ local function dump_owner_probes(se_owner, prefix)
 			tostring(value)
 		)
 	end
-	local ok_write, write_result = probe_write_same(se_owner, "m_dwMoney")
-	log("%s owner_probe key [m_dwMoney_write_same] ok [%s] result [%s]", prefix, tostring(ok_write), tostring(write_result))
+	if DANGEROUS_WRITE_PROBES == true then
+		local ok_write, write_result = probe_write_same(se_owner, "m_dwMoney")
+		log("%s owner_probe key [m_dwMoney_write_same] ok [%s] result [%s]", prefix, tostring(ok_write), tostring(write_result))
+	end
 end
 
 local function dump_item_probes(se_item, prefix)

@@ -28,6 +28,7 @@ local POST_TECH_UNKNOWN_GRACE_MS = 10000
 local POST_TECH_UNKNOWN_STALL_MS = 15000
 local POST_TECH_UNKNOWN_WATCH_MAX_MS = 45000
 local STATE_FLUSH_UPDATES = 5
+local REPAIR_MAX_PER_TICK = 2
 local INGRESS_WATCH_SMARTS = {
     jup_a6 = true,
 }
@@ -109,6 +110,8 @@ local RUNTIME = {
     progress_by_npc = {},
     post_tech_watch_by_npc = {},
     ingress_by_npc = {},
+    repair_queue = {},
+    repair_queued = {},
 }
 
 local function now()
@@ -126,6 +129,8 @@ local function reset_runtime()
     RUNTIME.progress_by_npc = {}
     RUNTIME.post_tech_watch_by_npc = {}
     RUNTIME.ingress_by_npc = {}
+    RUNTIME.repair_queue = {}
+    RUNTIME.repair_queued = {}
 end
 
 local function mark_runtime_ready()
@@ -1479,6 +1484,44 @@ local RESOLVERS = {
     service_no_progress = resolve_service_no_progress_issue,
 }
 
+local function issue_key(issue)
+    if not issue then
+        return nil
+    end
+    return tostring(issue.kind or "-") .. ":" .. tostring(issue.smart_id or "-") .. ":" .. tostring(issue.npc_id or "-")
+end
+
+local function queue_repair_issue(issue)
+    local key = issue_key(issue)
+    if not key or RUNTIME.repair_queued[key] == true then
+        return false
+    end
+    RUNTIME.repair_queued[key] = true
+    RUNTIME.repair_queue[#RUNTIME.repair_queue + 1] = issue
+    return true
+end
+
+local function process_repair_queue(limit)
+    limit = math.max(1, tonumber(limit) or REPAIR_MAX_PER_TICK)
+    local processed = 0
+    while processed < limit and #RUNTIME.repair_queue > 0 do
+        local issue = table.remove(RUNTIME.repair_queue, 1)
+        local key = issue_key(issue)
+        if key then
+            RUNTIME.repair_queued[key] = nil
+        end
+        local resolver = issue and RESOLVERS[issue.kind] or nil
+        if resolver then
+            local ok, err = pcall(resolver, issue)
+            processed = processed + 1
+            if not ok then
+                log_warn("repair_resolver_failed kind=%s smart=%s npc=%s err=%s", tostring(issue.kind or "-"), tostring(issue.smart_id or "-"), tostring(issue.npc_id or "-"), tostring(err or "-"))
+            end
+        end
+    end
+    return processed
+end
+
 local function clear_resolved_states(snapshot, issued)
     local current_ids = {}
     for npc_id in pairs(snapshot.entries) do
@@ -1531,11 +1574,7 @@ local function process_smart(smart)
     local issues, issued = detect_cleanup_issues(snapshot)
     log_service_snapshot(snapshot, issues)
     for i = 1, #issues do
-        local issue = issues[i]
-        local resolver = RESOLVERS[issue.kind]
-        if resolver then
-            resolver(issue)
-        end
+        queue_repair_issue(issues[i])
     end
 
     clear_resolved_states(snapshot, issued)
@@ -1547,6 +1586,12 @@ end
 
 local function on_load_state()
     mark_runtime_ready()
+end
+
+local function on_actor_update()
+    if RUNTIME.ready == true then
+        process_repair_queue(REPAIR_MAX_PER_TICK)
+    end
 end
 
 local function on_server_entity_unregister(se_obj, type_name)
@@ -1665,6 +1710,7 @@ local function register_callbacks_once()
     end
     RUNTIME.callbacks_registered = true
     RegisterScriptCallback("actor_on_first_update", on_actor_first_update)
+    RegisterScriptCallback("actor_on_update", on_actor_update)
     RegisterScriptCallback("load_state", on_load_state)
     RegisterScriptCallback("server_entity_on_unregister", on_server_entity_unregister)
     RegisterScriptCallback("smart_terrain_on_update", on_smart_terrain_update)

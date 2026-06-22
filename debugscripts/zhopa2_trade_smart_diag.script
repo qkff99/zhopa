@@ -6,7 +6,7 @@ local MAX_ATTEMPTS = 4
 local MAX_ROUTE_SMARTS = 500
 local MAX_FLAG_SMARTS = 800
 local MAX_SERVICE_SLOT_LINES = 1200
-local AUTO_DUMP_ENABLED = true
+local AUTO_DUMP_ENABLED = false
 
 local scheduled = false
 local dumped = false

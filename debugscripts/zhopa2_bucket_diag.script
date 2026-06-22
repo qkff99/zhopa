@@ -1,6 +1,6 @@
 local M = {}
 
-local AUTO_DUMP_ENABLED = true
+local AUTO_DUMP_ENABLED = false
 local DUMP_DELAY_MS = 3000
 local RETRY_MS = 2000
 local MAX_ATTEMPTS = 4

@@ -1,7 +1,7 @@
 local M = {}
 
 -- Copy this file to gamedata/scripts only for focused TRADE route diagnostics.
-local AUTO_PATCH_ENABLED = true
+local AUTO_PATCH_ENABLED = false
 local AUTO_DUMP_ON_FIRST_UPDATE = false
 local DUMP_DELAY_MS = 2000
 local RETRY_MS = 2000

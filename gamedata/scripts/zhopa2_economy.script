@@ -383,9 +383,11 @@ local function online_object_by_id(id)
 	if not id then
 		return nil
 	end
+	id = tonumber(id) or id
 	local obj = db and db.storage and db.storage[id] and db.storage[id].object
 	if not obj and level and type(level.object_by_id) == "function" then
-		obj = level.object_by_id(id)
+		local ok, found = pcall(level.object_by_id, id)
+		obj = ok and found or nil
 	end
 	return obj
 end
@@ -908,9 +910,7 @@ local function trade_seller_for_npc(npc, params)
 		return nil, smart
 	end
 	local seller = db and db.storage and db.storage[seller_id] and db.storage[seller_id].object
-	if not seller and level and level.object_by_id then
-		seller = level.object_by_id(seller_id)
-	end
+	seller = seller or online_object_by_id(seller_id)
 	return live_object(seller), smart
 end
 
@@ -1126,7 +1126,7 @@ function M.build_online_sell_plan(npc, params)
 	if M.enabled() ~= true then
 		return plan
 	end
-	if not (npc and type(npc.alive) == "function" and npc:alive()) then
+	if not live_object(npc) then
 		return plan
 	end
 
@@ -2086,7 +2086,7 @@ end
 
 local function offline_trade_detail_list(entries, field, max_count)
 	local out = {}
-	max_count = tonumber(max_count) or 4
+	local max_count = tonumber(max_count) or 4
 	for i = 1, math.min(entries and #entries or 0, max_count) do
 		local entry = entries[i]
 		local value = entry and entry[field] or nil
@@ -2511,7 +2511,7 @@ local function online_squad_trade_members(squad, smart, include_session_banned)
 		for member in squad:squad_members() do
 			local id = member and member.id
 			local obj = id and online_object_by_id(id)
-			if obj and type(obj.alive) == "function" and obj:alive() and (include_session_banned == true or not trade_path.npc_session_banned(id)) then
+			if live_object(obj) and (include_session_banned == true or not trade_path.npc_session_banned(id)) then
 				M.materialize_online_virtual_money(obj, squad, "online_trade_members")
 				members[#members + 1] = obj
 			end
@@ -2527,7 +2527,7 @@ local function online_trade_members_from_ids(member_ids)
 	end
 	for i = 1, #member_ids do
 		local obj = online_object_by_id(member_ids[i])
-		if obj and type(obj.alive) == "function" and obj:alive() then
+		if live_object(obj) then
 			members[#members + 1] = obj
 		end
 	end
@@ -2618,7 +2618,7 @@ function M._online_squad_members(squad)
 		for member in squad:squad_members() do
 			local id = member and member.id
 			local obj = id and online_object_by_id(id)
-			if obj and type(obj.alive) == "function" and obj:alive() then
+			if live_object(obj) then
 				M.materialize_online_virtual_money(obj, squad, "online_squad_members")
 				members[#members + 1] = obj
 			end
@@ -4418,7 +4418,7 @@ local function refresh_trade_items_from_inventory(npc, params, force)
 	if M.enabled() ~= true then
 		return false
 	end
-	if not (npc and type(npc.alive) == "function" and npc:alive()) then
+	if not live_object(npc) then
 		return false
 	end
 

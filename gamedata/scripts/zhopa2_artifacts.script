@@ -962,6 +962,21 @@ local function release_ground_artifact(se_artifact)
 	return ok
 end
 
+local function rollback_created_artifact_cargo_item(se_item, reason)
+	local item_id = object_id(se_item)
+	if item_id and alife_release_id then
+		local ok, result = pcall(alife_release_id, item_id, reason or "artifact_collect_rollback")
+		if ok and result ~= false then
+			return true
+		end
+	end
+	if se_item and alife_release then
+		local ok, result = pcall(alife_release, se_item)
+		return ok and result ~= false
+	end
+	return false
+end
+
 local function virtual_artifact_data(artifact_id)
 	local idx = index_mod()
 	if idx and type(idx.virtual_artifact_data) == "function" then
@@ -1112,10 +1127,14 @@ function M.offline_collect(squad, artifact_id, reason)
 		return false, "artifact_create_failed"
 	end
 
+	if release_ground_artifact(se_artifact) ~= true then
+		rollback_created_artifact_cargo_item(se_new, "artifact_release_failed")
+		debug_artifact_error(squad, "artifact_release_failed", artifact_id, nil, reason or "offline_collect")
+		return false, "artifact_release_failed"
+	end
+	call_parent_zone_take(se_artifact)
 	add_artifact_cargo(squad, section, value, artifact_id, reason or "artifact_offline_collect")
 	debug_artifact_offline_success(squad, artifact_id, section)
-	call_parent_zone_take(se_artifact)
-	release_ground_artifact(se_artifact)
 	release_artifact_reservation(squad, "artifact_offline_collected")
 	reset_online_target_tracking(squad)
 	squad.zhopa2_last_result = "artifact_offline_collected"

@@ -34,15 +34,17 @@ local ZHOPA2_RUNTIME_PATCHES = {
 	{ name = "sim_offline_combat", fn = "patch_sim_offline_combat" },
 }
 
-local runtime_ready_items = {}
-local runtime_ready_errors = {}
-local runtime_ready_total = #ZHOPA2_RUNTIME_MODULES + #ZHOPA2_RUNTIME_PATCHES + 4
-local runtime_ready_count = 0
-local runtime_ready_complete = false
-local runtime_callbacks_registered = false
-local runtime_actor_first_update = false
-local runtime_warmup_until = nil
-local runtime_next_recheck_tg = 0
+local runtime_ready_state = {
+	items = {},
+	errors = {},
+	total = #ZHOPA2_RUNTIME_MODULES + #ZHOPA2_RUNTIME_PATCHES + 4,
+	count = 0,
+	complete = false,
+	callbacks_registered = false,
+	actor_first_update = false,
+	warmup_until = nil,
+	next_recheck_tg = 0,
+}
 
 local function safe_require(name)
 	local mod = rawget(_G, name)
@@ -154,9 +156,26 @@ function M.zhopa2_online_object_by_id(id)
 		return st.object
 	end
 	if level and type(level.object_by_id) == "function" then
-		return level.object_by_id(id)
+		local ok, obj = pcall(level.object_by_id, id)
+		return ok and obj or nil
 	end
 	return nil
+end
+
+local function runtime_object_alive(obj)
+	if not obj or type(obj.alive) ~= "function" then
+		return false
+	end
+	local ok, alive = pcall(obj.alive, obj)
+	return ok and alive == true
+end
+
+local function runtime_object_dead(obj)
+	if not obj or type(obj.alive) ~= "function" then
+		return false
+	end
+	local ok, alive = pcall(obj.alive, obj)
+	return ok and alive ~= true
 end
 
 function M.zhopa2_first_squad_member_id(squad)
@@ -338,24 +357,24 @@ local function mark_runtime_item(stage, item, ok, reason, detail)
 	local tostr = tostring
 	local key = runtime_item_key(stage, item)
 	if ok then
-		if runtime_ready_items[key] ~= true then
-			runtime_ready_items[key] = true
-			runtime_ready_errors[key] = nil
-			runtime_ready_count = runtime_ready_count + 1
-			runtime_log("~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]", tostr(runtime_ready_count), tostr(runtime_ready_total), tostr(stage), tostr(item))
+		if runtime_ready_state.items[key] ~= true then
+			runtime_ready_state.items[key] = true
+			runtime_ready_state.errors[key] = nil
+			runtime_ready_state.count = runtime_ready_state.count + 1
+			runtime_log("~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]", tostr(runtime_ready_state.count), tostr(runtime_ready_state.total), tostr(stage), tostr(item))
 		end
 		return true
 	end
 	local err = tostr(reason or "not_ready") .. "|" .. tostr(detail or "-")
-	if runtime_ready_errors[key] ~= err then
-		runtime_ready_errors[key] = err
+	if runtime_ready_state.errors[key] ~= err then
+		runtime_ready_state.errors[key] = err
 		runtime_log("~ ZHOPA2 runtime error | stage [%s] item [%s] reason [%s] detail [%s]", tostr(stage), tostr(item), tostr(reason or "not_ready"), tostr(detail or "-"))
 	end
 	return false
 end
 
 local function runtime_item_ready(stage, item)
-	return runtime_ready_items[runtime_item_key(stage, item)] == true
+	return runtime_ready_state.items[runtime_item_key(stage, item)] == true
 end
 
 local function runtime_error_enabled()
@@ -363,26 +382,26 @@ local function runtime_error_enabled()
 end
 
 local function runtime_mark_context()
-	if runtime_callbacks_registered then
+	if runtime_ready_state.callbacks_registered then
 		mark_runtime_item("context", "callbacks", true, "callbacks_registered", "-")
 	end
-	if runtime_actor_first_update then
+	if runtime_ready_state.actor_first_update then
 		mark_runtime_item("context", "actor_first_update", true, "actor_first_update", "-")
 	end
 	if SIMBOARD and SIMBOARD.zhopa2_buckets_ready == true then
 		mark_runtime_item("context", "simboard_buckets", true, "simboard_buckets_ready", "-")
 	end
-	if runtime_actor_first_update then
+	if runtime_ready_state.actor_first_update then
 		local now = runtime_time_ms()
-		if runtime_warmup_until == nil then
-			runtime_warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
+		if runtime_ready_state.warmup_until == nil then
+			runtime_ready_state.warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
 		end
-		if runtime_warmup_until <= 0 or now >= runtime_warmup_until then
+		if runtime_ready_state.warmup_until <= 0 or now >= runtime_ready_state.warmup_until then
 			mark_runtime_item("context", "warmup", true, "warmup_done", "-")
 		end
 	end
-	runtime_ready_complete = runtime_ready_count >= runtime_ready_total
-	return runtime_ready_complete
+	runtime_ready_state.complete = runtime_ready_state.count >= runtime_ready_state.total
+	return runtime_ready_state.complete
 end
 
 local function runtime_missing_item()
@@ -1711,7 +1730,7 @@ local function ini_section_exists(ini, section)
 end
 
 local function open_ini(path)
-	path = trim(path)
+	local path = trim(path)
 	if not (path and path ~= "" and ini_file) then
 		return nil
 	end
@@ -1839,7 +1858,7 @@ local function scan_loaded_trade_jobs(smart, flags)
 end
 
 local function scan_exclusive_trade_job(smart, flags, work_field, work_path)
-	work_field = trim(work_field)
+	local work_field = trim(work_field)
 	work_path = trim(work_path)
 	if not (work_field and work_field ~= "" and work_path and work_path ~= "") then
 		return
@@ -2802,7 +2821,7 @@ local function task_run(squad)
 end
 
 local function direct_monster_update(self)
-	if not (self and self.object and self.object.alive and self.object:alive()) then
+	if not (self and runtime_object_alive(self.object)) then
 		return false
 	end
 	if type(self.object.get_enemy) == "function" and self.object:get_enemy() then
@@ -3001,9 +3020,11 @@ local function export_script_function(mod, name, fn)
 	if type(fn) ~= "function" then
 		return
 	end
-	_G[name] = fn
 	if mod then
 		mod[name] = fn
+	end
+	if type(name) == "string" and string.sub(name, 1, 7) == "zhopa2_" then
+		rawset(_G, name, fn)
 	end
 end
 
@@ -3242,14 +3263,14 @@ end
 local function zhopa2_reservation_is_live(owner_id, item_id)
 	owner_id = tonumber(owner_id)
 	item_id = tonumber(item_id)
-	if not (owner_id and item_id and db and db.storage and level and type(level.object_by_id) == "function") then
+	if not (owner_id and item_id and db and db.storage) then
 		return false
 	end
-	local owner = level.object_by_id(owner_id)
+	local owner = M.zhopa2_online_object_by_id(owner_id)
 	if not owner then
 		return false
 	end
-	if not (type(owner.alive) == "function" and owner:alive() == true) then
+	if not runtime_object_alive(owner) then
 		return false
 	end
 	local owner_st = db.storage[owner_id] and db.storage[owner_id].gather_items
@@ -4064,7 +4085,7 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	end
 	item_id = tonumber(item_id)
 	local se_itm = item_id and item_id ~= 0 and item_id ~= 65535 and alife_object(item_id)
-	local itm = item_id and level.object_by_id(item_id)
+	local itm = item_id and M.zhopa2_online_object_by_id(item_id)
 	if not (itm and (not se_itm or se_itm.parent_id == 65535)) then
 		return false, "force_no_online_item"
 	end
@@ -4187,7 +4208,7 @@ function M.patch_state_mgr_trade_run()
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
-	if not (npc and st and zhopa2_loot_active(npc) and level and type(level.object_by_id) == "function" and alife_object) then
+	if not (npc and st and zhopa2_loot_active(npc) and alife_object) then
 		return false
 	end
 	local item_ids = zhopa2_event_item_ids()
@@ -4204,7 +4225,7 @@ function M.zhopa2_try_force_online_gather_item(npc, st)
 			return
 		end
 		seen[item_id] = true
-		local obj = level.object_by_id(item_id)
+		local obj = M.zhopa2_online_object_by_id(item_id)
 		if not obj then
 			return
 		end
@@ -4299,7 +4320,7 @@ local function zhopa2_gather_item_debug_status_impl(npc, item_id)
 		action_id = mgr:current_action_id()
 	end
 	local state = state_mgr and state_mgr.get_state and state_mgr.get_state(npc) or nil
-	local item = level and level.object_by_id(tonumber(item_id)) or nil
+	local item = M.zhopa2_online_object_by_id(item_id)
 	local item_pos = item and item:position() or nil
 	local npc_pos = npc:position()
 	local dist_item = item_pos and npc_pos and npc_pos:distance_to(item_pos) or nil
@@ -4362,7 +4383,7 @@ local function zhopa2_gather_item_replacement(original, force_selected, force_re
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items or nil
 		local selected_id = st and tonumber(st.selected_id) or nil
 		local zhopa2_was_targeted = st and st.zhopa2_targeted_item_id ~= nil
-		local itm = selected_id and level and level.object_by_id(selected_id) or nil
+		local itm = selected_id and M.zhopa2_online_object_by_id(selected_id) or nil
 		local se_itm = selected_id and alife_object and alife_object(selected_id) or nil
 		local zhopa2_active = zhopa2_loot_active(npc)
 		local force_pickup = force_selected == true
@@ -4494,7 +4515,7 @@ local function patch_gather_classes(mod)
 						zhopa2_reset_artifact_approach(st)
 						return false
 					end
-					local itm = level and level.object_by_id(selected_id) or nil
+					local itm = M.zhopa2_online_object_by_id(selected_id)
 					local se_itm = alife_object and alife_object(selected_id) or nil
 					if itm and (not se_itm or se_itm.parent_id == 65535) and (zhopa2_item_targeted_for_npc(npc, selected_id) or (active and zhopa2_can_take_section(npc, itm, itm:section())) or (mod.near_actor and not mod.near_actor(itm, npc))) then
 						return true
@@ -4532,7 +4553,7 @@ local function patch_gather_classes(mod)
 					if item_ids then
 						for i = 1, #item_ids do
 							local item_id = tonum(item_ids[i])
-							local obj = item_id and level and level.object_by_id(item_id)
+							local obj = item_id and M.zhopa2_online_object_by_id(item_id)
 							local se_obj = item_id and alife_object and alife_object(item_id)
 							if item_id and not seen[item_id] and obj and se_obj and se_obj.parent_id == 65535 and zhopa2_can_take_section(npc, obj, obj:section()) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
 								st.memory[#st.memory + 1] = item_id
@@ -4583,7 +4604,7 @@ local function patch_gather_classes(mod)
 				local targeted_ids = has_targeted_requests and zhopa2_targeted_item_ids(npc) or nil
 				local active = (not targeted_ids and has_item_events) and zhopa2_loot_active(npc) or false
 				if targeted_ids or active then
-					if npc:alive() ~= true or IsWounded(npc) then
+					if not runtime_object_alive(npc) or IsWounded(npc) then
 						return false
 					end
 					if npc:best_enemy() and IsWeapon(npc:active_item()) then
@@ -4635,7 +4656,7 @@ local function patch_gather_classes(mod)
 					return
 				end
 				local item_id = st and tonumber(st.selected_id) or nil
-				local itm = item_id and level and level.object_by_id(item_id)
+				local itm = item_id and M.zhopa2_online_object_by_id(item_id)
 				local se_itm = item_id and alife_object and alife_object(item_id)
 				local active_looter = zhopa2_loot_active(npc)
 				local active_selected = itm and active_looter and zhopa2_can_take_section(npc, itm, itm:section())
@@ -5077,13 +5098,13 @@ local function zhopa2_get_all_from_corpse_replacement(original)
 		local id = npc and npc.id and npc:id() or nil
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].corpse_detection or nil
 		local corpse_id = st and tonumber(st.selected_corpse_id) or nil
-		local corpse = corpse_id and ((db.storage[corpse_id] and db.storage[corpse_id].object) or (level and level.object_by_id(corpse_id))) or nil
+		local corpse = corpse_id and M.zhopa2_online_object_by_id(corpse_id) or nil
 		local active = zhopa2_loot_active(npc)
-		if corpse_id and corpse and corpse:alive() ~= true and zhopa2_is_protected_corpse(corpse, corpse_id) then
+		if corpse_id and corpse and runtime_object_dead(corpse) and zhopa2_is_protected_corpse(corpse, corpse_id) then
 			zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
 			return
 		end
-		if not (active and corpse_id and corpse and corpse:alive() ~= true) then
+		if not (active and corpse_id and corpse and runtime_object_dead(corpse)) then
 			if original then
 				return original(npc, ...)
 			end
@@ -5174,7 +5195,7 @@ local function patch_corpse_classes(mod)
 		if not corpse_id then
 			return nil
 		end
-		return (db and db.storage and db.storage[corpse_id] and db.storage[corpse_id].object) or (level and level.object_by_id(corpse_id))
+		return M.zhopa2_online_object_by_id(corpse_id)
 	end
 	local function reject_if_protected(st, corpse_id)
 		corpse_id = tonumber(corpse_id)
@@ -5245,7 +5266,7 @@ local function patch_corpse_classes(mod)
 						for i = 1, #corpse_ids do
 							local corpse_id = tonumber(corpse_ids[i])
 							local obj = corpse_object(corpse_id)
-							if corpse_id and not seen[corpse_id] and obj and obj:alive() ~= true then
+							if corpse_id and not seen[corpse_id] and obj and runtime_object_dead(obj) then
 								if zhopa2_is_protected_corpse(obj, corpse_id) then
 									zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
 									seen[corpse_id] = true
@@ -5288,7 +5309,7 @@ local function patch_corpse_classes(mod)
 				if not zhopa2_loot_active(npc) then
 					return original(self, ...)
 				end
-				if not (npc and npc:alive()) or xr_danger.has_danger(npc) or xr_conditions.surge_started() or IsWounded(npc) or npc:best_enemy() then
+				if not runtime_object_alive(npc) or xr_danger.has_danger(npc) or xr_conditions.surge_started() or IsWounded(npc) or npc:best_enemy() then
 					return false
 				end
 				local st = db and db.storage and db.storage[npc:id()]
@@ -5388,7 +5409,7 @@ function M.ensure_all(reason)
 	end
 	runtime_mark_context()
 	current_patch_reason = prev_patch_reason
-	return runtime_ready_complete
+	return runtime_ready_state.complete
 end
 
 function M._on_game_load()
@@ -5399,22 +5420,25 @@ function M._on_game_load()
 end
 
 function M._actor_on_first_update()
-	runtime_actor_first_update = true
-	if runtime_warmup_until == nil then
+	runtime_ready_state.actor_first_update = true
+	if runtime_ready_state.warmup_until == nil then
 		local now = runtime_time_ms()
-		runtime_warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
+		runtime_ready_state.warmup_until = now > 0 and (now + RUNTIME_READY_WARMUP_MS) or 0
 	end
 	M.ensure_all("actor_on_first_update")
 	M.zhopa2_sync_existing_anomaly_zones("actor_on_first_update")
 end
 
 function M._actor_on_update()
+	if M._runtime_recheck_due("actor_on_update") then
+		M.ensure_all("actor_on_update")
+	end
 	M.zhopa2_watch_ground_gather_release()
 	M.zhopa2_watch_ground_gather_meet_refresh()
 end
 
 function M._runtime_recheck_due(reason)
-	if runtime_ready_complete then
+	if runtime_ready_state.complete then
 		return false
 	end
 	if reason == "on_game_start" or reason == "on_game_load" or reason == "actor_on_first_update" then
@@ -5424,8 +5448,8 @@ function M._runtime_recheck_due(reason)
 	if now <= 0 then
 		return true
 	end
-	if now >= runtime_next_recheck_tg then
-		runtime_next_recheck_tg = now + RUNTIME_READY_RECHECK_MS
+	if now >= runtime_ready_state.next_recheck_tg then
+		runtime_ready_state.next_recheck_tg = now + RUNTIME_READY_RECHECK_MS
 		return true
 	end
 	return false
@@ -5433,7 +5457,7 @@ end
 
 function M.runtime_not_ready_reason()
 	runtime_mark_context()
-	return runtime_ready_complete and nil or runtime_missing_item()
+	return runtime_ready_state.complete and nil or runtime_missing_item()
 end
 
 function M.runtime_ready(reason)
@@ -5442,7 +5466,7 @@ function M.runtime_ready(reason)
 	else
 		runtime_mark_context()
 	end
-	return runtime_ready_complete
+	return runtime_ready_state.complete
 end
 
 function M.runtime_gate_ready(reason)
@@ -5460,7 +5484,7 @@ function M.on_game_start()
 		RegisterScriptCallback("on_game_load", M._on_game_load)
 		RegisterScriptCallback("actor_on_first_update", M._actor_on_first_update)
 		RegisterScriptCallback("actor_on_update", M._actor_on_update)
-		runtime_callbacks_registered = true
+		runtime_ready_state.callbacks_registered = true
 		runtime_mark_context()
 	end
 	return true

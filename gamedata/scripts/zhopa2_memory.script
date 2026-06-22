@@ -1,12 +1,13 @@
 local M = {}
 
-local VERSION = 11
+local VERSION = 12
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"
 local BASE_FIELD_COUNT = 8
-local FIELD_COUNT = 37
+local FIELD_COUNT = 42
 local RECENT_LIMIT = 8
+local MAX_ARTIFACT_CARGO_HISTORY = 16
 local VIRTUAL_LOOT_SECTION_LIMIT = 64
 local VIRTUAL_LOOT_TOTAL_LIMIT = 128
 local VIRTUAL_LOOT_VALUE_LIMIT = 500000
@@ -74,6 +75,11 @@ function M.reset_squad(squad)
 	squad.zhopa2_post_guide_rest_reason = nil
 	squad.zhopa2_post_guide_rest_npc = nil
 	squad.zhopa2_post_guide_rest_marked_tg = nil
+	squad.zhopa2_revenge_actor_community = nil
+	squad.zhopa2_revenge_actor_community_goodwill = nil
+	squad.zhopa2_revenge_actor_personal_goodwill = nil
+	squad.zhopa2_revenge_actor_revenge_goodwill = nil
+	squad.zhopa2_revenge_actor_member_ids = nil
 	squad.zhopa2_state_version = VERSION
 end
 
@@ -182,6 +188,28 @@ local function unpack_virtual_loot(value)
 		end
 	end
 	return out
+end
+
+local function trim_artifact_cargo_sections(existing, section)
+	local values = {}
+	if type(existing) == "string" and existing ~= "" then
+		local parts = str_explode(existing, ",")
+		for i = 1, #parts do
+			local value = tostring(parts[i] or "")
+			if value ~= "" then
+				values[#values + 1] = value
+			end
+		end
+	end
+	if section then
+		values[#values + 1] = tostring(section)
+	end
+	local start = math.max(1, #values - MAX_ARTIFACT_CARGO_HISTORY + 1)
+	local out = {}
+	for i = start, #values do
+		out[#out + 1] = values[i]
+	end
+	return #out > 0 and table.concat(out, ",") or nil
 end
 
 local function pack_virtual_loot(entries)
@@ -341,10 +369,7 @@ function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
 	value = math.max(0, tonum(value) or 0)
 	squad.zhopa2_artifact_cargo_count = (tonum(squad.zhopa2_artifact_cargo_count) or 0) + 1
 	squad.zhopa2_artifact_cargo_value = (tonum(squad.zhopa2_artifact_cargo_value) or 0) + value
-	if section then
-		local existing = squad.zhopa2_artifact_cargo_sections
-		squad.zhopa2_artifact_cargo_sections = existing and existing ~= "" and (existing .. "," .. tostring(section)) or tostring(section)
-	end
+	squad.zhopa2_artifact_cargo_sections = trim_artifact_cargo_sections(squad.zhopa2_artifact_cargo_sections, section)
 	squad.zhopa2_artifact_cargo_last_id = tonum(artifact_id) or squad.zhopa2_artifact_cargo_last_id
 	local reserved = tonum(squad.zhopa2_artifact_id)
 	if reserved and reserved == tonum(artifact_id) then
@@ -450,6 +475,11 @@ function M.write_squad(packet, squad)
 	write_string(packet, squad and squad.zhopa2_post_guide_rest_reason)
 	write_string(packet, squad and squad.zhopa2_post_guide_rest_npc)
 	write_string(packet, squad and squad.zhopa2_post_guide_rest_marked_tg)
+	write_string(packet, squad and squad.zhopa2_revenge_actor_community)
+	write_string(packet, squad and squad.zhopa2_revenge_actor_community_goodwill)
+	write_string(packet, squad and squad.zhopa2_revenge_actor_personal_goodwill)
+	write_string(packet, squad and squad.zhopa2_revenge_actor_revenge_goodwill)
+	write_string(packet, squad and squad.zhopa2_revenge_actor_member_ids)
 	packet:w_stringZ(MARKER_END)
 end
 
@@ -511,6 +541,11 @@ function M.read_squad(packet, squad)
 	squad.zhopa2_post_guide_rest_reason = field_count >= 35 and read_string(packet) or nil
 	squad.zhopa2_post_guide_rest_npc = field_count >= 36 and tonum(read_string(packet)) or nil
 	squad.zhopa2_post_guide_rest_marked_tg = field_count >= 37 and tonum(read_string(packet)) or nil
+	squad.zhopa2_revenge_actor_community = field_count >= 38 and read_string(packet) or nil
+	squad.zhopa2_revenge_actor_community_goodwill = field_count >= 39 and tonum(read_string(packet)) or nil
+	squad.zhopa2_revenge_actor_personal_goodwill = field_count >= 40 and read_string(packet) or nil
+	squad.zhopa2_revenge_actor_revenge_goodwill = field_count >= 41 and read_string(packet) or nil
+	squad.zhopa2_revenge_actor_member_ids = field_count >= 42 and read_string(packet) or nil
 	clamp_virtual_loot_state(squad)
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version

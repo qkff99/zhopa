@@ -1,14 +1,15 @@
 -- Copy this file to gamedata/scripts only for focused ARTEFACT flow diagnostics.
 local M = {}
 
-local AUTO_PATCH_ENABLED = true
-local AUTO_DUMP_ON_INSTALL = true
+local AUTO_PATCH_ENABLED = false
+local AUTO_DUMP_ON_INSTALL = false
 local DUMP_DELAY_MS = 1500
 local RETRY_MS = 1500
 local MAX_ATTEMPTS = 8
 local MAX_DUMP_ARTIFACTS = 160
 local MAX_DUMP_SQUADS = 80
 local GATHER_EXECUTE_LOG_INTERVAL_MS = 1000
+local GATHER_EXECUTE_LOG_TTL_MS = 30000
 
 local installed = false
 local scheduled = false
@@ -521,6 +522,13 @@ local function should_log_gather_execute(npc, st, item_id)
 	item_id = tonumber(item_id or (st and st.selected_id)) or 0
 	local key = tostring(npc_id or "-") .. ":" .. tostring(item_id)
 	local now = tg()
+	if now > 0 then
+		for old_key, entry in pairs(last_gather_execute_log) do
+			if not entry or not entry.tg or now - entry.tg > GATHER_EXECUTE_LOG_TTL_MS then
+				last_gather_execute_log[old_key] = nil
+			end
+		end
+	end
 	local state = tostring(state_mgr_text(npc)) .. ":" .. tostring(st and st.stage or "-") .. ":" .. tostring(st and st.vid or "-") .. ":" .. tostring(st and st.zhopa2_approach_index or "-") .. ":" .. tostring(st and st.zhopa2_artifact_force_pickup or "-")
 	local prev = last_gather_execute_log[key]
 	if not prev or prev.state ~= state or now <= 0 or now - prev.tg >= GATHER_EXECUTE_LOG_INTERVAL_MS then

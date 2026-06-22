@@ -156,6 +156,11 @@ local function mark_death_processed(victim_squad, offender_target_id)
 	return true
 end
 
+local function death_processed(victim_squad, offender_target_id)
+	local key = death_key(victim_squad, offender_target_id)
+	return key ~= nil and processed_deaths[key] == true
+end
+
 local function squad_npc_count(squad)
 	if not (squad and type(squad.npc_count) == "function") then
 		return 0
@@ -170,6 +175,17 @@ local function squad_member_count_soft(squad)
 		return math.max(0, cached)
 	end
 	return squad_npc_count(squad)
+end
+
+local function squad_commander_id(squad)
+	if not squad then
+		return nil
+	end
+	if type(squad.commander_id) == "function" then
+		local ok, id = pcall(squad.commander_id, squad)
+		return ok and tonumber(id) or nil
+	end
+	return tonumber(squad.commander_id) or tonumber(squad.comm_id)
 end
 
 local function obj_level(obj)
@@ -441,7 +457,23 @@ local function actor_revenge_squad_active(squad)
 	return squad
 		and squad.zhopa2_task == TASK_REVENGE
 		and tonumber(squad.zhopa2_target) == ACTOR_TARGET_ID
-		and squad_member_count_soft(squad) > 0
+		and squad_npc_count(squad) > 0
+		and squad_commander_id(squad)
+end
+
+local function rebuild_active_actor_revenge_squad_id()
+	if not (SIMBOARD and SIMBOARD.squads) then
+		return nil
+	end
+	for squad_id in pairs(SIMBOARD.squads) do
+		local squad = alife_object and alife_object(squad_id) or nil
+		if actor_revenge_squad_active(squad) then
+			active_actor_revenge_squad_id = squad.id
+			return squad
+		end
+	end
+	active_actor_revenge_squad_id = nil
+	return nil
 end
 
 local function active_actor_revenge_exists()
@@ -450,7 +482,7 @@ local function active_actor_revenge_exists()
 		return true
 	end
 	active_actor_revenge_squad_id = nil
-	return false
+	return actor_revenge_squad_active(rebuild_active_actor_revenge_squad_id())
 end
 
 local function current_actor_level()
@@ -735,7 +767,7 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 		return false
 	end
 
-	if not mark_death_processed(victim_squad, offender_target_id) then
+	if death_processed(victim_squad, offender_target_id) then
 		return false
 	end
 	if is_actor_target then
@@ -750,7 +782,11 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 	if not responder then
 		return false
 	end
-	return M.assign_revenge(responder, offender_target_id)
+	local assigned = M.assign_revenge(responder, offender_target_id)
+	if assigned then
+		mark_death_processed(victim_squad, offender_target_id)
+	end
+	return assigned
 end
 
 function M.on_npc_death_callback(victim, who)

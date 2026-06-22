@@ -1,8 +1,8 @@
 local M = {}
 
 -- Copy this file to gamedata/scripts only for focused corpse loot-loop diagnostics.
-local AUTO_INSTALL_ENABLED = true
-local AUTO_WATCH_ENABLED = true
+local AUTO_INSTALL_ENABLED = false
+local AUTO_WATCH_ENABLED = false
 local WATCH_DURATION_MS = 120000
 local WATCH_INTERVAL_MS = 1000
 local DUMP_DELAY_MS = 2000

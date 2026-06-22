@@ -366,8 +366,9 @@ local function debug_trade_log(squad, stage, result, detail)
 	local target_id = squad and (squad.current_target_id or squad.assigned_target_id or squad.zhopa2_target) or nil
 	local last_trade = squad and squad.zhopa2_last_trade_result or "-"
 	local trade_detail = squad and squad.zhopa2_trade_detail or nil
+	local debug_detail = detail
 	if trade_detail and trade_detail ~= "" then
-		detail = tostr(detail or "-") .. "; " .. tostr(trade_detail)
+		debug_detail = tostr(debug_detail or "-") .. "; " .. tostr(trade_detail)
 	end
 	if type(printf) == "function" then
 		pcall(
@@ -380,7 +381,7 @@ local function debug_trade_log(squad, stage, result, detail)
 			named_id(smart_id),
 			named_id(target_id),
 			tostr(last_trade),
-			tostr(detail or "-")
+			tostr(debug_detail or "-")
 		)
 	end
 end
@@ -540,7 +541,7 @@ local registry_weight_keys = {
 		["POPULATE"] = { key = "stalker_populate_weight", default = 20, enabled = "populate_enabled", enabled_default = true },
 		["PATROL"] = { key = "stalker_patrol_weight", default = 25, enabled = "patrol_enabled", enabled_default = true },
 		["HUNT"] = { key = "stalker_hunt_weight", default = 15, enabled = "stalker_hunt_enabled", enabled_default = true },
-		["ARTEFACT"] = { key = "stalker_artefact_weight", default = 10, enabled = "artefact_enabled", enabled_default = false },
+		["ARTEFACT"] = { key = "stalker_artefact_weight", default = 10, enabled = "artefact_enabled", enabled_default = true },
 		["TRADE"] = { key = "stalker_trade_weight", default = 10, enabled = "trade_enabled", enabled_default = true },
 	},
 	["mutant"] = {
@@ -1144,7 +1145,7 @@ end
 
 local function build_stalker_artefact(squad)
 	local artifacts = artifacts_mod()
-	if not (cfg_bool("artefact_enabled", false) and artifacts and type(artifacts.pick_target) == "function") then
+	if not (cfg_bool("artefact_enabled", true) and artifacts and type(artifacts.pick_target) == "function") then
 		return nil
 	end
 	local target = artifacts.pick_target(squad, { level_mode = "same", exclude_current = false })
@@ -1895,6 +1896,89 @@ local function squad_member_id_set(squad)
 	return ids
 end
 
+local function encode_number_map(map)
+	if type(map) ~= "table" then
+		return nil
+	end
+	local parts = {}
+	for id, value in pairs(map) do
+		id = tonumber(id)
+		value = tonumber(value)
+		if id and value then
+			parts[#parts + 1] = tostring(id) .. ":" .. tostring(value)
+		end
+	end
+	if #parts == 0 then
+		return nil
+	end
+	table.sort(parts)
+	return table.concat(parts, ",")
+end
+
+local function decode_number_map(value)
+	local out = {}
+	if type(value) ~= "string" or value == "" then
+		return out
+	end
+	for item in string.gmatch(value, "[^,]+") do
+		local id, num = string.match(item, "^([^:]+):([^:]+)$")
+		id = tonumber(id)
+		num = tonumber(num)
+		if id and num then
+			out[id] = num
+		end
+	end
+	return out
+end
+
+local function encode_id_set(set)
+	if type(set) ~= "table" then
+		return nil
+	end
+	local parts = {}
+	for id, enabled in pairs(set) do
+		id = tonumber(id)
+		if id and enabled ~= false and enabled ~= nil then
+			parts[#parts + 1] = tostring(id)
+		end
+	end
+	if #parts == 0 then
+		return nil
+	end
+	table.sort(parts)
+	return table.concat(parts, ",")
+end
+
+local function decode_id_set(value)
+	local out = {}
+	if type(value) ~= "string" or value == "" then
+		return out
+	end
+	for item in string.gmatch(value, "[^,]+") do
+		local id = tonumber(item)
+		if id then
+			out[id] = true
+		end
+	end
+	return out
+end
+
+local function set_empty(set)
+	return type(set) ~= "table" or next(set) == nil
+end
+
+local function persist_actor_revenge_relation_scope(squad, scope)
+	if not (squad and scope) then
+		return false
+	end
+	squad.zhopa2_revenge_actor_community = scope.community
+	squad.zhopa2_revenge_actor_community_goodwill = scope.community_goodwill
+	squad.zhopa2_revenge_actor_personal_goodwill = encode_number_map(scope.personal_goodwill)
+	squad.zhopa2_revenge_actor_revenge_goodwill = encode_number_map(scope.revenge_personal_goodwill)
+	squad.zhopa2_revenge_actor_member_ids = encode_id_set(scope.revenge_member_ids)
+	return true
+end
+
 local function snapshot_member_actor_goodwill(member, bucket)
 	if not (member and member.id and bucket and bucket[member.id] == nil) then
 		return false
@@ -2005,6 +2089,7 @@ local function ensure_actor_revenge_relation_scope(squad)
 		squad.zhopa2_revenge_actor_community_goodwill = scope.community_goodwill
 	end
 	snapshot_actor_revenge_relation_scope(squad, scope)
+	persist_actor_revenge_relation_scope(squad, scope)
 	return scope
 end
 
@@ -2025,11 +2110,14 @@ local function stored_actor_revenge_relation_scope(squad)
 	scope = {
 		community = community,
 		community_goodwill = goodwill,
-		personal_goodwill = {},
-		revenge_personal_goodwill = {},
-		revenge_member_ids = squad_member_id_set(squad),
+		personal_goodwill = decode_number_map(squad.zhopa2_revenge_actor_personal_goodwill),
+		revenge_personal_goodwill = decode_number_map(squad.zhopa2_revenge_actor_revenge_goodwill),
+		revenge_member_ids = decode_id_set(squad.zhopa2_revenge_actor_member_ids),
 		next_restore = 0,
 	}
+	if set_empty(scope.revenge_member_ids) then
+		scope.revenge_member_ids = squad_member_id_set(squad)
+	end
 	actor_revenge_relation_scopes[squad_id] = scope
 	return scope
 end
@@ -2066,6 +2154,9 @@ local function clear_actor_revenge_relation_scope(squad)
 	if squad then
 		squad.zhopa2_revenge_actor_community = nil
 		squad.zhopa2_revenge_actor_community_goodwill = nil
+		squad.zhopa2_revenge_actor_personal_goodwill = nil
+		squad.zhopa2_revenge_actor_revenge_goodwill = nil
+		squad.zhopa2_revenge_actor_member_ids = nil
 	end
 end
 

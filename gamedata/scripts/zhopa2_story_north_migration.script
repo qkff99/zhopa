@@ -5,6 +5,7 @@ local STATE_VERSION = 1
 local TASK_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
 local INVALID_ID = 65535
 local RECHECK_MS = 1000
+local ROLLOUT_MAX_PER_TICK = 3
 local DISTANCE_FALLBACK = 1000000000
 local ENEMIES_THRESHOLD = tonumber(_G.game_relations and _G.game_relations.ENEMIES) or -1000
 
@@ -991,6 +992,28 @@ local function activate_selected_sid(sid, source, squad)
 	return assign_story_target(squad, sid, smart, level_name, source or "story_north_assign")
 end
 
+local function process_rollout_queue(source, limit)
+	local event = event_state()
+	local processed = 0
+	local remaining = 0
+	limit = math.max(1, tonumber(limit) or ROLLOUT_MAX_PER_TICK)
+	for sid in pairs(event.selected_by_sid) do
+		if normalize_status(event.status_by_sid[sid]) == "pending" then
+			if processed < limit then
+				activate_selected_sid(sid, source or "story_north_rollout")
+				processed = processed + 1
+			else
+				remaining = remaining + 1
+			end
+		end
+	end
+	if remaining > 0 then
+		pending_reconcile = true
+		pending_source = source or "story_north_rollout_queue"
+	end
+	return processed, remaining
+end
+
 local function collect_eligible_sids()
 	local idx = index_mod()
 	if not (idx and type(idx.squads_on_levels) == "function") then
@@ -1052,9 +1075,7 @@ local function maybe_fire(source)
 		tostr(selected_count),
 		tostr(percent)
 	)
-	for i = 1, selected_count do
-		activate_selected_sid(eligible[i], "story_north_rollout")
-	end
+	process_rollout_queue("story_north_rollout", ROLLOUT_MAX_PER_TICK)
 	rollout_running = false
 	return true
 end
@@ -1071,7 +1092,7 @@ local function reconcile_selected(source)
 		if status ~= "done" and status ~= "dead_or_invalid" then
 			local squad = resolve_object(sid)
 			if not squad then
-				event.status_by_sid[sid] = (source == "load_state" or source == "actor_on_first_update") and "pending" or "dead_or_invalid"
+				event.status_by_sid[sid] = (source == "load_state" or source == "on_game_load" or source == "actor_on_first_update") and "pending" or "dead_or_invalid"
 			elseif story_task_active(squad) then
 				event.status_by_sid[sid] = "travel"
 			elseif not eligible_squad(squad) then
@@ -1141,6 +1162,8 @@ local function actor_on_update()
 		request_reconcile(pending_source or "actor_on_update")
 	elseif event_state().fired ~= true and trigger_active() == true then
 		maybe_fire("actor_on_update")
+	else
+		process_rollout_queue("actor_on_update", ROLLOUT_MAX_PER_TICK)
 	end
 end
 

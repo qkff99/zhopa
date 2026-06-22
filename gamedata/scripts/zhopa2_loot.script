@@ -1893,7 +1893,7 @@ local function inventory_item_by_section(owner, section, excluded_id)
 	if not (owner and section) then
 		return nil
 	end
-	excluded_id = tonumber(excluded_id)
+	local excluded_id = tonumber(excluded_id)
 	local found
 	if type(owner.iterate_inventory) == "function" and object_is_online_inventory_owner(owner) then
 		local function inspect(_, item)
@@ -1911,6 +1911,23 @@ local function inventory_item_by_section(owner, section, excluded_id)
 		return ok and item or nil
 	end
 	return nil
+end
+
+local function inventory_item_by_id(owner, item_id)
+	item_id = tonumber(item_id)
+	if not (owner and item_id) then
+		return nil
+	end
+	local found
+	if type(owner.iterate_inventory) == "function" and object_is_online_inventory_owner(owner) then
+		local function inspect(_, item)
+			if not found and tonumber(object_id(item)) == item_id then
+				found = item
+			end
+		end
+		pcall(owner.iterate_inventory, owner, inspect, owner)
+	end
+	return found
 end
 
 local function add_online_member(out, seen, id)
@@ -2090,8 +2107,14 @@ local function recover_task_artifact_from_squad_inventory(squad, artifact_id, re
 	end
 	local members = squad_online_member_objects(squad)
 	for i = 1, #members do
-		local item = inventory_item_by_section(members[i], section)
-		if item and tonumber(object_id(item)) == artifact_id then
+		local item = inventory_item_by_id(members[i], artifact_id)
+		if not item then
+			local section_item = inventory_item_by_section(members[i], section)
+			if section_item and tonumber(object_id(section_item)) == artifact_id then
+				item = section_item
+			end
+		end
+		if item then
 			return mark_artifact_cargo_for_squad(squad, item, section, item_cost(item), artifact_id, reason or "artifact_inventory_recover")
 		end
 	end

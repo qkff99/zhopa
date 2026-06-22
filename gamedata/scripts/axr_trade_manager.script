@@ -38,6 +38,8 @@ local zhopa_npc_has_items_to_sell
 local zhopa_axr_trade_job_sell_items
 local zhopa_axr_trade_job_give_id
 local zhopa_npc_trade_buy_sell_impl
+local axr_online_object_by_id
+local axr_object_alive
 local log_always
 local print_debug
 local print_trade_event
@@ -74,6 +76,26 @@ local function zhopa2_service_doctor_mod()
 		doctor = rawget(_G, "zhopa2_smart_service_slot_doctor")
 	end
 	return doctor
+end
+
+local function zhopa2_cfg_mod()
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	return cfg
+end
+
+function axr_object_alive(obj)
+	if not obj then
+		return false
+	end
+	if type(obj.alive) ~= "function" then
+		return true
+	end
+	local ok, alive = pcall(obj.alive, obj)
+	return ok and alive == true
 end
 
 local function begin_item_take_suppress(npc, reason)
@@ -196,8 +218,9 @@ local function zhopa_master_enabled()
 			return enabled == true
 		end
 	end
-	if zhopa and zhopa.config and zhopa.config.get then
-		local ok_cfg, enabled = pcall(function() return zhopa.config.get("enabled", true) end)
+	local cfg = zhopa2_cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok_cfg, enabled = pcall(cfg.get_bool, "enabled", true)
 		if ok_cfg then
 			return enabled == true
 		end
@@ -207,7 +230,7 @@ end
 
 local function read_zhopa_buy_all_from_ltx()
 	if not ZHOPA_AXR_BUY_ALL_CACHE.ltx and ini_file then
-		local ok_ini, ltx = pcall(function() return ini_file("zhopa_settings.ltx") end)
+		local ok_ini, ltx = pcall(function() return ini_file("zhopa2_settings.ltx") end)
 		if ok_ini then
 			ZHOPA_AXR_BUY_ALL_CACHE.ltx = ltx
 		end
@@ -216,11 +239,11 @@ local function read_zhopa_buy_all_from_ltx()
 	if not ltx then
 		return nil
 	end
-	local ok_has, has = pcall(function() return ltx:line_exist("zhopa", "trade_service_buy_all_enabled") end)
+	local ok_has, has = pcall(function() return ltx:line_exist("zhopa2", "trade_service_buy_all_enabled") end)
 	if not (ok_has and has) then
 		return nil
 	end
-	local ok_val, raw = pcall(function() return ltx:r_string("zhopa", "trade_service_buy_all_enabled") end)
+	local ok_val, raw = pcall(function() return ltx:r_string("zhopa2", "trade_service_buy_all_enabled") end)
 	if not ok_val then
 		return nil
 	end
@@ -235,8 +258,9 @@ local function get_zhopa_buy_all_enabled()
 
 	local value = nil
 	local source = "default"
-	if zhopa and zhopa.config and zhopa.config.get then
-		local ok_cfg, raw = pcall(function() return zhopa.config.get("trade_service_buy_all_enabled", nil) end)
+	local cfg = zhopa2_cfg_mod()
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok_cfg, raw = pcall(cfg.get_bool, "trade_service_buy_all_enabled", nil)
 		if ok_cfg then
 			value = parse_bool(raw)
 			if value ~= nil then
@@ -685,8 +709,7 @@ local function resolve_npc_provider_role(npc, smart, npc_id)
 
 	local obj = npc
 	if not obj then
-		local st = db.storage[id]
-		obj = st and st.object or level.object_by_id(id)
+		obj = axr_online_object_by_id(id)
 	end
 
 	smart = smart or (obj and xr_gulag.get_npc_smart(obj)) or nil
@@ -1007,7 +1030,7 @@ end
 -- Trade job
 --------------------------------
 function check_trade_item(npc,item)
-	if not (npc:alive()) then
+	if not axr_object_alive(npc) then
 		return
 	end
 
@@ -1150,7 +1173,7 @@ local function axr_object_id(obj)
 	return tonumber(obj.id)
 end
 
-local function axr_online_object_by_id(id)
+function axr_online_object_by_id(id)
 	id = tonumber(id)
 	if not id then
 		return nil
@@ -1158,7 +1181,8 @@ local function axr_online_object_by_id(id)
 	local st = db and db.storage and db.storage[id] or nil
 	local obj = st and st.object or nil
 	if not obj and level and type(level.object_by_id) == "function" then
-		obj = level.object_by_id(id)
+		local ok, found = pcall(level.object_by_id, id)
+		obj = ok and found or nil
 	end
 	if obj and type(obj.alive) == "function" then
 		local ok, alive = pcall(obj.alive, obj)
@@ -1406,7 +1430,7 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 	local smart = xr_gulag.get_npc_smart(npc)
 	local npc_info = smart and smart.npc_info[id]
 	local seller_id = npc_info and npc_info.job and npc_info.job.seller_id
-	local seller = seller_id and (db.storage[seller_id] and db.storage[seller_id].object or level.object_by_id(seller_id))
+	local seller = seller_id and axr_online_object_by_id(seller_id) or nil
 	if not seller then
 		clear_trade_item_intent(st)
 		finalize_service_session(npc, "trade", "done_no_seller")
@@ -1552,7 +1576,14 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 	local buy_sell_items = {}
 	local size_t = 0
 	local last_buy_sec = nil
+	local max_buy_items = math.max(1, math.floor((tonumber(money) or 0) / 1) + 1)
+	local buy_iterations = 0
 	while money > 0 do
+		buy_iterations = buy_iterations + 1
+		if buy_iterations >= max_buy_items then
+			log_always("buy_loop_guard npc=%s id=%s money=%s iterations=%s", npc and npc:name() or "nil", tostring(id), tostring(money), tostring(buy_iterations))
+			break
+		end
 		local stats = {
 			buy_blocked_policy = 0,
 			buy_blocked_money = 0,
@@ -1580,6 +1611,10 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 			tostring(last_buy_sec or "nil"))
 
 		if not pick then
+			break
+		end
+		if not (pick.cost and pick.cost > 0) then
+			log_always("buy_bad_cost npc=%s id=%s sec=%s cost=%s", npc and npc:name() or "nil", tostring(id), tostring(pick.sec or "-"), tostring(pick.cost))
 			break
 		end
 
@@ -1703,7 +1738,7 @@ local function picked_set(t,gr,ind)
 end
 	
 function check_tech_item(npc,item)
-	if not (npc:alive()) then
+	if not axr_object_alive(npc) then
 		return
 	end
 
@@ -1780,7 +1815,7 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 		return false
 	end
 	
-	local obj = st and st.object or level.object_by_id(id)
+	local obj = st and st.object or axr_online_object_by_id(id)
 	if (not obj) then
 		print_debug("! npc_has_tech_items - no obj found for id (%s)", id)
 		return
@@ -1859,7 +1894,7 @@ function npc_tech_upgrade_sell(npc)
 	local smart = xr_gulag.get_npc_smart(npc)
 	local npc_info = smart and smart.npc_info[id]
 	local mechanic_id = npc_info and npc_info.job and npc_info.job.mechanic_id
-	local mechanic = mechanic_id and (db.storage[mechanic_id] and db.storage[mechanic_id].object or level.object_by_id(mechanic_id))
+	local mechanic = mechanic_id and axr_online_object_by_id(mechanic_id) or nil
 	print_debug("- NPC Tech | Mechanic = %s", mechanic and mechanic:name())
 	
 	-- SELL ITEMS

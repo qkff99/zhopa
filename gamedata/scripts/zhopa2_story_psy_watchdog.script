@@ -368,7 +368,8 @@ local function level_name_by_gvid(gvid)
 	end
 	local ok, level_name = pcall(function()
 		local vertex = game_graph():vertex(gvid)
-		return vertex and alife():level_name(vertex:level_id()) or nil
+		local sim = alife()
+		return vertex and sim and sim:level_name(vertex:level_id()) or nil
 	end)
 	return ok and level_name or nil
 end
@@ -686,7 +687,11 @@ local function release_squad_safe(squad, reason)
 			return true
 		end
 	end
-	local sim = alife and alife() or nil
+	local sim = nil
+	if type(alife) == "function" then
+		local ok_sim, value = pcall(alife)
+		sim = ok_sim and value or nil
+	end
 	if sim and type(sim.release) == "function" then
 		local ok, result = pcall(sim.release, sim, squad, true)
 		if ok and result ~= false then
@@ -788,7 +793,6 @@ function M.convert_squad_to_zombied(squad, context, source)
 	end
 	spawned_members = tonumber(spawned_members) or 0
 
-	cleanup_source_task(squad)
 	if release_squad_safe(squad, "story_psy_watchdog_convert") ~= true then
 		release_squad_safe(new_squad, "story_psy_watchdog_rollback")
 		runtime.processing_by_sid[new_sid] = nil
@@ -797,6 +801,7 @@ function M.convert_squad_to_zombied(squad, context, source)
 		return false
 	end
 
+	cleanup_source_task(squad)
 	unregister_released_squad(squad)
 	finalize_spawned_squad(new_squad, context)
 	local source_members = tonumber(context.member_count) or 0
@@ -929,12 +934,8 @@ local function server_entity_on_register(se_obj, type_name)
 	if type_name ~= "sim_squad_scripted" then
 		return
 	end
-	if not runtime_ready("story_psy_watchdog_register") then
-		pending_reconcile = true
-		pending_source = "server_entity_on_register"
-		return
-	end
-	M.try_process_squad(se_obj, "server_entity_on_register")
+	pending_reconcile = true
+	pending_source = "server_entity_on_register"
 end
 
 function M.on_game_start()

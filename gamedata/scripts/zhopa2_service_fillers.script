@@ -614,8 +614,8 @@ local function service_squad_from_member(se_obj)
 end
 
 local function same_id(a, b)
-	a = tonumber(a) or a
-	b = tonumber(b) or b
+	local a = tonumber(a) or a
+	local b = tonumber(b) or b
 	return a ~= nil and b ~= nil and a == b
 end
 

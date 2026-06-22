@@ -8,6 +8,8 @@ local VIRTUAL_ARTIFACT_ID_BASE = 100000000
 local VIRTUAL_ARTIFACT_SLOT_MULT = 1000
 local VIRTUAL_SPAWN_COOLDOWN_MS = 300000
 local VIRTUAL_STATE_KEY = "zhopa2_virtual_artifacts"
+local VIRTUAL_STORE_VERSION = 1
+local ARTIFACT_CARGO_HISTORY_LIMIT = 16
 
 M.smart_ownership = {}
 M.base_pull_squad = {}
@@ -441,10 +443,59 @@ local function virtual_storage_state()
 		state[VIRTUAL_STATE_KEY] = {}
 	end
 	local store = state[VIRTUAL_STATE_KEY]
+	if store.version ~= VIRTUAL_STORE_VERSION then
+		store.version = VIRTUAL_STORE_VERSION
+	end
 	if type(store.artifacts) ~= "table" then
 		store.artifacts = {}
 	end
 	return store
+end
+
+local function cargo_sections_append(existing, section)
+	local values = {}
+	if type(existing) == "string" and existing ~= "" then
+		local parts = str_explode(existing, ",")
+		for i = 1, #parts do
+			local value = tostring(parts[i] or "")
+			if value ~= "" then
+				values[#values + 1] = value
+			end
+		end
+	end
+	if section then
+		values[#values + 1] = tostring(section)
+	end
+	local start = math.max(1, #values - ARTIFACT_CARGO_HISTORY_LIMIT + 1)
+	local out = {}
+	for i = start, #values do
+		out[#out + 1] = values[i]
+	end
+	return #out > 0 and table.concat(out, ",") or nil
+end
+
+local function cargo_sections_after_consume(existing, consumed, remaining)
+	local values = {}
+	if type(existing) == "string" and existing ~= "" then
+		local parts = str_explode(existing, ",")
+		for i = 1, #parts do
+			local value = tostring(parts[i] or "")
+			if value ~= "" then
+				values[#values + 1] = value
+			end
+		end
+	end
+	consumed = math.max(0, tonumber(consumed) or 0)
+	remaining = math.max(0, tonumber(remaining) or 0)
+	local start = math.min(#values + 1, consumed + 1)
+	local out = {}
+	for i = start, #values do
+		out[#out + 1] = values[i]
+	end
+	while #out > remaining do
+		table.remove(out, 1)
+	end
+	return #out > 0 and table.concat(out, ",") or nil
 end
 
 local function persist_virtual_artifact(artifact_id)
@@ -1142,7 +1193,7 @@ local function remove_artifact_from_smart_bucket(artifact_id, smart_id)
 end
 
 local function remove_artifact_from_other_smart_buckets(artifact_id, keep_smart_id)
-	keep_smart_id = tonumber(keep_smart_id)
+	local keep_smart_id = tonumber(keep_smart_id)
 	local changed = {}
 	for smart_id, bucket in pairs(M.smart_artifacts) do
 		if bucket and tonumber(smart_id) ~= keep_smart_id and bucket[artifact_id] then
@@ -1276,7 +1327,7 @@ end
 
 local function virtual_artifact_id(zone_id, slot)
 	zone_id = math.abs(math.floor(tonumber(zone_id) or 0))
-	slot = math.max(1, math.floor(tonumber(slot) or 1))
+	local slot = math.max(1, math.floor(tonumber(slot) or 1))
 	return -1 * (VIRTUAL_ARTIFACT_ID_BASE + zone_id * VIRTUAL_ARTIFACT_SLOT_MULT + slot)
 end
 
@@ -1991,7 +2042,7 @@ function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
 	local amount = (tonum(squad.zhopa2_artifact_cargo_value) or 0) + math.max(0, tonum(value) or 0)
 	squad.zhopa2_artifact_cargo_count = count
 	squad.zhopa2_artifact_cargo_value = amount
-	squad.zhopa2_artifact_cargo_sections = section and tostring(section) or squad.zhopa2_artifact_cargo_sections
+	squad.zhopa2_artifact_cargo_sections = cargo_sections_append(squad.zhopa2_artifact_cargo_sections, section)
 	squad.zhopa2_artifact_cargo_last_id = tonum(artifact_id)
 	local reserved = tonum(squad.zhopa2_artifact_id) or tonum(M.squad_artifact_reservation[squad.id])
 	if reserved and reserved == tonum(artifact_id) then
@@ -2040,6 +2091,11 @@ function M.consume_artifact_cargo(squad, count, value, reason)
 	end
 	squad.zhopa2_artifact_cargo_count = next_count
 	squad.zhopa2_artifact_cargo_value = mmax(0, (tonum(squad.zhopa2_artifact_cargo_value) or 0) - value)
+	squad.zhopa2_artifact_cargo_sections = cargo_sections_after_consume(squad.zhopa2_artifact_cargo_sections, count, next_count)
+	if next_count <= 0 then
+		squad.zhopa2_artifact_cargo_last_id = nil
+		squad.zhopa2_artifact_task_collected_id = nil
+	end
 	squad.zhopa2_last_result = reason or "artifact_cargo_consumed"
 	return M.sync_artifact_cargo(squad)
 end
@@ -2307,12 +2363,13 @@ function M.try_empty_base_pull(smart)
 end
 
 function M.on_smart_update(smart)
-	local ownership = M.update_base_ownership(smart)
+	local ownership_enabled = cfg_bool("base_ownership_enabled", true)
+	local ownership = ownership_enabled and M.update_base_ownership(smart) or nil
 	local svc = service_fillers_mod()
 	if svc and type(svc.on_smart_update) == "function" then
 		pcall(svc.on_smart_update, smart, ownership)
 	end
-	if ownership and ownership.presence == "empty" then
+	if ownership_enabled and ownership and ownership.presence == "empty" then
 		M.try_empty_base_pull(smart)
 	end
 end
