@@ -204,15 +204,6 @@ local function surge_active_uncached()
 		end
 	end
 
-	if level and type_(level.is_surge) == "function" then
-		local ok, res = pcall(function()
-			return level.is_surge()
-		end)
-		if ok and res == true then
-			return true
-		end
-	end
-
 	return false
 end
 
