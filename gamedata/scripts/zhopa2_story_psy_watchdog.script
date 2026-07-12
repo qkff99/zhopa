@@ -767,7 +767,6 @@ local function candidate_context(squad, source, known_level)
 end
 
 function M.convert_squad_to_zombied(squad, context, source)
-	local tostr = tostring
 	local sid = normalize_id(squad and squad.id)
 	if not (sid and context) or runtime.processing_by_sid[sid] == true then
 		return false
@@ -804,10 +803,12 @@ function M.convert_squad_to_zombied(squad, context, source)
 	cleanup_source_task(squad)
 	unregister_released_squad(squad)
 	finalize_spawned_squad(new_squad, context)
+
 	local source_members = tonumber(context.member_count) or 0
 	local new_members = tonumber(squad_member_count(new_squad)) or 0
 	local count_check = (source_members > 0 and spawned_members == source_members and new_members == source_members) and "ok" or "mismatch"
 	if count_check ~= "ok" then
+		local tostr = tostring
 		log_mutation_error(
 			sid,
 			context,
@@ -817,30 +818,10 @@ function M.convert_squad_to_zombied(squad, context, source)
 			"source_members=" .. tostr(source_members) .. ",spawned_members=" .. tostr(spawned_members) .. ",new_members=" .. tostr(new_members)
 		)
 	end
+
 	runtime.processing_by_sid[new_sid] = nil
 	runtime.processing_by_sid[sid] = nil
-	debug_log(
-		"~ ZHOPA2 psy watchdog | mutated_to_zombied squad [%s:%s] faction [%s] section [%s] level [%s] source_smart [%s:%s] source_smart_level [%s] assigned_smart [%s:%s] smart_check [%s] new_squad [%s:%s] new_section [%s] source_members [%s] spawned_members [%s] new_members [%s] count_check [%s] reason [psi_level] source [%s]",
-		tostr(context.source_squad_name or "-"),
-		tostr(sid),
-		tostr(context.source_community or "-"),
-		tostr(context.source_section or "-"),
-		tostr(context.level_name or "-"),
-		tostr(context.source_smart_name or "-"),
-		tostr(context.source_smart_id or "-"),
-		tostr(context.source_smart_level or "-"),
-		tostr(context.smart_name or "-"),
-		tostr(context.smart_id or "-"),
-		tostr(context.smart_check or "-"),
-		tostr(safe_name(new_squad) or "-"),
-		tostr(new_sid),
-		tostr(context.zombied_squad_section or "-"),
-		tostr(source_members),
-		tostr(spawned_members),
-		tostr(new_members),
-		tostr(count_check),
-		tostr(source or "-")
-	)
+
 	return true
 end
 
