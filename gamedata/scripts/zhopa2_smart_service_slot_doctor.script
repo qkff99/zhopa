@@ -116,6 +116,11 @@ local function now()
     return (time_global and time_global()) or 0
 end
 
+local function surge_active()
+    local tasks = _G.zhopa2_tasks
+    return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local function reset_runtime()
     RUNTIME.smart_next_scan_tg = {}
     RUNTIME.smart_diag_next_tg = {}
@@ -129,6 +134,13 @@ local function reset_runtime()
     RUNTIME.ingress_by_npc = {}
     RUNTIME.repair_queue = {}
     RUNTIME.repair_queued = {}
+end
+
+local function pause_for_surge()
+    if RUNTIME.surge_paused ~= true then
+        reset_runtime()
+        RUNTIME.surge_paused = true
+    end
 end
 
 local function mark_runtime_ready()
@@ -1543,6 +1555,11 @@ local function queue_repair_issue(issue)
 end
 
 local function process_repair_queue(limit)
+	if surge_active() then
+		pause_for_surge()
+		return 0
+	end
+	RUNTIME.surge_paused = nil
     limit = math.max(1, tonumber(limit) or REPAIR_MAX_PER_TICK)
     local processed = 0
     while processed < limit and #RUNTIME.repair_queue > 0 do
@@ -1580,6 +1597,11 @@ local function process_smart(smart)
     if RUNTIME.ready ~= true then
         return
     end
+	if surge_active() then
+		pause_for_surge()
+		return
+	end
+	RUNTIME.surge_paused = nil
 
     local smart_id = tonumber(smart and smart.id) or nil
     if not smart_id then
@@ -1653,6 +1675,11 @@ local function on_npc_update(npc)
     if RUNTIME.ready ~= true then
         return
     end
+	if surge_active() then
+		pause_for_surge()
+		return
+	end
+	RUNTIME.surge_paused = nil
     if not (npc and type(npc.id) == "function") then
         return
     end

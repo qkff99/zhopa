@@ -1468,16 +1468,13 @@ local function pause_for_surge(squad)
 	end
 
 	if squad and squad.zhopa2_task then
-		local first_pause = squad.zhopa2_surge_paused ~= true
-		squad.zhopa2_surge_paused = true
-		squad.zhopa2_last_reason = "surge_pause"
-		squad.zhopa2_last_result = "surge_pause"
-		if first_pause then
+		if squad.zhopa2_surge_paused ~= true then
+			squad.zhopa2_surge_paused = true
+			squad.zhopa2_last_reason = "surge_pause"
+			squad.zhopa2_last_result = "surge_pause"
 			clear_zhopa2_movement_target(squad, true)
-		else
-			clear_zhopa2_movement_target(squad, false)
+			update_debug(squad)
 		end
-		update_debug(squad)
 	end
 	return true
 end
@@ -1509,6 +1506,9 @@ end
 function M.interrupt_task(squad, task, target_id, duration_sec, reason, patrol, opts)
 	opts = opts or {}
 	if not (squad and task and target_id ~= nil and type(squad.zhopa2_assign_task) == "function") then
+		return false
+	end
+	if M.surge_active() then
 		return false
 	end
 	if mutant_has_stalker_task(squad, task) then
@@ -2416,11 +2416,11 @@ function M.update_squad(squad, memory)
 		return false
 	end
 
-	recover_prepared_trade_if_any(squad, "task_update")
-
 	if pause_for_surge(squad) then
 		return false
 	end
+
+	recover_prepared_trade_if_any(squad, "task_update")
 
 	if park_inactive_mutant(squad) then
 		return false

@@ -133,6 +133,11 @@ local function tasks_mod()
 	return tasks
 end
 
+local function surge_active()
+	local tasks = tasks_mod()
+	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local service_fillers_started = false
 local function service_fillers_mod()
 	local svc = rawget(_G, "zhopa2_service_fillers")
@@ -2288,6 +2293,9 @@ end
 
 function M.try_empty_base_pull(smart)
 	if not (smart and smart.id and smart_is_base(smart)) then
+		return false
+	end
+	if surge_active() then
 		return false
 	end
 	if not cfg_bool("base_camping_enabled", true) then

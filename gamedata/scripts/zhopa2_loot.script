@@ -85,6 +85,11 @@ local function runtime_ready(reason)
 	return false
 end
 
+local function surge_active()
+	local tasks = rawget(_G, "zhopa2_tasks")
+	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local function alife_sim()
 	if not alife then
 		return nil
@@ -1750,6 +1755,9 @@ function M.request_item_pickup(npc, item_id, reason)
 	if not runtime_ready("loot_request_item_pickup") then
 		return false, "runtime_not_ready"
 	end
+	if surge_active() then
+		return false, "request_surge_active"
+	end
 	item_id = tonumber(item_id)
 	local npc_id = object_id(npc)
 	if not (valid_id(npc_id) and valid_id(item_id)) then
@@ -1801,6 +1809,9 @@ end
 
 function M.targeted_item_ids_for_npc(npc)
 	if not runtime_ready("loot_targeted_items") then
+		return nil
+	end
+	if surge_active() then
 		return nil
 	end
 	local npc_id = object_id(npc)

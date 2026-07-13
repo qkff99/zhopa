@@ -603,6 +603,11 @@ local function tasks()
 	return safe_require("zhopa2_tasks")
 end
 
+local function zhopa2_surge_active()
+	local t = tasks()
+	return t and type(t.surge_active) == "function" and t.surge_active() == true
+end
+
 local function index()
 	return safe_require("zhopa2_index")
 end
@@ -998,6 +1003,11 @@ function squad_methods.zhopa2_can_manage(self)
 end
 
 function squad_methods.zhopa2_assign_task(self, task, target_id, duration_sec, reason, patrol)
+	if zhopa2_surge_active() then
+		self.zhopa2_last_reason = "surge_assignment_blocked"
+		self.zhopa2_last_result = "surge_assignment_blocked"
+		return false
+	end
 	if task_invalid_for_monster(self, task) then
 		self.zhopa2_last_reason = "mutant_reject_stalker_task"
 		self.zhopa2_last_result = "mutant_reject_stalker_task"
@@ -4063,6 +4073,9 @@ local function zhopa2_item_reservation_owner_impl(item_id)
 end
 
 local function zhopa2_prepare_targeted_gather_impl(npc, item_id)
+	if zhopa2_surge_active() then
+		return false, "prepare_surge_active"
+	end
 	if not (npc and item_id and db and db.storage) then
 		return false, "prepare_bad_args"
 	end
@@ -4074,6 +4087,9 @@ local function zhopa2_prepare_targeted_gather_impl(npc, item_id)
 end
 
 function zhopa2_force_gather_item(npc, item_id, targeted)
+	if zhopa2_surge_active() then
+		return false, "force_surge_active"
+	end
 	if not (npc and item_id and db and db.storage and level and alife_object) then
 		return false, "force_bad_args"
 	end
@@ -4208,10 +4224,9 @@ function M.patch_state_mgr_trade_run()
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
-    local t = tasks()
-    if t and type(t.surge_active) == "function" and t.surge_active() then
-        return false
-    end
+	if zhopa2_surge_active() then
+		return false
+	end
     if st then
         local tg = time_global()
         if st.next_zhopa_gather_time and tg < st.next_zhopa_gather_time then
@@ -4390,6 +4405,9 @@ end
 
 local function zhopa2_gather_item_replacement(original, force_selected, force_reason)
 	return function(npc, ...)
+		if zhopa2_surge_active() then
+			return
+		end
 		local id = npc and npc.id and npc:id() or nil
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items or nil
 		local selected_id = st and tonumber(st.selected_id) or nil
@@ -4504,6 +4522,9 @@ local function patch_gather_classes(mod)
 	if eva then
 		M.patch_method(eva, "find_valid_item", PATCH_ID .. "_gather_find", function(original)
 			return function(self, ...)
+				if zhopa2_surge_active() then
+					return original(self, ...)
+				end
 				local tonum = tonumber
 				local npc = self.object
 				local st = self.st
@@ -4594,8 +4615,7 @@ local function patch_gather_classes(mod)
 					end
 					return original_result
 				end
-				local t = tasks()
-				if active and not (t and type(t.surge_active) == "function" and t.surge_active()) and M.zhopa2_try_force_online_gather_item(npc, st) then
+				if active and not zhopa2_surge_active() and M.zhopa2_try_force_online_gather_item(npc, st) then
 					return true
 				end
 				return false
@@ -4603,6 +4623,9 @@ local function patch_gather_classes(mod)
 		end)
 		M.patch_method(eva, "evaluate", PATCH_ID .. "_gather_eval", function(original)
 			return function(self, ...)
+				if zhopa2_surge_active() then
+					return original(self, ...)
+				end
 				local npc = self.object
 				local st = self.st
 				if M.zhopa2_trade_gather_blocked(npc, st) then
@@ -4656,6 +4679,9 @@ local function patch_gather_classes(mod)
 				local tostr = tostring
 				local st = self.st
 				local npc = self.object
+				if zhopa2_surge_active() then
+					return
+				end
 				local release = M.zhopa2_peek_ground_gather_release(npc)
 				local now = time_global and time_global() or 0
 				local release_watch_due = release and tonumber(release.watch_due or 0) or 0
@@ -5341,6 +5367,9 @@ local function patch_corpse_classes(mod)
 	if action then
 		M.patch_method(action, "execute", PATCH_ID .. "_corpse_execute", function(original)
 			return function(self, ...)
+				if zhopa2_surge_active() then
+					return
+				end
 				if M.zhopa2_trade_gather_blocked(self.object, self.a) then
 					return
 				end

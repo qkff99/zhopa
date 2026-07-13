@@ -59,6 +59,11 @@ local function zhopa2_economy_mod()
 	return economy
 end
 
+local function zhopa_surge_active()
+	local tasks = rawget(_G, "zhopa2_tasks")
+	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local function zhopa2_service_doctor_mod()
 	local doctor = rawget(_G, "zhopa2_smart_service_slot_doctor")
 	if not doctor and require then
@@ -975,6 +980,9 @@ zhopa_npc_has_items_to_sell = function(actor,npc,p)
 	if not (npc) then
 		return false
 	end
+	if zhopa_surge_active() then
+		return false
+	end
 
 	local id = type(npc.id) == "function" and npc:id() or npc.id
 
@@ -1012,6 +1020,9 @@ end
 xr_conditions.npc_has_items_to_sell = zhopa_npc_has_items_to_sell
 
 zhopa_axr_trade_job_sell_items = function(actor,npc,p)
+	if zhopa_surge_active() then
+		return
+	end
 	log_always("trade_job_sell_items_enter rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
 	print_debug("trade_job_sell_items R3A rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
 	log_handler_binding_state("trade_job_sell_items", true)
@@ -1020,6 +1031,9 @@ end
 xr_effects.trade_job_sell_items = zhopa_axr_trade_job_sell_items
 
 zhopa_axr_trade_job_give_id = function(actor,npc,p)
+	if zhopa_surge_active() then
+		return
+	end
 	log_handler_binding_state("trade_job_give_id", false)
 	local board = SIMBOARD
 	local smart = p[1] and board and board.smarts_by_names[p[1]]
@@ -1272,6 +1286,9 @@ local function zhopa2_execute_squad_trade(npc, seller, smart, st)
 end
 
 zhopa_npc_trade_buy_sell_impl = function(npc)
+	if zhopa_surge_active() then
+		return
+	end
 	local g_tonumber = tonumber
 	local id = npc and npc:id()
 	local st = id and db.storage[id]
@@ -1613,6 +1630,9 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 	if not (npc) then
 		return false
 	end
+	if zhopa_surge_active() then
+		return false
+	end
 
 	local id = type(npc.id) == "function" and npc:id() or npc.id
 
@@ -1656,10 +1676,16 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 end
 
 xr_effects.tech_job_upgrade_items = function(actor,npc,p)
+	if zhopa_surge_active() then
+		return
+	end
 	npc_tech_upgrade_sell(npc)
 end
 
 xr_effects.tech_job_give_id = function(actor,npc,p)
+	if zhopa_surge_active() then
+		return
+	end
 	local board = SIMBOARD
 	local smart = p[1] and board and board.smarts_by_names[p[1]]
 	local id = smart and smart.npc_by_job_section["logic@"..p[2]]
@@ -1674,6 +1700,9 @@ xr_effects.tech_job_give_id = function(actor,npc,p)
 end
 
 function npc_tech_upgrade_sell(npc)
+	if zhopa_surge_active() then
+		return
+	end
 	local id = npc and npc:id()
 	local st = id and db.storage[id]
 	if not (st) then

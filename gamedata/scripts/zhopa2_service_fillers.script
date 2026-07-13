@@ -122,6 +122,11 @@ local function runtime_ready(reason)
 	return false
 end
 
+local function surge_active()
+	local tasks = rawget(_G, "zhopa2_tasks")
+	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local function cfg_alias(name)
 	local cfg = cfg_mod()
 	if cfg and type(cfg.get_faction_alias) == "function" then
@@ -235,6 +240,9 @@ end
 local function flush_pending_emission_fill()
 	local pending = M.pending_emission_fill
 	if type(pending) ~= "table" then
+		return 0
+	end
+	if surge_active() then
 		return 0
 	end
 	if pending.due == true then
@@ -921,6 +929,9 @@ function M.reconcile_smart(smart, ownership, allow_spawn, reason)
 	if not runtime_ready("service_reconcile") then
 		return false, "runtime_not_ready"
 	end
+	if surge_active() then
+		return false, "surge_active"
+	end
 	if cfg_bool("enabled", true) ~= true or not smart_is_base(smart) then
 		clear_smart_fields(smart)
 		unmark_smart(smart)
@@ -1015,6 +1026,9 @@ end
 function M.on_smart_update(smart, ownership)
 	if not runtime_ready("service_smart_update") then
 		return false, "runtime_not_ready"
+	end
+	if surge_active() then
+		return false, "surge_active"
 	end
 	local smart_id = tonumber(smart and smart.id)
 	local now = tg()

@@ -124,6 +124,11 @@ local function runtime_not_ready_reason()
 	return "runtime_not_ready"
 end
 
+local function surge_active()
+	local tasks = rawget(_G, "zhopa2_tasks")
+	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
+end
+
 local function cfg_bool(key, default)
 	local cfg = cfg_mod()
 	if cfg and type(cfg.get_bool) == "function" then
@@ -4340,7 +4345,7 @@ local function resolve_explicit_pair(npc, trader)
 end
 
 function M.can_auto_trade_now(squad)
-	return M.enabled() == true and squad ~= nil and can_try_auto_trade_now(squad, tg()) == true
+	return M.enabled() == true and not surge_active() and squad ~= nil and can_try_auto_trade_now(squad, tg()) == true
 end
 
 function M.debug_resolve_auto_trade_pair(squad, reason)
@@ -4351,6 +4356,9 @@ end
 function M.try_auto_trade_npc(npc, trader, reason, opts)
 	if M.enabled() ~= true then
 		return false, "disabled"
+	end
+	if surge_active() then
+		return false, "surge_active"
 	end
 	M.ensure_runtime_ready()
 	if not runtime_ready("economy_trade_npc") then
@@ -4389,6 +4397,9 @@ function M.try_auto_trade(squad, reason, opts)
 	if M.enabled() ~= true then
 		return false, "disabled"
 	end
+	if surge_active() then
+		return false, "surge_active"
+	end
 	M.ensure_runtime_ready()
 	if not runtime_ready("economy_trade") then
 		runtime_not_ready_reason()
@@ -4416,6 +4427,9 @@ end
 
 local function refresh_trade_items_from_inventory(npc, params, force)
 	if M.enabled() ~= true then
+		return false
+	end
+	if surge_active() then
 		return false
 	end
 	if not live_object(npc) then
@@ -4532,6 +4546,9 @@ function M.patch_trade_effect()
 end
 
 function M.watch_recent_trade_release()
+	if surge_active() then
+		return
+	end
 	local watch = M.trade_release_watch
 	if type(watch) ~= "table" or next(watch) == nil then
 		return
