@@ -4208,6 +4208,10 @@ function M.patch_state_mgr_trade_run()
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
+    local t = tasks()
+    if t and type(t.surge_active) == "function" and t.surge_active() then
+        return false
+    end
     if st then
         local tg = time_global()
         if st.next_zhopa_gather_time and tg < st.next_zhopa_gather_time then
@@ -4590,7 +4594,8 @@ local function patch_gather_classes(mod)
 					end
 					return original_result
 				end
-				if active and M.zhopa2_try_force_online_gather_item(npc, st) then
+				local t = tasks()
+				if active and not (t and type(t.surge_active) == "function" and t.surge_active()) and M.zhopa2_try_force_online_gather_item(npc, st) then
 					return true
 				end
 				return false
