@@ -4208,6 +4208,13 @@ function M.patch_state_mgr_trade_run()
 end
 
 function M.zhopa2_try_force_online_gather_item(npc, st)
+    if st then
+        local tg = time_global()
+        if st.next_zhopa_gather_time and tg < st.next_zhopa_gather_time then
+            return false
+        end
+        st.next_zhopa_gather_time = tg + 500
+    end
 	if not (npc and st and zhopa2_loot_active(npc) and alife_object) then
 		return false
 	end
