@@ -236,6 +236,9 @@ function M.remove_level_changer(se_obj)
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -249,6 +252,21 @@ function M.on_game_start()
 	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
 	RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
 	RegisterScriptCallback("on_game_load", on_game_load)
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+	end
+	edges_by_level = {}
+	edges_by_id = {}
+	neighbors_by_level = {}
+	topology_revision = 0
+	utils_stpk_checked = nil
+	return true
 end
 
 function on_game_start()

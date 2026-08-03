@@ -2371,6 +2371,9 @@ function M.on_game_load()
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -2390,6 +2393,20 @@ function M.on_game_start()
 	RegisterScriptCallback("npc_on_item_take", on_item_take)
 	RegisterScriptCallback("actor_on_item_take", on_actor_item_take)
 	RegisterScriptCallback("on_game_load", M.on_game_load)
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "npc_on_death_callback", on_npc_death)
+		pcall(UnregisterScriptCallback, "monster_on_death_callback", on_monster_death)
+		pcall(UnregisterScriptCallback, "npc_on_item_drop", on_npc_item_drop)
+		pcall(UnregisterScriptCallback, "actor_on_item_drop", on_actor_item_drop)
+		pcall(UnregisterScriptCallback, "npc_on_item_take", on_item_take)
+		pcall(UnregisterScriptCallback, "actor_on_item_take", on_actor_item_take)
+		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
+	end
+	M.on_game_load()
+	return true
 end
 
 function on_game_start()

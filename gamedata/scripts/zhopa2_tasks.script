@@ -2719,5 +2719,29 @@ function M.get_script_target(squad)
 	return tonumber(squad.zhopa2_target) or squad.zhopa2_target
 end
 
+function M.on_master_disable()
+	for squad_id, scope in pairs(actor_revenge_relation_scopes) do
+		local squad = safe_alife_object(squad_id)
+		if squad then
+			M.release_revenge_hostility(squad)
+		else
+			set_actor_community_goodwill(scope.community, scope.community_goodwill)
+			for member_id, goodwill in pairs(scope.personal_goodwill or {}) do
+				restore_member_actor_goodwill(member_id, goodwill)
+			end
+			for member_id, goodwill in pairs(scope.revenge_personal_goodwill or {}) do
+				restore_member_actor_goodwill(member_id, goodwill)
+			end
+		end
+	end
+	actor_revenge_relation_scopes = {}
+	trade_debug_throttle = {}
+	surge_cache_active = false
+	surge_cache_next = 0
+	last_assignment_tick = nil
+	assignments_this_tick = 0
+	return true
+end
+
 _G.zhopa2_tasks = M
 return M

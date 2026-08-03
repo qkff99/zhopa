@@ -2,6 +2,9 @@ local M = {}
 
 local PATCH_ID = "zhopa2_runtime"
 local installed = setmetatable({}, { __mode = "k" })
+M._installed_methods = setmetatable({}, { __mode = "k" })
+M._direct_exports = setmetatable({}, { __mode = "k" })
+M._global_exports = {}
 local current_patch_reason = nil
 
 local RUNTIME_READY_WARMUP_MS = 5000
@@ -18,6 +21,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_artifacts",
 	"zhopa2_story_psy_watchdog",
 	"zhopa2_story_north_migration",
+	"zhopa2_debug_hud",
 }
 
 local ZHOPA2_RUNTIME_PATCHES = {
@@ -55,6 +59,20 @@ local function safe_require(name)
 		pcall(require, name)
 	end
 	return rawget(_G, name)
+end
+
+function M.master_enabled()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return false
+	end
+	local fn = rawget(_G, "zhopa2_master_enabled")
+	if type(fn) == "function" then
+		local ok, enabled = pcall(fn)
+		if ok then
+			return enabled == true
+		end
+	end
+	return true
 end
 
 local function class_candidate(candidate, required_method)
@@ -437,6 +455,9 @@ end
 local zhopa2_started_modules = {}
 
 local function start_zhopa_module(name)
+	if not M.master_enabled() then
+		return false
+	end
 	if zhopa2_started_modules[name] then
 		mark_runtime_item("module", name, true, "already_started", "-")
 		return true
@@ -465,6 +486,9 @@ local function start_zhopa_module(name)
 end
 
 function M.ensure_zhopa_modules()
+	if not M.master_enabled() then
+		return false
+	end
 	local ok = true
 	for i = 1, #ZHOPA2_RUNTIME_MODULES do
 		ok = start_zhopa_module(ZHOPA2_RUNTIME_MODULES[i]) and ok
@@ -505,9 +529,38 @@ local function set_upvalue(fn, name, value)
 	return false
 end
 
+function M.function_chain_contains(fn, target, depth, seen)
+	if fn == target then
+		return true
+	end
+	if depth <= 0 or type(fn) ~= "function" or type(target) ~= "function"
+		or not (debug and type(debug.getupvalue) == "function")
+	then
+		return false
+	end
+	seen = seen or {}
+	if seen[fn] then
+		return false
+	end
+	seen[fn] = true
+	for i = 1, 32 do
+		local ok, name, value = pcall(debug.getupvalue, fn, i)
+		if not ok or not name then
+			break
+		end
+		if type(value) == "function" and M.function_chain_contains(value, target, depth - 1, seen) then
+			return true
+		end
+	end
+	return false
+end
+
 function M.patch_method(owner, method, patch_id, wrapper_factory)
 	if not (owner and method and patch_id and type(wrapper_factory) == "function") then
 		return false, "bad_args"
+	end
+	if not M.master_enabled() then
+		return false, "master_disabled"
 	end
 	local ok_get, current = pcall(function() return owner[method] end)
 	if not ok_get then
@@ -528,22 +581,35 @@ function M.patch_method(owner, method, patch_id, wrapper_factory)
 		if ok_cur and current_owner_method == rec.wrapper then
 			return true, "already_patched"
 		end
+		if ok_cur and M.function_chain_contains(current_owner_method, rec.wrapper, 8) then
+			rec.retained = true
+			return true, "already_chained"
+		end
 	end
-	local wrapper = wrapper_factory(current)
-	if type(wrapper) ~= "function" then
+	local patched = wrapper_factory(current)
+	if type(patched) ~= "function" then
 		return false, "bad_wrapper"
+	end
+	local wrapper = function(...)
+		if not M.master_enabled() then
+			return current(...)
+		end
+		return patched(...)
 	end
 	local ok_set = pcall(function() owner[method] = wrapper end)
 	if not ok_set then
 		return false, "set_failed"
 	end
-	by_owner[key] = { original = current, wrapper = wrapper }
+	by_owner[key] = { method = method, original = current, wrapper = wrapper }
 	return true, "patched"
 end
 
 local function install_class_method(cls, name, fn)
 	if not (cls and name and type(fn) == "function") then
 		return false, "bad_args"
+	end
+	if not M.master_enabled() then
+		return false, "master_disabled"
 	end
 	local ok_get, current = pcall(function() return cls[name] end)
 	if ok_get and type(current) == "function" then
@@ -553,7 +619,54 @@ local function install_class_method(cls, name, fn)
 	if not ok_set then
 		return false, "set_failed"
 	end
+	local by_owner = M._installed_methods[cls]
+	if not by_owner then
+		by_owner = {}
+		M._installed_methods[cls] = by_owner
+	end
+	by_owner[name] = { original = ok_get and current or nil, installed = fn }
 	return true, "installed"
+end
+
+function M.restore_runtime_patches()
+	for _ = 1, 8 do
+		local changed = false
+		for owner, records in pairs(installed) do
+			for _, rec in pairs(records) do
+				local ok, current = pcall(function() return owner[rec.method] end)
+				if ok and current == rec.wrapper then
+					pcall(function() owner[rec.method] = rec.original end)
+					rec.retained = false
+					changed = true
+				elseif ok then
+					rec.retained = M.function_chain_contains(current, rec.wrapper, 8)
+				end
+			end
+		end
+		if not changed then
+			break
+		end
+	end
+	for owner, records in pairs(M._installed_methods) do
+		for name, rec in pairs(records) do
+			local ok, current = pcall(function() return owner[name] end)
+			if ok and current == rec.installed then
+				pcall(function() owner[name] = rec.original end)
+			end
+		end
+	end
+	for mod, records in pairs(M._direct_exports) do
+		for name, rec in pairs(records) do
+			if mod[name] == rec.wrapper then
+				mod[name] = rec.original
+			end
+		end
+	end
+	for name, rec in pairs(M._global_exports) do
+		if rawget(_G, name) == rec.wrapper then
+			rawset(_G, name, rec.original)
+		end
+	end
 end
 
 local function patch_required_method(owner, method, patch_id, wrapper_factory, surface)
@@ -3031,9 +3144,27 @@ local function export_script_function(mod, name, fn)
 		return
 	end
 	if mod then
+		local records = M._direct_exports[mod]
+		if not records then
+			records = {}
+			M._direct_exports[mod] = records
+		end
+		local previous = records[name]
+		if previous and mod[name] ~= previous.wrapper
+			and M.function_chain_contains(mod[name], previous.wrapper, 8)
+		then
+			previous.retained = true
+			return
+		end
+		if not previous or mod[name] ~= previous.wrapper then
+			records[name] = { original = mod[name], wrapper = fn }
+		end
 		mod[name] = fn
 	end
 	if type(name) == "string" and string.sub(name, 1, 7) == "zhopa2_" then
+		if not M._global_exports[name] or rawget(_G, name) ~= M._global_exports[name].wrapper then
+			M._global_exports[name] = { original = rawget(_G, name), wrapper = fn }
+		end
 		rawset(_G, name, fn)
 	end
 end
@@ -4405,6 +4536,12 @@ end
 
 local function zhopa2_gather_item_replacement(original, force_selected, force_reason)
 	return function(npc, ...)
+		if not M.master_enabled() then
+			if original then
+				return original(npc, ...)
+			end
+			return
+		end
 		if zhopa2_surge_active() then
 			return
 		end
@@ -4854,6 +4991,9 @@ function M.patch_xr_gather_items()
 	local original_near_actor = gather_original_func(mod, "near_actor")
 	if type(original_near_actor) == "function" and mod.near_actor ~= mod.zhopa2_wrapped_near_actor then
 		mod.zhopa2_wrapped_near_actor = function(obj, npc, ...)
+			if not M.master_enabled() then
+				return original_near_actor(obj, npc, ...)
+			end
 			npc = npc or mod.zhopa2_current_gather_npc
 			if npc and zhopa2_loot_active(npc) then
 				return false
@@ -5133,6 +5273,12 @@ end
 
 local function zhopa2_get_all_from_corpse_replacement(original)
 	return function(npc, ...)
+		if not M.master_enabled() then
+			if original then
+				return original(npc, ...)
+			end
+			return
+		end
 		local id = npc and npc.id and npc:id() or nil
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].corpse_detection or nil
 		local corpse_id = st and tonumber(st.selected_corpse_id) or nil
@@ -5395,6 +5541,9 @@ function M.patch_xr_corpse_detection()
 	local original_near_actor = corpse_original_func(mod, "near_actor")
 	if type(original_near_actor) == "function" and mod.near_actor ~= mod.zhopa2_wrapped_near_actor then
 		mod.zhopa2_wrapped_near_actor = function(obj, npc, ...)
+			if not M.master_enabled() then
+				return original_near_actor(obj, npc, ...)
+			end
 			if npc and zhopa2_loot_active(npc) then
 				return false
 			end
@@ -5440,7 +5589,168 @@ local function run_runtime_patch(patch)
 	return true
 end
 
+M.SQUAD_RUNTIME_FIELDS = {
+	"zhopa2_task", "zhopa2_target", "zhopa2_started", "zhopa2_until", "zhopa2_patrol", "zhopa2_patrol_idx",
+	"zhopa2_last_reason", "zhopa2_last_result", "zhopa2_managed", "zhopa2_resume_task", "zhopa2_resume_target",
+	"zhopa2_cached_npc_count",
+	"zhopa2_resume_until", "zhopa2_resume_patrol", "zhopa2_resume_patrol_idx", "zhopa2_resume_reason",
+	"zhopa2_recent_smarts", "zhopa2_recent_targets", "zhopa2_loot_count", "zhopa2_loot_value",
+	"zhopa2_artifact_cargo_count", "zhopa2_artifact_cargo_value", "zhopa2_artifact_cargo_sections",
+	"zhopa2_artifact_cargo_last_id", "zhopa2_artifact_id", "zhopa2_artifact_smart", "zhopa2_artifact_zone",
+	"zhopa2_artifact_section", "zhopa2_artifact_task_collected_id", "zhopa2_artifact_collect_started",
+	"zhopa2_virtual_loot_count", "zhopa2_virtual_loot_value", "zhopa2_virtual_loot_sections", "zhopa2_virtual_money",
+	"zhopa2_post_guide_rest_pending", "zhopa2_post_guide_rest_target", "zhopa2_post_guide_rest_reason",
+	"zhopa2_post_guide_rest_npc", "zhopa2_post_guide_rest_marked_tg", "zhopa2_revenge_actor_community",
+	"zhopa2_revenge_actor_community_goodwill", "zhopa2_revenge_actor_personal_goodwill",
+	"zhopa2_revenge_actor_revenge_goodwill", "zhopa2_revenge_actor_member_ids", "zhopa2_state_version",
+	"zhopa2_section_name", "zhopa2_service_filler", "zhopa2_service_smart_id", "zhopa2_service_role",
+	"zhopa2_artifact_approach_last_id", "zhopa2_artifact_approach_npc_id", "zhopa2_artifact_approach_sent_at",
+	"zhopa2_artifact_approach_vid", "zhopa2_artifact_arrived_idle_since", "zhopa2_artifact_contested_since",
+	"zhopa2_artifact_debug_key", "zhopa2_artifact_debug_time", "zhopa2_artifact_force_attempts",
+	"zhopa2_artifact_force_item", "zhopa2_artifact_force_owner", "zhopa2_artifact_force_since",
+	"zhopa2_artifact_inventory_wait_since", "zhopa2_artifact_pickup_last_x", "zhopa2_artifact_pickup_last_y",
+	"zhopa2_artifact_pickup_last_z", "zhopa2_artifact_pickup_npc_id", "zhopa2_artifact_pickup_stall_since",
+	"zhopa2_base_trade_next_tg", "zhopa2_base_trade_result", "zhopa2_hunt_prepared_target",
+	"zhopa2_hunt_prepared_target_signature", "zhopa2_inside_squad_update", "zhopa2_get_target_task_updated",
+	"zhopa2_invalid_script_target_sig",
+	"zhopa2_last_offline_hunt", "zhopa2_last_trade_reason", "zhopa2_last_trade_result", "zhopa2_last_trade_smart",
+	"zhopa2_last_trade_time", "zhopa2_no_target_task", "zhopa2_no_target_until", "zhopa2_revenge_hostility_actor",
+	"zhopa2_revenge_hostility_target", "zhopa2_runtime_wait_reason", "zhopa2_surge_paused",
+	"zhopa2_target_valid_key", "zhopa2_target_valid_until", "zhopa2_task_rush_active", "zhopa2_trade_detail",
+	"zhopa2_trade_next_tg", "zhopa2_trade_prepared_job_section", "zhopa2_trade_prepared_npc_id",
+	"zhopa2_trade_prepared_reason", "zhopa2_trade_prepared_smart_id", "zhopa2_trade_prepared_trader_id",
+	"zhopa2_trade_prepared_until", "zhopa2_trade_queue_reason", "zhopa2_trade_queue_smart",
+	"zhopa2_trade_queue_state", "zhopa2_trade_route_next_tg", "zhopa2_trade_route_result", "zhopa2_trade_route_state",
+	"zhopa2_rest_trade_next_tg", "zhopa2_rest_trade_reason", "zhopa2_rest_trade_result",
+	"zhopa2_rest_trade_started_tg", "zhopa2_rest_trade_state",
+}
+
+function M.clear_prefixed_table(tbl)
+	if type(tbl) ~= "table" then
+		return false
+	end
+	local keys = {}
+	local managed = false
+	for key in pairs(tbl) do
+		if type(key) == "string" and (string.sub(key, 1, 7) == "zhopa2_" or string.sub(key, 1, 6) == "zhopa_") then
+			keys[#keys + 1] = key
+			managed = true
+		end
+	end
+	for i = 1, #keys do
+		tbl[keys[i]] = nil
+	end
+	return managed
+end
+
+function M.purge_squad_state(squad)
+	if not squad then
+		return
+	end
+	local owned_target = squad.zhopa2_task ~= nil and squad.zhopa2_target ~= nil
+		and tostring(squad.scripted_target) == tostring(squad.zhopa2_target)
+	if type(squad.zhopa2_clear_task) == "function" then
+		pcall(squad.zhopa2_clear_task, squad, "master_disabled")
+	elseif owned_target then
+		squad.scripted_target = nil
+	end
+	local memory = safe_require("zhopa2_memory")
+	if memory and type(memory.reset_squad) == "function" then
+		memory.reset_squad(squad)
+	end
+	for i = 1, #M.SQUAD_RUNTIME_FIELDS do
+		squad[M.SQUAD_RUNTIME_FIELDS[i]] = nil
+	end
+end
+
+function M.purge_runtime_state()
+	local failures = {}
+	local squads = SIMBOARD and SIMBOARD.squads
+	if type(squads) == "table" then
+		for id, squad in pairs(squads) do
+			local ok, err = pcall(M.purge_squad_state, squad)
+			if not ok then
+				failures[#failures + 1] = "squad:" .. tostring(id) .. ":" .. tostring(err)
+			end
+		end
+	end
+	if db and type(db.storage) == "table" then
+		for _, storage in pairs(db.storage) do
+			if type(storage) == "table" then
+				local managed = M.clear_prefixed_table(storage)
+				managed = M.clear_prefixed_table(storage.gather_items) or managed
+				managed = M.clear_prefixed_table(storage.corpse_detection) or managed
+				if managed then
+					storage.has_items_to_sell = nil
+					storage.trade_items = nil
+				end
+			end
+		end
+	end
+	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
+		local ok, state = pcall(alife_storage_manager.get_state)
+		if ok and type(state) == "table" then
+			state.zhopa2_virtual_artifacts = nil
+			state.zhopa2_story_north_migration = nil
+		end
+	end
+	if SIMBOARD then
+		SIMBOARD.zhopa2_buckets_ready = nil
+		SIMBOARD.zhopa2_smarts_by_level = nil
+		SIMBOARD.zhopa2_smarts_by_level_kind = nil
+		SIMBOARD.zhopa2_smart_level = nil
+		SIMBOARD.zhopa2_squads_by_level = nil
+		SIMBOARD.zhopa2_squad_level = nil
+		SIMBOARD.zhopa2_trade_smarts_by_level = nil
+		SIMBOARD.zhopa2_trade_smart_level = nil
+		SIMBOARD.zhopa2_trade_smart_flags = nil
+		local smarts = SIMBOARD.smarts
+		if type(smarts) == "table" then
+			local fields = {
+				"zhopa2_artefact_available", "zhopa2_base_pull_squad_id", "zhopa2_blacklist_name",
+				"zhopa2_job_capacity_monster", "zhopa2_job_capacity_stalker", "zhopa2_ownership_owner",
+				"zhopa2_ownership_state", "zhopa2_presence_count", "zhopa2_presence_state",
+				"zhopa2_service_allowed_roles", "zhopa2_service_count", "zhopa2_service_missing_count",
+				"zhopa2_service_missing_roles", "zhopa2_service_native_roles", "zhopa2_service_needs_fill",
+				"zhopa2_service_owner", "zhopa2_stalker_job_nonexclusive_sections",
+			}
+			for _, smart in pairs(smarts) do
+				if smart then
+					for i = 1, #fields do
+						smart[fields[i]] = nil
+					end
+				end
+			end
+		end
+	end
+	return #failures == 0, table.concat(failures, ",")
+end
+
+function M.unregister_runtime_callbacks()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_game_load", M._on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M._actor_on_first_update)
+		pcall(UnregisterScriptCallback, "actor_on_update", M._actor_on_update)
+	end
+	runtime_ready_state.callbacks_registered = false
+end
+
+function M.reset_runtime_ready_state()
+	runtime_ready_state.items = {}
+	runtime_ready_state.errors = {}
+	runtime_ready_state.count = 0
+	runtime_ready_state.complete = false
+	runtime_ready_state.callbacks_registered = false
+	runtime_ready_state.actor_first_update = false
+	runtime_ready_state.warmup_until = nil
+	runtime_ready_state.next_recheck_tg = 0
+	zhopa2_started_modules = {}
+end
+
 function M.ensure_all(reason)
+	if not M.master_enabled() then
+		return false
+	end
 	local prev_patch_reason = current_patch_reason
 	current_patch_reason = reason
 	M.ensure_zhopa_modules()
@@ -5454,6 +5764,9 @@ function M.ensure_all(reason)
 end
 
 function M._on_game_load()
+	if not M.master_enabled() then
+		return
+	end
 	M.ground_gather_release_pending = {}
 	M.ground_gather_meet_refresh_pending = {}
 	M.ensure_all("on_game_load")
@@ -5461,6 +5774,9 @@ function M._on_game_load()
 end
 
 function M._actor_on_first_update()
+	if not M.master_enabled() then
+		return
+	end
 	runtime_ready_state.actor_first_update = true
 	if runtime_ready_state.warmup_until == nil then
 		local now = runtime_time_ms()
@@ -5471,6 +5787,9 @@ function M._actor_on_first_update()
 end
 
 function M._actor_on_update()
+	if not M.master_enabled() then
+		return
+	end
 	if M._runtime_recheck_due("actor_on_update") then
 		M.ensure_all("actor_on_update")
 	end
@@ -5502,6 +5821,9 @@ function M.runtime_not_ready_reason()
 end
 
 function M.runtime_ready(reason)
+	if not M.master_enabled() then
+		return false
+	end
 	if M._runtime_recheck_due(reason) then
 		M.ensure_all(reason or "runtime_ready")
 	else
@@ -5515,6 +5837,9 @@ function M.runtime_gate_ready(reason)
 end
 
 function M.on_game_start()
+	if not M.master_enabled() then
+		return M.on_master_disable("disabled_on_game_start")
+	end
 	M.ensure_all("on_game_start")
 	if RegisterScriptCallback then
 		if UnregisterScriptCallback then
@@ -5529,6 +5854,21 @@ function M.on_game_start()
 		runtime_mark_context()
 	end
 	return true
+end
+
+function M.on_master_disable()
+	M.unregister_runtime_callbacks()
+	M.ground_gather_release_pending = {}
+	M.ground_gather_meet_refresh_pending = {}
+	local ok, detail = M.purge_runtime_state()
+	M.restore_runtime_patches()
+	M.reset_runtime_ready_state()
+	return ok, detail
+end
+
+function M.on_master_enable()
+	M.reset_runtime_ready_state()
+	return M.on_game_start()
 end
 
 function on_game_start()

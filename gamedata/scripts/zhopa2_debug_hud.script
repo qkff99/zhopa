@@ -378,6 +378,9 @@ function on_game_load()
 end
 
 function on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -388,3 +391,17 @@ function on_game_start()
 	pcall(RegisterScriptCallback, "on_game_load", on_game_load)
 	pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 end
+
+local function on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+	end
+	cleanup_all()
+	return true
+end
+
+_G.zhopa2_debug_hud = {
+	on_game_start = on_game_start,
+	on_master_disable = on_master_disable,
+}

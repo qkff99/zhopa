@@ -2429,6 +2429,9 @@ function M.actor_on_first_update()
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -2444,6 +2447,49 @@ function M.on_game_start()
 	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
 	RegisterScriptCallback("on_game_load", M.on_game_load)
 	RegisterScriptCallback("actor_on_first_update", M.actor_on_first_update)
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "smart_terrain_on_update", M.on_smart_update)
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M.actor_on_first_update)
+	end
+	M.smart_ownership = {}
+	M.base_pull_squad = {}
+	M.base_pull_time = {}
+	M.base_camping_targets = {}
+	M.base_camping_squad_target = {}
+	M.base_camping_revision = 0
+	reset_base_camping_target_smarts_cache()
+	M.artifact_zone = {}
+	M.artifact_smart = {}
+	M.artifact_level = {}
+	M.artifact_section = {}
+	M.artifacts = {}
+	M.zone_artifacts = {}
+	M.smart_artifacts = {}
+	M.artifact_reserved_by = {}
+	M.squad_artifact_reservation = {}
+	M.virtual_artifacts = {}
+	M.virtual_zones = {}
+	M.virtual_zones_by_level = {}
+	M.virtual_zone_counts = {}
+	M.smart_task_flags = {}
+	M.squad_artifact_cargo = {}
+	M.artifact_revision = 0
+	frame_scratch_key = nil
+	frame_scratch = {}
+	service_fillers_started = false
+	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
+		local state = alife_storage_manager.get_state()
+		if type(state) == "table" then
+			state[VIRTUAL_STATE_KEY] = nil
+		end
+	end
+	return true
 end
 
 function on_game_start()

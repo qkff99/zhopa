@@ -6,7 +6,7 @@ Full name: **Z.H.O.P.A. ALIFE 2.0 — Zone Hostile Operations & Population AI**.
 
 This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.0 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of July 12, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of August 3, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ Entry points:
 - `zhopa2_bootstrap.script`
 - `zhopa2_runtime_patches.script`
 
-`zhopa2_bootstrap` invokes the runtime patch orchestrator. The central integration surface lives in `zhopa2_runtime_patches`, while each runtime module remains self-contained and registers its own callbacks through `on_game_start()`.
+`zhopa2_bootstrap` owns the master lifecycle and invokes the runtime patch orchestrator only while the addon is enabled. The central integration surface lives in `zhopa2_runtime_patches`, while each runtime module remains self-contained and registers its own callbacks through `on_game_start()`.
 
 Runtime modules:
 
@@ -84,7 +84,21 @@ Runtime patches:
 - `xr_corpse_detection`
 - `sim_offline_combat`
 
-### 2.2 Runtime readiness
+### 2.2 Master disable lifecycle
+
+The MCM master switch is a runtime transition rather than a passive config gate. Disabling the addon:
+
+1. Sets the global hard gate before any cleanup begins.
+2. Stops module-owned work in dependency order and unregisters module callbacks.
+3. Cancels managed squad tasks, clears ZHOPA squad/storage/smart fields and removes service squads created by ZHOPA.
+4. Restores chain-friendly runtime patches only when the current function is still the wrapper installed by ZHOPA. A later foreign wrapper is never overwritten.
+5. Keeps only the MCM option-change listener alive so the addon can be enabled again without reloading.
+
+If any cleanup step fails, the addon stays disabled, reports the failed module and retries after the next actor first update. A successful transition guarantees that a newly created save contains no supported ZHOPA runtime state. Re-enabling rebuilds modules, patches, indexes and readiness state from the current world.
+
+The lifecycle does not remove the `axr_trade_manager.script` override from the loaded VM. That file must therefore preserve vanilla behavior behind the master gate. It also cannot reverse consequences already committed to the world.
+
+### 2.3 Runtime readiness
 
 `on_game_start` is too early for some world context. ZHOPA therefore uses a readiness gate:
 
@@ -96,7 +110,7 @@ Runtime patches:
 
 When a new required runtime module or patch is added, it must be added to the readiness list in `zhopa2_runtime_patches.script`. Otherwise a system can start before indexes, MCM defaults, callbacks or save/load recovery are ready.
 
-### 2.3 Callback surface
+### 2.4 Callback surface
 
 Main events:
 
@@ -538,7 +552,9 @@ Save safety rules:
 - tolerate stale squad/smart/artifact ids;
 - clean stale reservations, cargo and debug HUD markers after unregister/death/load.
 
-There is no automatic SISKI/ZHOPA1 save cleaner or uninstall-preparation mode. That experiment was removed after causing BusyHands/runtime corruption. Old-save compatibility is non-destructive only: versioned reads tolerate absent fields and stale ids, while runtime-only queues, boosts, caches and reservations are rebuilt after load.
+The master switch provides bounded ZHOPA2 uninstall preparation for the currently loaded world. The supported procedure is to load the save with the addon enabled, disable it in MCM, wait for successful cleanup, create a new manual save, exit the game, and only then remove the addon. A cleanup error blocks safe removal.
+
+Cleanup covers ZHOPA tasks and fields, module runtime tables, script storage, generated service squads, callbacks, indexes, debug markers and restorable monkey patches. It does not reverse deaths, spawned or collected objects, completed trade, zombification, migration or changes owned by another addon. It is not a SISKI/ZHOPA1 save migration system; old-save compatibility remains non-destructive and best-effort.
 
 ## 14. Debug and Diagnostics
 
@@ -567,11 +583,13 @@ When adding a new system:
 1. Add config defaults to `zhopa2_settings.ltx`.
 2. Add MCM schema and localization if it is user-facing.
 3. Add the runtime module to `ZHOPA2_RUNTIME_MODULES` if it needs readiness.
-4. Register callbacks in the module itself.
-5. Keep hot-path work bounded and index-driven.
-6. Store only serializable squad/global state.
-7. Add debug HUD/diagnostic output only where it helps testing.
-8. Update this document and `implementation_plan.md`.
+4. Register callbacks in the module itself and unregister them from `on_master_disable`.
+5. Clear every module-owned runtime/save field from `on_master_disable`.
+6. Register runtime patches through the restorable patch helpers and preserve foreign wrappers.
+7. Keep hot-path work bounded and index-driven.
+8. Store only serializable squad/global state.
+9. Add debug HUD/diagnostic output only where it helps testing.
+10. Update this document and `implementation_plan.md`.
 
 When adding a new task:
 
@@ -596,12 +614,15 @@ When adding a new task:
 - trade that creates endless job/preparation loops;
 - goodwill reads or writes through transient online NPC wrappers inside revenge actor updates; use server ids instead;
 - loot that leaves rejected corpses/items in memory forever.
+- destructive `_G` or `package.loaded` cleanup used as an uninstall mechanism;
+- module callbacks or runtime patches that cannot be removed by the master lifecycle.
 
 ## 17. Correctness Criteria
 
 The system is healthy when:
 
 - game start and save/load do not crash;
+- disabling the master switch immediately stops ZHOPA, clears supported save state, and can be reversed by enabling it again;
 - runtime readiness reaches complete state;
 - debug HUD updates and clears stale squads;
 - stalker and mutant task pools both work;

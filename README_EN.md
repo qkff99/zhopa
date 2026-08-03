@@ -91,9 +91,17 @@ Additional notes:
 
 ## Saves and Uninstallation
 
-> There is no automatic SISKI/ZHOPA1 save cleaner or ZHOPA2 uninstall preparation. That mechanism proved unsafe and was removed after BusyHands/runtime corruption cases.
+ZHOPA can cleanly leave a running game and prepare the next save for addon removal:
 
-To uninstall the addon, return to a save created before installation. After a BusyHands warning, do not continue the current session; reload a save or return to the main menu.
+1. Load the save while ZHOPA is still installed and enabled.
+2. Open MCM and turn off **Run ZHOPA ALIFE 2**.
+3. Wait for the successful cleanup notification. If cleanup reports an error, keep the addon installed, reload the game, and retry.
+4. Create a new manual save after cleanup succeeds.
+5. Exit the game before disabling or removing the addon in MO2.
+
+The switch immediately cancels managed tasks, removes service squads created by ZHOPA, clears ZHOPA fields from squads and script storage, unregisters its callbacks, and restores runtime-patched functions where no later addon has replaced them. While disabled, ZHOPA remains dormant; enabling it again rebuilds its runtime from the current world state.
+
+Cleanup cannot reverse events that already changed the world, including deaths, spawned or collected items, faction relations changed by other systems, zombification, or completed migration. It does not migrate SISKI/ZHOPA1 saves. Do not continue playing after a BusyHands warning; reload a save or return to the main menu.
 
 ## Verification and Debugging
 
@@ -111,7 +119,7 @@ Additional diagnostic scripts live in `debugscripts`. They are not part of a nor
 
 ## Development
 
-Before changing behavior, look for a vanilla extension point first. New subsystems must respect the shared readiness barrier, register their own callbacks, avoid broad scans in hot paths, and persist only serializable values. A full override requires a documented reason; `axr_trade_manager.script` is the current intentional exception.
+Before changing behavior, look for a vanilla extension point first. New subsystems must respect the shared readiness barrier, register and unregister their own callbacks, implement the master-disable cleanup contract, avoid broad scans in hot paths, and persist only serializable values. New runtime patches must retain their original function and be restorable. A full override requires a documented reason; `axr_trade_manager.script` is the current intentional exception.
 
 ## License
 

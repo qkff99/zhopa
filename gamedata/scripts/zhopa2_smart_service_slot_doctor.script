@@ -1772,6 +1772,9 @@ local function on_npc_update(npc)
 end
 
 local function register_callbacks_once()
+	if _G.zhopa2_runtime_disabled == true then
+		return
+	end
     if RUNTIME.callbacks_registered == true then
         return
     end
@@ -1785,7 +1788,27 @@ local function register_callbacks_once()
 end
 
 function on_game_start()
+	if _G.zhopa2_runtime_disabled == true then
+		return inst.on_master_disable()
+	end
     register_callbacks_once()
+end
+
+function inst.on_master_disable()
+	local unregister = _G.UnregisterScriptCallback
+	if unregister then
+		pcall(unregister, "actor_on_first_update", on_actor_first_update)
+		pcall(unregister, "actor_on_update", on_actor_update)
+		pcall(unregister, "load_state", on_load_state)
+		pcall(unregister, "server_entity_on_unregister", on_server_entity_unregister)
+		pcall(unregister, "smart_terrain_on_update", on_smart_terrain_update)
+		pcall(unregister, "npc_on_update", on_npc_update)
+	end
+	reset_runtime()
+	RUNTIME.ready = false
+	RUNTIME.surge_paused = false
+	RUNTIME.callbacks_registered = false
+	return true
 end
 
 function inst.on_axr_service_result(npc, smart, kind, status, reason)

@@ -14,8 +14,10 @@
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Бой и сопровождение целей</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Доступные задачи мутантов</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Длительность задач мутантов</text></string>
-	<string id="ui_mcm_zhopa2_general_enabled"><text>Включить ZHOPA ALIFE 2</text></string>
-	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Главный переключатель аддона. При отключении ZHOPA перестает выдавать задачи и запускать свои системы экономики, лута, артефактов и сюжетных событий.</text></string>
+	<string id="ui_mcm_zhopa2_general_enabled"><text>Работа ZHOPA ALIFE 2</text></string>
+	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Главный переключатель мода. При отключении ZHOPA немедленно отменяет свои задачи, удаляет созданные сервисные отряды, очищает данные рантайма и сохранения, снимает свои коллбэки и патчи. Перед удалением мода обязательно создайте новое сохранение после отключения. Уже произошедшие изменения мира не откатываются.</text></string>
+	<string id="ui_st_zhopa2_disabled_success"><text>ZHOPA ALIFE 2 отключена. Новые сохранения больше не содержат состояния ZHOPA.</text></string>
+	<string id="ui_st_zhopa2_disabled_error"><text>ZHOPA ALIFE 2 отключена, но очистка завершилась с ошибкой. Не удаляйте мод и повторите попытку после загрузки игры.</text></string>
 	<string id="ui_mcm_zhopa2_general_stalker_movement_enabled"><text>Управлять отрядами сталкеров</text></string>
 	<string id="ui_mcm_zhopa2_general_stalker_movement_enabled_desc"><text>Разрешает ZHOPA управлять перемещением сталкерских отрядов и выдавать им задачи отдыха, патруля, охоты, поиска артефактов и торговли.</text></string>
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled"><text>Управлять отрядами мутантов</text></string>

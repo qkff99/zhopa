@@ -146,6 +146,10 @@ end
 
 local function mcm_path_for_key(key)
 	local schema = rawget(_G, "zhopa2_mcm_schema")
+	if type(schema) ~= "table" and require then
+		pcall(require, "zhopa2_mcm_schema")
+		schema = rawget(_G, "zhopa2_mcm_schema")
+	end
 	if type(schema) == "table" and type(schema.get_path) == "function" then
 		return schema.get_path(key)
 	end

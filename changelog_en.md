@@ -1,3 +1,6 @@
+# Unreleased
+- Mod disable system reworked in MCM. Now it will disable mod and clear save.
+
 ## 2.0.1
 - Fixed npc cant reach hideout when emission started
 

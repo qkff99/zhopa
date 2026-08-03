@@ -1084,6 +1084,9 @@ local function server_entity_on_unregister(se_obj, type_name)
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -1100,6 +1103,42 @@ function M.on_game_start()
 	RegisterScriptCallback("on_game_load", M.on_game_load)
 	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
 	M.registered = true
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_before_surge", M.on_before_surge)
+		pcall(UnregisterScriptCallback, "on_before_psi_storm", M.on_before_psi_storm)
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+	end
+	local remove = {}
+	local squads = SIMBOARD and SIMBOARD.squads
+	if type(squads) == "table" then
+		for _, squad in pairs(squads) do
+			if zhop_service_squad(squad) then
+				remove[#remove + 1] = squad
+			end
+		end
+	end
+	if SIMBOARD and type(SIMBOARD.remove_squad) == "function" then
+		for i = 1, #remove do
+			pcall(SIMBOARD.remove_squad, SIMBOARD, remove[i])
+		end
+	end
+	local smarts = SIMBOARD and SIMBOARD.smarts
+	if type(smarts) == "table" then
+		for _, smart in pairs(smarts) do
+			clear_smart_fields(smart)
+		end
+	end
+	M.marked_smarts = {}
+	M.pending_emission_fill = nil
+	M.smart_update_reconcile_next = {}
+	M.registered = false
+	JOB_ROLE_CACHE = {}
+	return true
 end
 
 function on_game_start()

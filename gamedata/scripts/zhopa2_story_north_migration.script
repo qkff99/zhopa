@@ -1209,6 +1209,9 @@ local function squad_on_after_level_change(squad)
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		callbacks_registered = false
 		debug_log("~ ZHOPA2 north migration error | init_error reason [missing_RegisterScriptCallback]")
@@ -1251,6 +1254,39 @@ function M.on_game_start()
 		debug_log("~ ZHOPA2 north migration error | init_error reason [callbacks_not_registered]")
 	end
 	return callbacks_registered
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "on_option_change", on_option_change)
+		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
+		pcall(UnregisterScriptCallback, "squad_on_after_level_change", squad_on_after_level_change)
+	end
+	state = {
+		fired = false,
+		legacy_skipped = false,
+		selected_by_sid = {},
+		status_by_sid = {},
+		retargeted_by_sid = {},
+	}
+	callbacks_registered = false
+	pending_reconcile = false
+	pending_source = nil
+	next_recheck_tg = 0
+	rollout_running = false
+	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
+		local m_data = alife_storage_manager.get_state()
+		if type(m_data) == "table" then
+			m_data[STATE_KEY] = nil
+		end
+	end
+	return true
 end
 
 function on_game_start()

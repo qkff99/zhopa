@@ -200,6 +200,27 @@ local function parse_bool(v)
 end
 
 local function zhopa_master_enabled()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return false
+	end
+	local master = rawget(_G, "zhopa2_master_enabled")
+	if type(master) == "function" then
+		local ok_master, enabled = pcall(master)
+		if ok_master then
+			return enabled == true
+		end
+	end
+	local cfg = rawget(_G, "zhopa2_cfg")
+	if not cfg and require then
+		pcall(require, "zhopa2_cfg")
+		cfg = rawget(_G, "zhopa2_cfg")
+	end
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok_cfg, enabled = pcall(cfg.get_bool, "enabled", true)
+		if ok_cfg and enabled ~= true then
+			return false
+		end
+	end
 	local economy = zhopa2_economy_mod()
 	if economy and type(economy.enabled) == "function" then
 		local ok_economy, enabled = pcall(economy.enabled)
@@ -426,6 +447,9 @@ local function publish_trade_service_event(npc, smart, source, phase, status, re
 end
 
 local function notify_zhopa_facade_trade_started(npc, smart, source)
+	if zhopa_master_enabled() ~= true then
+		return false
+	end
 	if not (npc and type(npc.id) == "function") then
 		return false
 	end
@@ -442,6 +466,9 @@ local function notify_zhopa_facade_trade_started(npc, smart, source)
 end
 
 local function notify_zhopa_fast_trade_candidate(npc, smart, item_section, source)
+	if zhopa_master_enabled() ~= true then
+		return false
+	end
 	if not (zhopa and zhopa.facades and type(zhopa.facades.notify_fast_trade_candidate) == "function") then
 		return false
 	end
@@ -802,6 +829,9 @@ local function clear_service_intents(st, npc_info, kind, reason)
 end
 
 local function finalize_service_session(npc, kind, reason)
+	if zhopa_master_enabled() ~= true then
+		return false
+	end
 	if not (npc and type(npc.id) == "function") then
 		return
 	end
@@ -862,14 +892,18 @@ local function finalize_service_session(npc, kind, reason)
 	publish_trade_service_event(npc, smart, source, tostring(kind), status, tostring(reason))
 end
 
-log_always("module_loaded rev=%s", tostring(ZHOPA_AXR_PATCH_REV))
+if zhopa_master_enabled() then
+	log_always("module_loaded rev=%s", tostring(ZHOPA_AXR_PATCH_REV))
+end
 
 function init_settings()
 	ini = ini_file("items\\trade\\gulag_job_trade_buy_sell.ltx")
 	enable_npc_trade = ini:r_bool_ex("settings","enable_npc_trade",true)
 	enable_npc_upgrade = ini:r_bool_ex("settings","enable_npc_upgrade",true)
 	max_upgrades_per_visit = ini:r_float_ex("settings","max_upgrades_per_visit") or 5
-	log_always("boot rev=%s ini=items\\trade\\gulag_job_trade_buy_sell.ltx", tostring(ZHOPA_AXR_PATCH_REV))
+	if zhopa_master_enabled() then
+		log_always("boot rev=%s ini=items\\trade\\gulag_job_trade_buy_sell.ltx", tostring(ZHOPA_AXR_PATCH_REV))
+	end
 	print_debug("override_loaded R3A debug=%s npc_trade=%s npc_upgrade=%s max_upgrades_per_visit=%s",
 		tostring(enable_debug), tostring(enable_npc_trade), tostring(enable_npc_upgrade), tostring(max_upgrades_per_visit))
 end
@@ -878,10 +912,7 @@ end
 -- Callbacks
 --------------------------------
 local function npc_on_item_take(npc,item)
-	if zhopa_master_enabled() ~= true then
-		return
-	end
-	if is_item_take_suppressed(npc) then
+	if zhopa_master_enabled() and is_item_take_suppressed(npc) then
 		return
 	end
 
@@ -896,16 +927,19 @@ end
 
 function on_game_start()
 	if ZHOPA_AXR_RUNTIME.started then
-		log_always("on_game_start duplicate_ignored rev=%s", tostring(ZHOPA_AXR_PATCH_REV))
+		if zhopa_master_enabled() then
+			log_always("on_game_start duplicate_ignored rev=%s", tostring(ZHOPA_AXR_PATCH_REV))
+		end
 		return
 	end
 	ZHOPA_AXR_RUNTIME.started = true
 	RegisterScriptCallback("npc_on_item_take",npc_on_item_take)
 	init_settings()
 	print_debug("on_game_start R3A rev=%s", tostring(ZHOPA_AXR_PATCH_REV))
-	log_handler_binding_state("on_game_start", true)
+	if zhopa_master_enabled() then
+		log_handler_binding_state("on_game_start", true)
+	end
 end
-
 
 --------------------------------
 -- Trade job
@@ -920,7 +954,8 @@ function check_trade_item(npc,item)
 	if not (st) then
 		return
 	end
-	if is_trade_intent_suppressed_storage(st) then
+	local zhopa_enabled = zhopa_master_enabled() == true
+	if zhopa_enabled and is_trade_intent_suppressed_storage(st) then
 		clear_trade_item_intent(st)
 		return false
 	end
@@ -931,7 +966,7 @@ function check_trade_item(npc,item)
 	end
 
 	local smart = xr_gulag.get_npc_smart(npc)
-	if npc_is_blocked_service_customer(npc, smart, id) then
+	if zhopa_enabled and npc_is_blocked_service_customer(npc, smart, id) then
 		clear_trade_item_intent(st)
 		return false
 	end
@@ -980,7 +1015,8 @@ zhopa_npc_has_items_to_sell = function(actor,npc,p)
 	if not (npc) then
 		return false
 	end
-	if zhopa_surge_active() then
+	local zhopa_enabled = zhopa_master_enabled() == true
+	if zhopa_enabled and zhopa_surge_active() then
 		return false
 	end
 
@@ -990,13 +1026,13 @@ zhopa_npc_has_items_to_sell = function(actor,npc,p)
 	if not (st) then
 		return false
 	end
-	if is_trade_intent_suppressed_storage(st) then
+	if zhopa_enabled and is_trade_intent_suppressed_storage(st) then
 		clear_trade_item_intent(st)
 		return false
 	end
 
 	local smart = p and p[1] and SIMBOARD.smarts_by_names[p[1]]
-	if npc_is_blocked_service_customer(npc, smart, id) then
+	if zhopa_enabled and npc_is_blocked_service_customer(npc, smart, id) then
 		clear_trade_item_intent(st)
 		return false
 	end
@@ -1012,7 +1048,9 @@ zhopa_npc_has_items_to_sell = function(actor,npc,p)
 		end
 	end
 	
-	log_handler_binding_state("npc_has_items_to_sell", false)
+	if zhopa_enabled then
+		log_handler_binding_state("npc_has_items_to_sell", false)
+	end
 	print_debug("npc_has_items_to_sell | npc (%s) has item to sell", id)
 
 	return true
@@ -1020,21 +1058,27 @@ end
 xr_conditions.npc_has_items_to_sell = zhopa_npc_has_items_to_sell
 
 zhopa_axr_trade_job_sell_items = function(actor,npc,p)
-	if zhopa_surge_active() then
+	local zhopa_enabled = zhopa_master_enabled() == true
+	if zhopa_enabled and zhopa_surge_active() then
 		return
 	end
-	log_always("trade_job_sell_items_enter rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
-	print_debug("trade_job_sell_items R3A rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
-	log_handler_binding_state("trade_job_sell_items", true)
+	if zhopa_enabled then
+		log_always("trade_job_sell_items_enter rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
+		print_debug("trade_job_sell_items R3A rev=%s npc=%s id=%s", tostring(ZHOPA_AXR_PATCH_REV), npc and npc:name() or "nil", npc and npc:id() or "nil")
+		log_handler_binding_state("trade_job_sell_items", true)
+	end
 	zhopa_npc_trade_buy_sell_impl(npc)
 end
 xr_effects.trade_job_sell_items = zhopa_axr_trade_job_sell_items
 
 zhopa_axr_trade_job_give_id = function(actor,npc,p)
-	if zhopa_surge_active() then
+	local zhopa_enabled = zhopa_master_enabled() == true
+	if zhopa_enabled and zhopa_surge_active() then
 		return
 	end
-	log_handler_binding_state("trade_job_give_id", false)
+	if zhopa_enabled then
+		log_handler_binding_state("trade_job_give_id", false)
+	end
 	local board = SIMBOARD
 	local smart = p[1] and board and board.smarts_by_names[p[1]]
 	local id = smart and smart.npc_by_job_section["logic@"..p[2]]
@@ -1285,8 +1329,126 @@ local function zhopa2_execute_squad_trade(npc, seller, smart, st)
 	return true, traded_any
 end
 
+ZHOPA_AXR_RUNTIME.vanilla_trade = function(npc)
+	local g_tonumber = tonumber
+	local id = npc and npc:id()
+	local st = id and db.storage[id]
+	if not st or not st.has_items_to_sell or not st.trade_items then
+		return
+	end
+
+	local smart = xr_gulag.get_npc_smart(npc)
+	local npc_info = smart and smart.npc_info[id]
+	if npc_info then
+		npc_info.job.idle = time_global() + 20000
+	end
+
+	local se_obj = alife_object(id)
+	if not se_obj then
+		return
+	end
+
+	local seller_id = npc_info and npc_info.job and npc_info.job.seller_id
+	local seller = seller_id and axr_online_object_by_id(seller_id) or nil
+	local itm, itm_base_cost, buy_sell, slot, bw, can_sell
+	for sec, count in pairs(st.trade_items) do
+		for i = count, 1 do
+			itm = npc:object(sec)
+			if itm then
+				can_sell = true
+				bw = npc:best_weapon()
+				if bw and bw:id() == itm:id() then
+					can_sell = false
+				end
+
+				for slot_id = 1, 12 do
+					slot = npc:item_in_slot(slot_id)
+					if slot and slot:id() == itm:id() then
+						can_sell = false
+						break
+					end
+				end
+
+				buy_sell = ini:r_string_ex("buy_sell", sec)
+				if buy_sell and buy_sell ~= "" and can_sell then
+					buy_sell = str_explode(buy_sell, ",")
+					if seller then
+						npc:transfer_item(itm, seller)
+					else
+						alife_release_id(itm:id())
+					end
+
+					itm_base_cost = ini_sys:r_float_ex(sec, "cost") or 30
+					local money = math.floor(itm_base_cost * (g_tonumber(buy_sell[4]) or 1))
+					npc:give_money(money)
+					game_statistics.increment_npc_statistic(npc, "items_sold")
+					if i <= g_tonumber(buy_sell[1]) then
+						break
+					end
+				end
+			end
+		end
+	end
+
+	empty_table(st.trade_items)
+	st.has_items_to_sell = false
+
+	local money = npc:money()
+	if money == nil or money <= 0 or not smart or not npc_info or not npc_info.job or not seller then
+		return
+	end
+
+	local valid_items = utils_data.collect_section(ini, "buy_sell", true)
+	local item_list = {}
+	local function itr(owner, item)
+		local sec = item:section()
+		if sec and valid_items[sec] then
+			item_list[sec] = (item_list[sec] or 0) + 1
+		end
+	end
+	npc:iterate_inventory(itr, npc)
+
+	bw = npc:best_weapon()
+	bw = bw and bw:section()
+	local bw_ammos = bw and parse_list(ini_sys, bw, "ammo_class", true)
+	local buy_sell_items = {}
+	local size_t = 0
+	local total_cost
+	for sec in pairs(valid_items) do
+		buy_sell = ini:r_string_ex("buy_sell", sec)
+		if buy_sell and buy_sell ~= "" then
+			buy_sell = str_explode(buy_sell, ",")
+			itm_base_cost = ini_sys:r_float_ex(sec, "cost") or 30
+			total_cost = math.floor(itm_base_cost * (g_tonumber(buy_sell[5]) or 1))
+
+			if IsItem("ammo", sec) or (bw_ammos and bw_ammos[sec]) then
+				local first = item_list[sec] or 1
+				for i = first, g_tonumber(buy_sell[3]) do
+					if money >= total_cost then
+						size_t = size_t + 1
+						buy_sell_items[size_t] = sec
+						alife_create_item(sec, npc)
+						npc:transfer_money(total_cost, seller)
+						money = money - total_cost
+					end
+				end
+			end
+		end
+		if money <= 0 then
+			break
+		end
+	end
+
+	if #buy_sell_items > 0 and dynamic_news_manager and ui_options.get("alife/dynamic_news/nearby_activity_news") then
+		dynamic_news_manager.get_dynamic_news():BoughtItems(npc, seller, buy_sell_items)
+	end
+end
+
 zhopa_npc_trade_buy_sell_impl = function(npc)
-	if zhopa_surge_active() then
+	if not zhopa_master_enabled() then
+		return ZHOPA_AXR_RUNTIME.vanilla_trade(npc)
+	end
+	if zhopa_master_enabled() and zhopa_surge_active() then
 		return
 	end
 	local g_tonumber = tonumber
@@ -1584,13 +1746,13 @@ function check_tech_item(npc,item)
 	end
 
 	local smart = xr_gulag.get_npc_smart(npc)
-	if npc_is_blocked_service_customer(npc, smart, id) then
+	if zhopa_master_enabled() and npc_is_blocked_service_customer(npc, smart, id) then
 		clear_tech_item_intent(st)
 		return false
 	end
 
 	local sec = item:section()
-	if not (type(IsItem) == "function" and IsItem("upgrade", sec)) then
+	if zhopa_master_enabled() and not (type(IsItem) == "function" and IsItem("upgrade", sec)) then
 		return
 	end
 
@@ -1630,7 +1792,8 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 	if not (npc) then
 		return false
 	end
-	if zhopa_surge_active() then
+	local zhopa_enabled = zhopa_master_enabled() == true
+	if zhopa_enabled and zhopa_surge_active() then
 		return false
 	end
 
@@ -1642,7 +1805,7 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 	end
 
 	local smart = p and p[1] and SIMBOARD.smarts_by_names[p[1]]
-	if npc_is_blocked_service_customer(npc, smart, id) then
+	if zhopa_enabled and npc_is_blocked_service_customer(npc, smart, id) then
 		clear_tech_item_intent(st)
 		return false
 	end
@@ -1676,14 +1839,14 @@ xr_conditions.npc_has_tech_items = function(actor,npc,p)
 end
 
 xr_effects.tech_job_upgrade_items = function(actor,npc,p)
-	if zhopa_surge_active() then
+	if zhopa_master_enabled() and zhopa_surge_active() then
 		return
 	end
 	npc_tech_upgrade_sell(npc)
 end
 
 xr_effects.tech_job_give_id = function(actor,npc,p)
-	if zhopa_surge_active() then
+	if zhopa_master_enabled() and zhopa_surge_active() then
 		return
 	end
 	local board = SIMBOARD
@@ -1700,7 +1863,7 @@ xr_effects.tech_job_give_id = function(actor,npc,p)
 end
 
 function npc_tech_upgrade_sell(npc)
-	if zhopa_surge_active() then
+	if zhopa_master_enabled() and zhopa_surge_active() then
 		return
 	end
 	local id = npc and npc:id()

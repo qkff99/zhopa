@@ -1373,8 +1373,23 @@ end
 _G.zhopa2_artifacts = M
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	-- Online artifact pickup is requested lazily after the squad reaches
 	-- the artifact smart; xr_gather_items still owns the actual pickup action.
+end
+
+function M.on_master_disable()
+	local squads = SIMBOARD and SIMBOARD.squads
+	if type(squads) == "table" then
+		for _, squad in pairs(squads) do
+			if squad and (squad.zhopa2_artifact_id or squad.zhopa2_task == "ARTEFACT") then
+				pcall(M.complete, squad, "master_disabled")
+			end
+		end
+	end
+	return true
 end
 
 function on_game_start()

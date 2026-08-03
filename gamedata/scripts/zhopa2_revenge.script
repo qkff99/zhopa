@@ -126,9 +126,24 @@ local last_hostility_update = 0
 local active_actor_revenge_squad_id = nil
 local night_revenge_cancelled = false
 local sleep_hook_installed = false
+local sleep_hook_class = nil
+local sleep_hook_original = nil
+local sleep_hook_wrapper = nil
 local last_sleep_start_hour = nil
 local sleep_paused_actor_revenge_squad_id = nil
 local sleep_paused_actor_revenge_touched_night = false
+
+local function master_enabled()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return false
+	end
+	local fn = rawget(_G, "zhopa2_master_enabled")
+	if type(fn) == "function" then
+		local ok, enabled = pcall(fn)
+		return ok and enabled == true
+	end
+	return true
+end
 
 local function death_key(victim_squad, offender_target_id)
 	if not (victim_squad and victim_squad.id and offender_target_id ~= nil) then
@@ -670,19 +685,41 @@ local function install_sleep_hook()
 		return false
 	end
 	if ui_class.zhopa2_revenge_sleep_hooked then
+		sleep_hook_class = ui_class
+		sleep_hook_original = ui_class.zhopa2_revenge_on_button_sleep
+		sleep_hook_wrapper = ui_class.zhopa2_revenge_sleep_hooked
 		sleep_hook_installed = true
 		return true
 	end
 	local original = ui_class.OnButtonSleep
-	ui_class.zhopa2_revenge_sleep_hooked = true
-	ui_class.zhopa2_revenge_on_button_sleep = original
-	function ui_class.OnButtonSleep(self, ...)
-		local hours = sleep_hours_from_ui(self)
-		pause_actor_revenge_for_sleep(hours)
+	local wrapper = function(self, ...)
+		if master_enabled() then
+			local hours = sleep_hours_from_ui(self)
+			pause_actor_revenge_for_sleep(hours)
+		end
 		return original(self, ...)
 	end
+	sleep_hook_class = ui_class
+	sleep_hook_original = original
+	sleep_hook_wrapper = wrapper
+	ui_class.zhopa2_revenge_sleep_hooked = wrapper
+	ui_class.zhopa2_revenge_on_button_sleep = original
+	ui_class.OnButtonSleep = wrapper
 	sleep_hook_installed = true
 	return true
+end
+
+local function uninstall_sleep_hook()
+	local ui_class = sleep_hook_class
+	if ui_class and sleep_hook_wrapper and ui_class.OnButtonSleep == sleep_hook_wrapper then
+		ui_class.OnButtonSleep = sleep_hook_original
+		ui_class.zhopa2_revenge_sleep_hooked = nil
+		ui_class.zhopa2_revenge_on_button_sleep = nil
+		sleep_hook_class = nil
+		sleep_hook_original = nil
+		sleep_hook_wrapper = nil
+	end
+	sleep_hook_installed = false
 end
 
 local function actor_on_sleep(hours)
@@ -801,6 +838,9 @@ function M.on_npc_death_callback(victim, who)
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	if not RegisterScriptCallback then
 		return
 	end
@@ -815,6 +855,25 @@ function M.on_game_start()
 	RegisterScriptCallback("actor_on_update", actor_on_update)
 	RegisterScriptCallback("actor_on_sleep", actor_on_sleep)
 	install_sleep_hook()
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "squad_on_npc_death", M.on_squad_npc_death)
+		pcall(UnregisterScriptCallback, "npc_on_death_callback", M.on_npc_death_callback)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "actor_on_sleep", actor_on_sleep)
+	end
+	uninstall_sleep_hook()
+	processed_deaths = {}
+	processed_order = {}
+	last_hostility_update = 0
+	active_actor_revenge_squad_id = nil
+	night_revenge_cancelled = false
+	last_sleep_start_hour = nil
+	sleep_paused_actor_revenge_squad_id = nil
+	sleep_paused_actor_revenge_touched_night = false
+	return true
 end
 
 function on_game_start()

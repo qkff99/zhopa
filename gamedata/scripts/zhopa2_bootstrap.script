@@ -1,18 +1,249 @@
-local function runtime_patches()
-	local mod = rawget(_G, "zhopa2_runtime_patches")
+local M = {}
+
+local MODULE_STOP_ORDER = {
+	"zhopa2_economy",
+	"zhopa2_artifacts",
+	"zhopa2_loot",
+	"zhopa2_tasks",
+	"zhopa2_smart_service_slot_doctor",
+	"zhopa2_revenge",
+	"zhopa2_story_north_migration",
+	"zhopa2_story_psy_watchdog",
+	"zhopa2_service_fillers",
+	"zhopa2_perception",
+	"zhopa2_index",
+	"zhopa2_topology",
+	"zhopa2_debug_hud",
+	"zhopa2_runtime_patches",
+}
+
+local state = nil
+local cleanup_complete = false
+local first_update_registered = false
+
+local function safe_require(name)
+	local mod = rawget(_G, name)
 	if mod then
 		return mod
 	end
 	if require then
-		pcall(require, "zhopa2_runtime_patches")
+		pcall(require, name)
 	end
-	return rawget(_G, "zhopa2_runtime_patches")
+	return rawget(_G, name)
+end
+
+local function configured_enabled()
+	local cfg = safe_require("zhopa2_cfg")
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok, enabled = pcall(cfg.get_bool, "enabled", true)
+		if ok then
+			return enabled == true
+		end
+	end
+	return true
+end
+
+local function log_line(fmt, ...)
+	if type(printf) == "function" then
+		pcall(printf, fmt, ...)
+	end
+end
+
+local function notify(text_id)
+	if not db or not db.actor then
+		return
+	end
+	local actor = db.actor
+	if not (news_manager and type(news_manager.send_tip) == "function") then
+		return
+	end
+	local text = text_id
+	if game and type(game.translate_string) == "function" then
+		local ok, translated = pcall(game.translate_string, text_id)
+		if ok and translated and translated ~= "" then
+			text = translated
+		end
+	end
+	pcall(news_manager.send_tip, actor, text, nil, "swiss_knife", 10000)
+end
+
+local function unregister_first_update()
+	if first_update_registered and UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_first_update", M._actor_on_first_update)
+	end
+	first_update_registered = false
+end
+
+local function register_first_update()
+	if first_update_registered or not RegisterScriptCallback then
+		return
+	end
+	pcall(RegisterScriptCallback, "actor_on_first_update", M._actor_on_first_update)
+	first_update_registered = true
+end
+
+local function stop_modules(reason)
+	local ok = true
+	local failed = {}
+	for i = 1, #MODULE_STOP_ORDER do
+		local name = MODULE_STOP_ORDER[i]
+		local mod = safe_require(name)
+		if not mod then
+			ok = false
+			failed[#failed + 1] = name .. ":missing_module"
+		elseif type(mod.on_master_disable) ~= "function" then
+			ok = false
+			failed[#failed + 1] = name .. ":missing_cleanup"
+		else
+			local stopped, result, detail = pcall(mod.on_master_disable, reason or "master_disabled")
+			if not stopped or result == false then
+				ok = false
+				failed[#failed + 1] = name .. ":" .. tostring(stopped and detail or result)
+			end
+		end
+	end
+	return ok, table.concat(failed, ",")
+end
+
+function M.state()
+	if state == nil then
+		state = configured_enabled() and "enabled" or "disabled"
+	end
+	return state
+end
+
+function M.is_enabled()
+	local current = M.state()
+	return current == "enabled" or current == "enabling"
+end
+
+function M.is_disabled()
+	return not M.is_enabled()
+end
+
+function M.disable(reason)
+	if state == "disabling" then
+		return false, "disable_in_progress"
+	end
+	state = "disabling"
+	cleanup_complete = false
+	_G.zhopa2_runtime_disabled = true
+
+	local ok, detail = stop_modules(reason or "master_disabled")
+	state = "disabled"
+	cleanup_complete = ok == true
+	if cleanup_complete then
+		unregister_first_update()
+		log_line("~ ZHOPA2 disabled | runtime and save state cleared")
+		notify("ui_st_zhopa2_disabled_success")
+		return true
+	end
+
+	register_first_update()
+	log_line("! ZHOPA2 disable error | cleanup incomplete [%s]", tostring(detail or "unknown"))
+	notify("ui_st_zhopa2_disabled_error")
+	return false, detail
+end
+
+function M.enable(reason)
+	if state == "enabling" then
+		return false, "enable_in_progress"
+	end
+	state = "enabling"
+	cleanup_complete = false
+	_G.zhopa2_runtime_disabled = nil
+	unregister_first_update()
+
+	local rt = safe_require("zhopa2_runtime_patches")
+	local ok, result = false, "runtime_missing"
+	if rt and type(rt.on_master_enable) == "function" then
+		ok, result = pcall(rt.on_master_enable, reason or "master_enabled")
+	end
+	if not ok or result == false then
+		_G.zhopa2_runtime_disabled = true
+		local clean_ok, clean_detail = stop_modules("master_enable_failed")
+		state = "disabled"
+		cleanup_complete = clean_ok == true
+		local detail = tostring(result)
+		if not clean_ok then
+			detail = detail .. ";cleanup:" .. tostring(clean_detail)
+			register_first_update()
+		end
+		log_line("! ZHOPA2 enable error | detail [%s]", detail)
+		return false, detail
+	end
+	state = "enabled"
+	log_line("~ ZHOPA2 enabled | runtime initialization started")
+	return true
+end
+
+function M._actor_on_first_update()
+	if configured_enabled() then
+		unregister_first_update()
+		return
+	end
+	M.disable("disabled_first_update")
+end
+
+function M._on_game_load()
+	if configured_enabled() then
+		return
+	end
+	state = "disabled"
+	cleanup_complete = false
+	_G.zhopa2_runtime_disabled = true
+	register_first_update()
+end
+
+function M._on_option_change()
+	local enabled = configured_enabled()
+	if enabled and not M.is_enabled() then
+		M.enable("mcm_enabled")
+	elseif not enabled and M.is_enabled() then
+		M.disable("mcm_disabled")
+	elseif not enabled and cleanup_complete ~= true then
+		M.disable("mcm_disabled_retry")
+	end
+end
+
+local function register_lifecycle_callback()
+	if not RegisterScriptCallback then
+		return false
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_option_change", M._on_option_change)
+		pcall(UnregisterScriptCallback, "on_game_load", M._on_game_load)
+	end
+	pcall(RegisterScriptCallback, "on_option_change", M._on_option_change)
+	pcall(RegisterScriptCallback, "on_game_load", M._on_game_load)
+	return true
+end
+
+function M.on_game_start()
+	register_lifecycle_callback()
+	if configured_enabled() then
+		state = "enabled"
+		_G.zhopa2_runtime_disabled = nil
+		local rt = safe_require("zhopa2_runtime_patches")
+		if rt and type(rt.on_game_start) == "function" then
+			return rt.on_game_start()
+		end
+		return false
+	end
+	state = "disabled"
+	_G.zhopa2_runtime_disabled = true
+	local ok, detail = M.disable("disabled_on_game_start")
+	register_first_update()
+	return ok, detail
 end
 
 function on_game_start()
-	local rt = runtime_patches()
-	if rt and type(rt.on_game_start) == "function" then
-		return rt.on_game_start()
-	end
-	return false
+	return M.on_game_start()
 end
+
+_G.zhopa2_master_enabled = function()
+	return M.is_enabled()
+end
+
+_G.zhopa2_bootstrap = M
+return M

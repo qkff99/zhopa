@@ -14,8 +14,10 @@
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Combat and target handling</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Available mutant tasks</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Mutant task timing</text></string>
-	<string id="ui_mcm_zhopa2_general_enabled"><text>Enable ZHOPA ALIFE 2</text></string>
-	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Master switch for the addon. When disabled, ZHOPA stops assigning tasks and running its economy, loot, artefact, and story systems.</text></string>
+	<string id="ui_mcm_zhopa2_general_enabled"><text>Run ZHOPA ALIFE 2</text></string>
+	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Master runtime switch. Turning it off immediately cancels ZHOPA tasks, removes its generated service squads, clears its runtime and save data, and stops its callbacks and patches. Save the game after disabling before uninstalling the addon. Changes already made to the world cannot be reversed.</text></string>
+	<string id="ui_st_zhopa2_disabled_success"><text>ZHOPA ALIFE 2 is disabled. New saves no longer contain ZHOPA state.</text></string>
+	<string id="ui_st_zhopa2_disabled_error"><text>ZHOPA ALIFE 2 is disabled, but cleanup is incomplete. Keep the addon installed and retry after loading the game.</text></string>
 	<string id="ui_mcm_zhopa2_general_stalker_movement_enabled"><text>Manage stalker squads</text></string>
 	<string id="ui_mcm_zhopa2_general_stalker_movement_enabled_desc"><text>Allows ZHOPA to control stalker squad movement and assign stalker tasks such as rest, patrol, hunt, artefact search, and trade.</text></string>
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled"><text>Manage mutant squads</text></string>

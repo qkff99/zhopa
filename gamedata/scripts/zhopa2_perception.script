@@ -2255,5 +2255,18 @@ function M.make_patrol(squad, kind, opts)
 	return ids
 end
 
+function M.on_master_disable()
+	target_maps_cache = {}
+	neighbors_cache = {}
+	hunt_candidate_cache = {}
+	hunt_pick_cache = {}
+	hunt_cache_cleanup_at = 0
+	frame_cache_key = nil
+	frame_cache = {}
+	M.base_populate_pick_cache = {}
+	M.base_populate_pick_cache_cleanup_at = 0
+	return true
+end
+
 _G.zhopa2_perception = M
 return M

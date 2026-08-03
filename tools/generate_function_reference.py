@@ -28,7 +28,7 @@ SCRIPT_HOOKS = {
 SCRIPT_ROLES = {
     "axr_trade_manager.script": "SISKI-derived vanilla trade-manager override that executes online squad trade and technician service through real smart customer jobs",
     "zhopa2_artifacts.script": "artifact target selection, real/virtual artifact handling, and online/offline pickup flow",
-    "zhopa2_bootstrap.script": "minimal startup bridge into the runtime patch orchestrator",
+    "zhopa2_bootstrap.script": "master enable/disable lifecycle, cleanup coordination, and startup bridge into the runtime patch orchestrator",
     "zhopa2_cfg.script": "configuration, MCM defaults, faction aliases, and blacklist access",
     "zhopa2_debug_hud.script": "debug PDA map markers and squad status hints",
     "zhopa2_economy.script": "online customer-job preparation, offline trade execution, pricing, virtual cargo/money, queues, routing, and trade-job path recovery",
@@ -87,6 +87,8 @@ def describe(name: str, path: Path) -> str:
         lower = lower[2:]
     if lower in SCRIPT_HOOKS:
         return f"Runtime hook for {topic} lifecycle integration."
+    if "master_disable" in lower or "master_enable" in lower:
+        return "Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle."
     if "runtime_ready" in lower:
         return "Checks the shared runtime readiness barrier before context-dependent work."
     if "cfg_bool" in lower:
@@ -261,7 +263,7 @@ def generate(project_root: Path) -> str:
     lines: list[str] = [
         "# Z.H.O.P.A. ALIFE 2.0 Function Reference",
         "",
-        "[README](../README_EN.md) | [Architecture document](zhopa_alife_2_design_document_en.md) | [Русский README](../README.md)",
+        "[README](../README_EN.md) | [Architecture document](zhopa_alife_2_design_document_en.md) | [Russian README](../README.md)",
         "",
         "This document is generated from the current ZHOPA ALIFE 2.0 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
         "",

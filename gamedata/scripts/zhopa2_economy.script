@@ -4666,11 +4666,59 @@ function M.ensure_runtime_ready(force_callbacks)
 end
 
 function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
 	M.ensure_runtime_ready(true)
 	if not registered_callbacks then
 		return false
 	end
 	return patched_condition and patched_effect
+end
+
+function M.on_master_disable()
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "npc_on_net_spawn", npc_on_net_spawn)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+	end
+	trade_path.restore_trade_priority_boosts(nil, nil, nil, "master_disabled")
+	if db and type(db.storage) == "table" then
+		for npc_id, st in pairs(db.storage) do
+			local managed = type(st) == "table" and (st.zhopa2_trade_squad_id ~= nil
+				or st.zhopa2_trade_smart_id ~= nil
+				or st.zhopa2_trade_path_override == true
+				or st.zhopa2_trade_release_watch_until ~= nil)
+			if managed then
+				local npc = st.object or online_object_by_id(npc_id)
+				trade_path.clear(npc, st)
+				trade_path.clear_trade_storage(st)
+				st.has_items_to_sell = nil
+				st.trade_items = nil
+				st.zhopa2_trade_release_watch_until = nil
+				st.zhopa2_trade_release_reason = nil
+				st.zhopa2_trade_suppress_until = nil
+				st.zhopa2_trade_completed_until = nil
+				st.zhopa2_trade_inventory_scan_tg = nil
+			end
+		end
+	end
+	SMART_TRADE_QUEUE = {}
+	SMART_TRADE_PRIORITY_BOOSTS = {}
+	SMART_TRADE_PROVIDER_CACHE = {}
+	SMART_TRADE_CUSTOMER_CACHE = {}
+	JOB_ROLE_CACHE = {}
+	trade_path.session_banned_npcs = {}
+	trade_path.offline_profile_cache = {}
+	trade_path.offline_profile_cleanup_at = 0
+	M.trade_release_watch = {}
+	M.trade_release_watch_next_tg = 0
+	M.trade_event_buffer = {}
+	patched_condition = false
+	patched_effect = false
+	registered_callbacks = false
+	return true
 end
 
 function on_game_start()
