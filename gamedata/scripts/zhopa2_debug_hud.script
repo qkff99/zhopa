@@ -404,4 +404,8 @@ end
 _G.zhopa2_debug_hud = {
 	on_game_start = on_game_start,
 	on_master_disable = on_master_disable,
+	update_squad = update_squad,
+	cleanup_squad = cleanup_squad,
+	cleanup_squad_id = cleanup_squad_id,
+	cleanup_all = cleanup_all,
 }

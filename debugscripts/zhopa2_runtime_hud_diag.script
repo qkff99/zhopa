@@ -1,0 +1,381 @@
+local M = {}
+
+local DUMP_KEY = DIK_keys and DIK_keys.DIK_J or 36
+local MAX_SQUADS = 1000
+
+local function log(fmt, ...)
+	if type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 runtime hud diag | " .. fmt, ...)
+	elseif type(print) == "function" then
+		print(string.format("~ ZHOPA2 runtime hud diag | " .. fmt, ...))
+	end
+end
+
+local function safe_field(obj, key)
+	if obj == nil then
+		return nil
+	end
+	local ok, value = pcall(function()
+		return obj[key]
+	end)
+	return ok and value or nil
+end
+
+local function safe_method(obj, name, ...)
+	local fn = safe_field(obj, name)
+	if type(fn) ~= "function" then
+		return false, nil
+	end
+	return pcall(fn, obj, ...)
+end
+
+local function safe_function(fn, ...)
+	if type(fn) ~= "function" then
+		return false, nil
+	end
+	return pcall(fn, ...)
+end
+
+local function safe_mod(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function safe_alife_object(id)
+	id = tonumber(id)
+	if not (id and alife_object) then
+		return nil
+	end
+	local ok, obj = pcall(alife_object, id)
+	return ok and obj or nil
+end
+
+local function table_count(value)
+	local count = 0
+	if type(value) == "table" then
+		for _ in pairs(value) do
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function bool_text(value)
+	return value == true and "true" or "false"
+end
+
+local function current_level_name()
+	if not (level and type(level.name) == "function") then
+		return "-"
+	end
+	local ok, name = pcall(level.name)
+	return ok and tostring(name or "-") or "-"
+end
+
+local function object_story_id(id)
+	if not (id and get_object_story_id) then
+		return nil
+	end
+	local ok, story_id = pcall(get_object_story_id, id)
+	return ok and story_id or nil
+end
+
+local function squad_section(squad)
+	local section = safe_field(squad, "zhopa2_section_name")
+	if type(section) == "string" and section ~= "" then
+		return section
+	end
+	local ok, value = safe_method(squad, "section_name")
+	return ok and tostring(value or "-") or "-"
+end
+
+local function squad_level(squad, perception)
+	local fn = perception and perception.obj_level
+	local ok, value = safe_function(fn, squad)
+	return ok and tostring(value or "-") or "-"
+end
+
+local function squad_members(squad)
+	local ids = {}
+	local stories = {}
+	local ok = pcall(function()
+		for member in squad:squad_members() do
+			local id = tonumber(member and member.id)
+			if id and id > 0 and id ~= 65535 then
+				ids[#ids + 1] = id
+				local story_id = object_story_id(id)
+				if story_id then
+					stories[#stories + 1] = tostring(id) .. ":" .. tostring(story_id)
+				end
+			end
+		end
+	end)
+	table.sort(ids)
+	return ok, ids, stories
+end
+
+local function resolve_squad(key, stored)
+	local id = safe_field(stored, "id")
+	if id ~= nil and type(id) ~= "function" then
+		return stored
+	end
+	return safe_alife_object(key)
+end
+
+local function cfg_bool(cfg, key, default)
+	local ok, value = safe_function(cfg and cfg.get_bool, key, default)
+	return ok and value == true
+end
+
+local function quest_state(perception, squad)
+	local ok, protected, reason = safe_function(perception and perception.quest_protected_squad, squad)
+	if not ok then
+		return false, "check_error"
+	end
+	return protected == true, reason or "-"
+end
+
+local function rejection_reason(squad, section, members, quest_protected, quest_reason, cfg, can_manage)
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return "runtime_disabled"
+	end
+	if not cfg_bool(cfg, "enabled", true) then
+		return "master_disabled"
+	end
+	if safe_field(squad, "zhopa2_service_filler") == true
+		or section:find("_sim_squad_service_", 1, true)
+	then
+		return "service_squad"
+	end
+	if safe_field(squad, "disabled") == true then
+		return "squad_disabled"
+	end
+	if #members == 0 then
+		return "no_members"
+	end
+	if quest_protected then
+		return "quest_" .. tostring(quest_reason)
+	end
+	local squad_id = tonumber(safe_field(squad, "id"))
+	if safe_field(squad, "player_id") == "actor" then
+		return "actor_squad"
+	end
+	if object_story_id(squad_id) then
+		return "squad_story"
+	end
+	local companions = axr_companions and axr_companions.companion_squads
+	if companions and companions[squad_id] then
+		return "companion_squad"
+	end
+	local hostages = axr_task_manager and axr_task_manager.hostages_by_id
+	if hostages and hostages[members[1]] then
+		return "hostage"
+	end
+	local ok_blacklist, blacklisted = safe_method(squad, "zhopa2_global_level_blacklisted")
+	if ok_blacklist and blacklisted == true then
+		return "global_level_blacklist"
+	end
+	if safe_field(squad, "random_targets") ~= nil then
+		return "random_targets"
+	end
+	if safe_field(squad, "action_condlist") ~= nil then
+		return "action_condlist"
+	end
+	if safe_field(squad, "scripted_target") ~= nil then
+		local ok_managed, managed_target = safe_method(squad, "zhopa2_is_managed_scripted_target")
+		if not (ok_managed and managed_target == true) then
+			return "foreign_scripted_target"
+		end
+	end
+	if can_manage == true then
+		return "allowed"
+	end
+	return "can_manage_other"
+end
+
+local function dump_modules()
+	local names = {
+		"zhopa2_cfg", "zhopa2_index", "zhopa2_topology", "zhopa2_loot", "zhopa2_economy",
+		"zhopa2_perception", "zhopa2_revenge", "zhopa2_service_fillers", "zhopa2_artifacts",
+		"zhopa2_story_psy_watchdog", "zhopa2_story_north_migration", "zhopa2_debug_hud",
+		"zhopa2_tasks", "zhopa2_runtime_patches",
+	}
+	local out = {}
+	for i = 1, #names do
+		out[#out + 1] = names[i] .. "=" .. tostring(type(rawget(_G, names[i])))
+	end
+	log("modules [%s]", table.concat(out, ","))
+end
+
+local function dump_buckets(board)
+	local by_level = safe_field(board, "zhopa2_squads_by_level")
+	local levels = {}
+	for level_name, bucket in pairs(type(by_level) == "table" and by_level or {}) do
+		levels[#levels + 1] = tostring(level_name) .. ":" .. tostring(table_count(bucket))
+	end
+	table.sort(levels)
+	log(
+		"board present [%s] buckets_ready [%s] squads [%s] squad_level [%s] by_level [%s] levels [%s]",
+		bool_text(board ~= nil),
+		bool_text(safe_field(board, "zhopa2_buckets_ready") == true),
+		tostring(table_count(safe_field(board, "squads"))),
+		tostring(table_count(safe_field(board, "zhopa2_squad_level"))),
+		tostring(table_count(by_level)),
+		table.concat(levels, ",")
+	)
+end
+
+function M.dump()
+	local cfg = safe_mod("zhopa2_cfg")
+	local perception = safe_mod("zhopa2_perception")
+	local runtime = safe_mod("zhopa2_runtime_patches")
+	local hud = safe_mod("zhopa2_debug_hud")
+	local board = rawget(_G, "SIMBOARD")
+	local ok_reason, not_ready_reason = safe_function(runtime and runtime.runtime_not_ready_reason)
+	if not ok_reason then
+		not_ready_reason = "runtime_api_missing"
+	end
+
+	log("begin key [J]")
+	log(
+		"runtime disabled [%s] ready [%s] not_ready [%s] level [%s] cfg_enabled [%s] debug_hud_enabled [%s]",
+		bool_text(rawget(_G, "zhopa2_runtime_disabled") == true),
+		bool_text(ok_reason and not_ready_reason == nil),
+		tostring(not_ready_reason or "-"),
+		current_level_name(),
+		bool_text(cfg_bool(cfg, "enabled", true)),
+		bool_text(cfg_bool(cfg, "debug_hud_enabled", false))
+	)
+	log(
+		"hud module [%s] update_squad [%s] cleanup_squad [%s] cleanup_squad_id [%s] cleanup_all [%s]",
+		tostring(type(hud)),
+		tostring(type(hud and hud.update_squad)),
+		tostring(type(hud and hud.cleanup_squad)),
+		tostring(type(hud and hud.cleanup_squad_id)),
+		tostring(type(hud and hud.cleanup_all))
+	)
+	dump_modules()
+	dump_buckets(board)
+	log(
+		"quest registries task_squads [%s] bounties [%s] hostages [%s] protector [%s]",
+		tostring(table_count(sim_offline_combat and sim_offline_combat.task_squads)),
+		tostring(table_count(axr_task_manager and axr_task_manager.bounties_by_id)),
+		tostring(table_count(axr_task_manager and axr_task_manager.hostages_by_id)),
+		tostring(type(perception and perception.quest_protected_squad))
+	)
+
+	local squads = board and safe_field(board, "squads") or nil
+	local keys = {}
+	for key in pairs(type(squads) == "table" and squads or {}) do
+		keys[#keys + 1] = key
+	end
+	table.sort(keys, function(a, b)
+		return (tonumber(a) or 0) < (tonumber(b) or 0)
+	end)
+
+	local totals = { all = 0, managed = 0, allowed = 0, hud = 0, unresolved = 0 }
+	local reasons = {}
+	for i = 1, math.min(#keys, MAX_SQUADS) do
+		local key = keys[i]
+		local squad = resolve_squad(key, squads[key])
+		if not squad then
+			totals.unresolved = totals.unresolved + 1
+			log("squad key [%s] unresolved [true]", tostring(key))
+		else
+			totals.all = totals.all + 1
+			local squad_id = tonumber(safe_field(squad, "id")) or tonumber(key) or key
+			local section = squad_section(squad)
+			local members_ok, members, member_stories = squad_members(squad)
+			local protected, protected_reason = quest_state(perception, squad)
+			local ok_manage, can_manage = safe_method(squad, "zhopa2_can_manage")
+			local reason = ok_manage and rejection_reason(squad, section, members, protected, protected_reason, cfg, can_manage) or "can_manage_error"
+			reasons[reason] = (reasons[reason] or 0) + 1
+			if can_manage == true then totals.allowed = totals.allowed + 1 end
+			if safe_field(squad, "zhopa2_managed") == true then totals.managed = totals.managed + 1 end
+			if cfg_bool(cfg, "debug_hud_enabled", false)
+				and safe_field(squad, "zhopa2_managed") == true
+				and safe_field(squad, "zhopa2_task") ~= nil
+			then
+				totals.hud = totals.hud + 1
+			end
+			log(
+				"squad [%s:%s] faction [%s] level [%s] smart [%s] online [%s] members_ok [%s] members [%s] member_stories [%s] common [%s] disabled [%s] random_targets [%s] action_condlist [%s] death_condlist [%s] scripted_target [%s] quest [%s:%s] can_manage [%s:%s] gate [%s] managed [%s] task [%s] target [%s] wait [%s] reason [%s] result [%s]",
+				section,
+				tostring(squad_id),
+				tostring(safe_field(squad, "player_id") or "-"),
+				squad_level(squad, perception),
+				tostring(safe_field(squad, "smart_id") or "-"),
+				bool_text(safe_field(squad, "online") == true),
+				bool_text(members_ok),
+				table.concat(members, ","),
+				table.concat(member_stories, ","),
+				bool_text(safe_field(squad, "common") == true),
+				bool_text(safe_field(squad, "disabled") == true),
+				bool_text(safe_field(squad, "random_targets") ~= nil),
+				bool_text(safe_field(squad, "action_condlist") ~= nil),
+				bool_text(safe_field(squad, "death_condlist") ~= nil),
+				tostring(safe_field(squad, "scripted_target") or "-"),
+				bool_text(protected),
+				tostring(protected_reason),
+				bool_text(ok_manage),
+				bool_text(can_manage == true),
+				reason,
+				bool_text(safe_field(squad, "zhopa2_managed") == true),
+				tostring(safe_field(squad, "zhopa2_task") or "-"),
+				tostring(safe_field(squad, "zhopa2_target") or "-"),
+				tostring(safe_field(squad, "zhopa2_runtime_wait_reason") or "-"),
+				tostring(safe_field(squad, "zhopa2_last_reason") or "-"),
+				tostring(safe_field(squad, "zhopa2_last_result") or "-")
+			)
+		end
+	end
+
+	local reason_rows = {}
+	for reason, count in pairs(reasons) do
+		reason_rows[#reason_rows + 1] = tostring(reason) .. ":" .. tostring(count)
+	end
+	table.sort(reason_rows)
+	log(
+		"summary board_keys [%s] dumped [%s] unresolved [%s] allowed [%s] managed [%s] hud_candidates [%s] gates [%s]",
+		tostring(#keys),
+		tostring(totals.all),
+		tostring(totals.unresolved),
+		tostring(totals.allowed),
+		tostring(totals.managed),
+		tostring(totals.hud),
+		table.concat(reason_rows, ",")
+	)
+	if #keys > MAX_SQUADS then
+		log("truncated total [%s] limit [%s]", tostring(#keys), tostring(MAX_SQUADS))
+	end
+	log("end")
+	return true
+end
+
+function M.on_key_press(key)
+	if key == DUMP_KEY then
+		M.dump()
+	end
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_key_press", M.on_key_press)
+	end
+	RegisterScriptCallback("on_key_press", M.on_key_press)
+	log("loaded key [J:%s]", tostring(DUMP_KEY))
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_runtime_hud_diag = M
+return M

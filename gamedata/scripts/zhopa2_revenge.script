@@ -284,6 +284,10 @@ local function responder_manageable_soft(squad)
 	if not (squad and squad.id and squad.disabled ~= true) then
 		return false
 	end
+	local p = perception_mod()
+	if p and type(p.quest_protected_squad) == "function" and p.quest_protected_squad(squad) then
+		return false
+	end
 	if service_squad_soft(squad) then
 		return false
 	end
@@ -758,6 +762,9 @@ function M.assign_revenge(responder, offender_target_id)
 	if not (responder and offender_target_id ~= nil) then
 		return false
 	end
+	if not responder_manageable_soft(responder) then
+		return false
+	end
 	if revenge_disabled_for_night() then
 		return false
 	end
@@ -790,6 +797,12 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 	end
 
 	local offender_squad, offender_target_id = killer_squad_and_target(se_killer)
+	local p = perception_mod()
+	if p and type(p.quest_protected_squad) == "function"
+		and (p.quest_protected_squad(victim_squad) or p.quest_protected_squad(offender_squad))
+	then
+		return false
+	end
 	if offender_squad and (offender_squad.zhopa2_task == TASK_REVENGE or offender_squad.zhopa2_task == TASK_BASE_CAMPING) then
 		return false
 	end

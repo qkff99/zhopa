@@ -1,6 +1,6 @@
 local M = {}
 
-local VERSION = 12
+local VERSION = 13
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"

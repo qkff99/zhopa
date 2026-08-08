@@ -217,6 +217,25 @@ function M.is_monster_squad(squad)
 	return player_id ~= nil and (monster_player_ids[player_id] == true or (is_squad_monster and is_squad_monster[player_id] == true))
 end
 
+function M.mutant_cycle_active(squad)
+	if not M.is_monster_squad(squad) then
+		return true
+	end
+
+	local player_id = M.squad_player_id(squad)
+	if player_id ~= "monster_predatory_day" and player_id ~= "monster_zombied_day"
+		and player_id ~= "monster_predatory_night" and player_id ~= "monster_zombied_night"
+	then
+		return true
+	end
+
+	local hour = tonumber(level and level.get_time_hours and level.get_time_hours() or 12) or 12
+	if player_id == "monster_predatory_day" or player_id == "monster_zombied_day" then
+		return hour >= 6 and hour < 19
+	end
+	return hour < 6 or hour >= 19
+end
+
 local function plain_sim_stalker_squad(squad)
 	if M.is_monster_squad(squad) then
 		return false
@@ -764,6 +783,45 @@ local function squad_member_id_set(squad)
 	return out
 end
 
+function M.quest_protected_squad(squad)
+	if not (squad and squad.id) then
+		return false
+	end
+
+	local combat = rawget(_G, "sim_offline_combat")
+	if combat and type(combat.task_squads) == "table" and combat.task_squads[squad.id] then
+		return true, "task_squad"
+	end
+	return cached_frame_pair("quest_protected|" .. obj_cache_key(squad), function()
+		if get_object_story_id and get_object_story_id(squad.id) then
+			return true, "squad_story"
+		end
+		if squad.death_condlist ~= nil then
+			return true, "death_condlist"
+		end
+
+		local member_ids = squad_member_id_set(squad)
+		local hostages = axr_task_manager and axr_task_manager.hostages_by_id or nil
+		for member_id in pairs(member_ids) do
+			if get_object_story_id and get_object_story_id(member_id) then
+				return true, "member_story"
+			end
+			if hostages and hostages[member_id] then
+				return true, "hostage"
+			end
+		end
+
+		local bounties = axr_task_manager and axr_task_manager.bounties_by_id or nil
+		for _, member_id in pairs(bounties or {}) do
+			local bounty_id = tonumber(member_id) or member_id
+			if member_ids[bounty_id] then
+				return true, "bounty"
+			end
+		end
+		return false
+	end)
+end
+
 local function is_online_offline_group(squad)
 	if not (squad and type(squad.clsid) == "function" and clsid) then
 		return false
@@ -818,6 +876,12 @@ local function hunt_target_profile(target)
 			return profile
 		end
 		if not is_common_sim_squad(target) then
+			return profile
+		end
+		if M.quest_protected_squad(target) then
+			return profile
+		end
+		if M.is_monster_squad(target) and not M.mutant_cycle_active(target) then
 			return profile
 		end
 		if target.disabled or not is_online_offline_group(target) then
@@ -1439,6 +1503,14 @@ function M.valid_hunt_target(squad, target, opts)
 	if not (squad and target and target.id and target.id ~= squad.id) then
 		return false
 	end
+	if M.quest_protected_squad(squad) or M.quest_protected_squad(target) then
+		return false
+	end
+	if (M.is_monster_squad(squad) and not M.mutant_cycle_active(squad))
+		or (M.is_monster_squad(target) and not M.mutant_cycle_active(target))
+	then
+		return false
+	end
 	local profile = hunt_target_profile(target)
 	if not (profile and profile.ok) then
 		return false
@@ -1485,6 +1557,14 @@ end
 
 function M.valid_revenge_target(squad, target, opts)
 	if not (squad and target and target.id and target.id ~= squad.id) then
+		return false
+	end
+	if M.quest_protected_squad(squad) or M.quest_protected_squad(target) then
+		return false
+	end
+	if (M.is_monster_squad(squad) and not M.mutant_cycle_active(squad))
+		or (M.is_monster_squad(target) and not M.mutant_cycle_active(target))
+	then
 		return false
 	end
 	if not (SIMBOARD and SIMBOARD.squads and SIMBOARD.squads[target.id]) then

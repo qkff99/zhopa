@@ -190,9 +190,9 @@ function M._on_game_load()
 		return
 	end
 	state = "disabled"
-	cleanup_complete = false
+	cleanup_complete = true
 	_G.zhopa2_runtime_disabled = true
-	register_first_update()
+	unregister_first_update()
 end
 
 function M._on_option_change()
@@ -231,10 +231,10 @@ function M.on_game_start()
 		return false
 	end
 	state = "disabled"
+	cleanup_complete = true
 	_G.zhopa2_runtime_disabled = true
-	local ok, detail = M.disable("disabled_on_game_start")
-	register_first_update()
-	return ok, detail
+	unregister_first_update()
+	return true
 end
 
 function on_game_start()

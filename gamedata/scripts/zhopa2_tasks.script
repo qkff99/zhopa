@@ -156,11 +156,6 @@ local function revenge_expired_by_night()
 	return is_night_now()
 end
 
-local function current_hour()
-	local hour = level and level.get_time_hours and level.get_time_hours() or 12
-	return tonumber(hour) or 12
-end
-
 local function surge_active_uncached()
 	local type_ = type
 	local xc = rawget(_G, "xr_conditions")
@@ -215,16 +210,6 @@ function M.surge_active(force_refresh)
 	surge_cache_active = surge_active_uncached() == true
 	surge_cache_next = now + SURGE_CHECK_CACHE_MS
 	return surge_cache_active
-end
-
-local function mutant_time_active(start_hour, end_hour)
-	local hour = current_hour()
-	local start_value = tonumber(start_hour) or 0
-	local end_value = tonumber(end_hour) or 0
-	if start_value >= end_value then
-		return hour < end_value or hour >= start_value
-	end
-	return hour >= start_value and hour < end_value
 end
 
 local function squad_section_name(squad)
@@ -494,6 +479,14 @@ local function is_monster_squad(squad)
 		or player_id == "zombied"
 		or (is_squad_monster and is_squad_monster[player_id] == true)
 	)
+end
+
+local function mutant_cycle_active(squad)
+	if not is_monster_squad(squad) then
+		return true
+	end
+	local p = perception()
+	return not (p and type(p.mutant_cycle_active) == "function" and p.mutant_cycle_active(squad) ~= true)
 end
 
 local task_registry = {
@@ -1411,19 +1404,6 @@ local function repair_invalid_mutant_task(squad)
 	return true
 end
 
-local function mutant_time_inactive(squad)
-	if not is_monster_squad(squad) then
-		return false
-	end
-	local player_id = mutant_behavior_id(squad)
-	if player_id == "monster_predatory_day" or player_id == "monster_zombied_day" then
-		return not mutant_time_active(6, 19)
-	elseif player_id == "monster_predatory_night" or player_id == "monster_zombied_night" then
-		return not mutant_time_active(19, 6)
-	end
-	return false
-end
-
 local function clear_zhopa2_movement_target(squad, clear_any)
 	local tostr = tostring
 	if not (squad and squad.zhopa2_task) then
@@ -1479,33 +1459,16 @@ local function pause_for_surge(squad)
 	return true
 end
 
-local function park_inactive_mutant(squad)
-	if not mutant_time_inactive(squad) then
-		return false
-	end
-	if squad.zhopa2_task and type(squad.zhopa2_clear_task) == "function" then
-		squad:zhopa2_clear_task("mutant_time_inactive")
-	elseif squad.zhopa2_task then
-		squad.zhopa2_task = nil
-		squad.zhopa2_target = nil
-		squad.zhopa2_started = nil
-		squad.zhopa2_until = nil
-		squad.zhopa2_patrol = nil
-		squad.zhopa2_patrol_idx = nil
-		squad.scripted_target = nil
-	end
-	squad.assigned_target_id = squad.id
-	squad.current_target_id = squad.id
-	squad.current_action = 0
-	squad.zhopa2_last_reason = "mutant_time_inactive"
-	squad.zhopa2_last_result = "mutant_time_inactive"
-	update_debug(squad)
-	return true
-end
-
 function M.interrupt_task(squad, task, target_id, duration_sec, reason, patrol, opts)
 	opts = opts or {}
 	if not (squad and task and target_id ~= nil and type(squad.zhopa2_assign_task) == "function") then
+		return false
+	end
+	local p = perception()
+	if p and type(p.quest_protected_squad) == "function" and p.quest_protected_squad(squad) then
+		return false
+	end
+	if type(squad.zhopa2_can_manage) == "function" and squad:zhopa2_can_manage() ~= true then
 		return false
 	end
 	if M.surge_active() then
@@ -1539,7 +1502,9 @@ function M.interrupt_task(squad, task, target_id, duration_sec, reason, patrol, 
 		squad:zhopa2_clear_task(clear_reason)
 	end
 
-	squad:zhopa2_assign_task(task, target_id, duration_sec or 0, reason or task, patrol)
+	if squad:zhopa2_assign_task(task, target_id, duration_sec or 0, reason or task, patrol) ~= true then
+		return false
+	end
 	if opts.result then
 		squad.zhopa2_last_result = opts.result
 	end
@@ -2156,6 +2121,14 @@ function M.hunt_offline_tick(squad, target, opts)
 		return false
 	end
 	local p = perception()
+	if p and type(p.quest_protected_squad) == "function"
+		and (p.quest_protected_squad(squad) or p.quest_protected_squad(target))
+	then
+		return false
+	end
+	if not mutant_cycle_active(squad) or not mutant_cycle_active(target) then
+		return false
+	end
 	if p and type(p.obj_same_level) == "function" and not p.obj_same_level(squad, target) then
 		return false
 	end
@@ -2207,13 +2180,23 @@ function M.hunt_target_valid(squad)
 		target_valid_cache_clear(squad)
 		return false, "hunt_target_defeated"
 	end
+	local p = perception()
+	if p and type(p.quest_protected_squad) == "function"
+		and (p.quest_protected_squad(squad) or p.quest_protected_squad(target))
+	then
+		target_valid_cache_clear(squad)
+		return false, "hunt_target_quest_protected"
+	end
+	if not mutant_cycle_active(squad) or not mutant_cycle_active(target) then
+		target_valid_cache_clear(squad)
+		return false, "hunt_target_cycle_inactive"
+	end
 
 	local cache_key = target_valid_cache_key(squad, M.TASK_HUNT, target)
 	if target_valid_cache_hit(squad, cache_key) then
 		return true, nil
 	end
 
-	local p = perception()
 	if p and type(p.hunt_script_target) == "function" then
 		local script_target, route_reason = p.hunt_script_target(squad, target, { prey = hunt_prey_for(squad), allow_cross_level = true })
 		if not script_target then
@@ -2262,13 +2245,23 @@ function M.revenge_target_valid(squad)
 		target_valid_cache_clear(squad)
 		return false, "revenge_target_defeated"
 	end
+	local p = perception()
+	if p and type(p.quest_protected_squad) == "function"
+		and (p.quest_protected_squad(squad) or p.quest_protected_squad(target))
+	then
+		target_valid_cache_clear(squad)
+		return false, "revenge_target_quest_protected"
+	end
+	if not mutant_cycle_active(squad) or not mutant_cycle_active(target) then
+		target_valid_cache_clear(squad)
+		return false, "revenge_target_cycle_inactive"
+	end
 
 	local cache_key = target_valid_cache_key(squad, M.TASK_REVENGE, target)
 	if target_valid_cache_hit(squad, cache_key) then
 		return true, nil
 	end
 
-	local p = perception()
 	if p and type(p.revenge_script_target) == "function" then
 		local script_target, route_reason = p.revenge_script_target(squad, target, { allow_cross_level = true })
 		if not script_target then
@@ -2383,6 +2376,9 @@ function M.assign_next_task(squad, reason)
 	if not squad then
 		return
 	end
+	if type(squad.zhopa2_can_manage) == "function" and squad:zhopa2_can_manage() ~= true then
+		return
+	end
 	if not assignment_budget_open(squad) then
 		return
 	end
@@ -2409,9 +2405,13 @@ function M.update_squad(squad, memory)
 	end
 	local mem = memory or memory_mod()
 
-	if type_(squad.zhopa2_can_manage) == "function" and not squad:zhopa2_can_manage() then
+	local manageable, unmanaged_reason = true, nil
+	if type_(squad.zhopa2_can_manage) == "function" then
+		manageable, unmanaged_reason = squad:zhopa2_can_manage()
+	end
+	if manageable ~= true then
 		if squad.zhopa2_task and type_(squad.zhopa2_clear_task) == "function" then
-			squad:zhopa2_clear_task("unmanaged")
+			squad:zhopa2_clear_task(unmanaged_reason or "unmanaged")
 		end
 		return false
 	end
@@ -2421,10 +2421,6 @@ function M.update_squad(squad, memory)
 	end
 
 	recover_prepared_trade_if_any(squad, "task_update")
-
-	if park_inactive_mutant(squad) then
-		return false
-	end
 
 	if repair_invalid_mutant_task(squad) then
 		return true

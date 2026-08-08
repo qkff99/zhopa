@@ -133,6 +133,15 @@ local function tasks_mod()
 	return tasks
 end
 
+function M.quest_protected_squad(squad)
+	local p = rawget(_G, "zhopa2_perception")
+	if not p and require then
+		pcall(require, "zhopa2_perception")
+		p = rawget(_G, "zhopa2_perception")
+	end
+	return p and type(p.quest_protected_squad) == "function" and p.quest_protected_squad(squad) == true
+end
+
 local function surge_active()
 	local tasks = tasks_mod()
 	return tasks and type(tasks.surge_active) == "function" and tasks.surge_active() == true
@@ -625,7 +634,21 @@ local function is_monster_squad(squad)
 	return player_id ~= nil and (monster_player_ids[player_id] == true or (is_squad_monster and is_squad_monster[player_id] == true))
 end
 
+local function mutant_cycle_active(squad)
+	local p = rawget(_G, "zhopa2_perception")
+	if p and type(p.mutant_cycle_active) == "function" then
+		return p.mutant_cycle_active(squad) == true
+	end
+	return true
+end
+
 local function squad_zhopa2_manageable(squad)
+	if M.quest_protected_squad(squad) then
+		return false
+	end
+	if is_monster_squad(squad) and not mutant_cycle_active(squad) then
+		return false
+	end
 	if squad and squad.id and rawget(_G, "clash_manager_mcm") and clash_manager_mcm.active_sa and clash_manager_mcm.active_sb then	--CRAP Compat
 		if (squad.id == clash_manager_mcm.active_sa or squad.id == clash_manager_mcm.active_sb) then
 			return false
@@ -660,6 +683,12 @@ local function squad_zhopa2_manageable(squad)
 end
 
 local function squad_zhopa2_manageable_soft(squad)
+	if M.quest_protected_squad(squad) then
+		return false
+	end
+	if is_monster_squad(squad) and not mutant_cycle_active(squad) then
+		return false
+	end
 	if not (squad and squad.id and squad.disabled ~= true and squad_cached_npc_count(squad) > 0) then
 		return false
 	end

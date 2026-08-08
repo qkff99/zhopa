@@ -1116,7 +1116,9 @@ function M.on_master_disable()
 	local remove = {}
 	local squads = SIMBOARD and SIMBOARD.squads
 	if type(squads) == "table" then
-		for _, squad in pairs(squads) do
+		for id, stored in pairs(squads) do
+			local kind = type(stored)
+			local squad = (kind == "table" or kind == "userdata") and stored or safe_squad_by_id(id)
 			if zhop_service_squad(squad) then
 				remove[#remove + 1] = squad
 			end
