@@ -33,6 +33,7 @@ local now_ms
 local trade_debug_throttle = {}
 local cfg_require_attempted = false
 local actor_revenge_relation_scopes = {}
+M.task_update_budget = {}
 
 local function cfg()
 	local c = rawget(_G, "zhopa2_cfg")
@@ -624,6 +625,49 @@ function update_debug(squad)
 	if dbg and type(dbg.update_squad) == "function" then
 		dbg.update_squad(squad)
 	end
+end
+
+function M.should_skip_task_update(squad)
+	if not squad then
+		return false
+	end
+
+	local task = squad.zhopa2_task
+	if task == M.TASK_HUNT
+		or task == M.TASK_REVENGE
+		or task == M.TASK_ARTEFACT
+		or task == M.TASK_TRADE
+		or task == M.TASK_FORCE_EXIT
+		or task == M.TASK_STORY_NORTH_MIGRATION
+	then
+		return false
+	end
+
+	local squad_id = tonumber(squad.id)
+	if not squad_id then
+		return false
+	end
+
+	local now = now_ms()
+	local target_key = tostring(squad.zhopa2_target or "")
+	local smart_key = tostring(squad.smart_id or "")
+	local entry = M.task_update_budget[squad_id]
+	if entry
+		and entry.task == task
+		and entry.target_key == target_key
+		and entry.smart_key == smart_key
+		and now < (tonumber(entry.due) or 0)
+	then
+		return true
+	end
+
+	entry = entry or {}
+	entry.task = task
+	entry.target_key = target_key
+	entry.smart_key = smart_key
+	entry.due = now + 250
+	M.task_update_budget[squad_id] = entry
+	return false
 end
 
 local function assign_rest(squad, reason)
@@ -2410,6 +2454,10 @@ function M.update_squad(squad, memory)
 		manageable, unmanaged_reason = squad:zhopa2_can_manage()
 	end
 	if manageable ~= true then
+		local squad_id = tonum(squad.id)
+		if squad_id then
+			M.task_update_budget[squad_id] = nil
+		end
 		if squad.zhopa2_task and type_(squad.zhopa2_clear_task) == "function" then
 			squad:zhopa2_clear_task(unmanaged_reason or "unmanaged")
 		end
@@ -2424,6 +2472,10 @@ function M.update_squad(squad, memory)
 
 	if repair_invalid_mutant_task(squad) then
 		return true
+	end
+
+	if M.should_skip_task_update(squad) then
+		return squad.zhopa2_task ~= nil
 	end
 
 	local force_target = force_exit_target(squad)
@@ -2461,10 +2513,6 @@ function M.update_squad(squad, memory)
 	if north and type_(north.update_squad_tasks) == "function" and north.update_squad_tasks(squad, { prevalidated = true }) == true then
 		update_debug(squad)
 		return true
-	end
-
-	if type_(squad.zhopa2_should_skip_budget) == "function" and squad:zhopa2_should_skip_budget() then
-		return squad.zhopa2_task ~= nil
 	end
 
 	if night_rest_target_unsafe(squad) then
@@ -2732,6 +2780,7 @@ function M.on_master_disable()
 	end
 	actor_revenge_relation_scopes = {}
 	trade_debug_throttle = {}
+	M.task_update_budget = {}
 	surge_cache_active = false
 	surge_cache_next = 0
 	last_assignment_tick = nil

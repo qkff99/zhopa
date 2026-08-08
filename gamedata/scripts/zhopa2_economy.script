@@ -10,7 +10,7 @@ local C = {
 	TRADE_PATH_VERTEX_SEARCH_MAX_DIST = 90,
 	TRADE_POST_RELEASE_WATCH_MS = 20000,
 	TRADE_POST_RELEASE_WATCH_INTERVAL_MS = 2000,
-	OFFLINE_TRADE_PROFILE_CACHE_TTL_MS = 2000,
+	OFFLINE_TRADE_PROFILE_CACHE_TTL_MS = 5000,
 	MED_BANDAGE_KEEP = 3,
 	MEDKIT_KEEP = 3,
 	OTHER_MED_KEEP = 1,
@@ -1852,11 +1852,13 @@ end
 
 local function offline_build_sell_plan(members)
 	local plan = {}
+	local snapshots = {}
 	for i = 1, members and #members or 0 do
 		local member = members[i]
 		local children = offline_member_children(member)
 		local gear = offline_best_gear(member, children)
 		local needed_ammo = offline_needed_ammo_for_gear(gear)
+		local counts = {}
 		local bandages = {}
 		local medkits = {}
 		local other_meds_by_section = {}
@@ -1878,6 +1880,9 @@ local function offline_build_sell_plan(members)
 			local item = children[n]
 			local item_id = object_id(item)
 			local section = object_section(item)
+			if section then
+				counts[section] = (counts[section] or 0) + 1
+			end
 			if item_id and section and not section_is_never_sell(section, item) and not gear.keep_ids[item_id] then
 				if section_is_ammo(section) then
 					if not section_is_needed_ammo(section, needed_ammo) then
@@ -1921,8 +1926,9 @@ local function offline_build_sell_plan(members)
 		for n = before + 1, #plan do
 			plan[n].member = member
 		end
+		snapshots[i] = { children = children, counts = counts, gear = gear }
 	end
-	return plan
+	return plan, snapshots
 end
 
 local function offline_sell_plan_should_start(plan)
@@ -1941,19 +1947,22 @@ local function offline_sell_plan_should_start(plan)
 	return minor_value >= C.AUTO_TRADE_MIN_MINOR_SELL_VALUE
 end
 
-local function offline_build_buy_needs(members)
+local function offline_build_buy_needs(members, snapshots)
 	local needs = {}
 	for i = 1, members and #members or 0 do
 		local member = members[i]
-		local children = offline_member_children(member)
-		local counts = {}
-		for n = 1, #children do
-			local section = object_section(children[n])
-			if section then
-				counts[section] = (counts[section] or 0) + 1
+		local snapshot = snapshots and snapshots[i] or nil
+		local children = snapshot and snapshot.children or offline_member_children(member)
+		local counts = snapshot and snapshot.counts or {}
+		if not snapshot then
+			for n = 1, #children do
+				local section = object_section(children[n])
+				if section then
+					counts[section] = (counts[section] or 0) + 1
+				end
 			end
 		end
-		local gear = offline_best_gear(member, children)
+		local gear = snapshot and snapshot.gear or offline_best_gear(member, children)
 		local needed_ammo = offline_needed_ammo_for_gear(gear)
 		local function add_need(section, target)
 			target = tonumber(target) or 0
@@ -2012,7 +2021,7 @@ end
 
 function trade_path.offline_trade_profile_needs(profile)
 	if profile and not profile.needs then
-		profile.needs = offline_build_buy_needs(profile.members)
+		profile.needs = offline_build_buy_needs(profile.members, profile.snapshots)
 	end
 	return profile and profile.needs or {}
 end
@@ -2021,10 +2030,18 @@ function trade_path.offline_trade_profile_for_squad(squad, opts)
 	opts = opts or {}
 	local squad_id = object_id(squad)
 	local now = tg()
+	local cached_virtual_money = virtual_money(squad)
+	local cached_virtual_count = virtual_loot_count(squad)
+	local cached_virtual_value = virtual_loot_raw_value(squad)
 	trade_path.cleanup_offline_trade_profile_cache(now)
 	if not opts.force and squad_id then
 		local cached = trade_path.offline_profile_cache[squad_id]
-		if cached and (tonumber(cached.expires) or 0) > now then
+		if cached
+			and (tonumber(cached.expires) or 0) > now
+			and cached.virtual_money == cached_virtual_money
+			and cached.virtual_count == cached_virtual_count
+			and cached.virtual_value == cached_virtual_value
+		then
 			local profile = cached.profile
 			if opts.want_value == true and profile then
 				if profile.reason == "offline_sell" and (tonumber(profile.value) or 0) <= 0 then
@@ -2043,6 +2060,7 @@ function trade_path.offline_trade_profile_for_squad(squad, opts)
 		plan = nil,
 		wallet = nil,
 		needs = nil,
+		snapshots = nil,
 		has_work = false,
 		reason = "offline_nothing_to_trade",
 		value = 0,
@@ -2054,7 +2072,7 @@ function trade_path.offline_trade_profile_for_squad(squad, opts)
 		profile.reason = "offline_virtual_sell"
 		profile.value = virtual_loot_sell_price(squad)
 	else
-		profile.plan = offline_build_sell_plan(profile.members)
+		profile.plan, profile.snapshots = offline_build_sell_plan(profile.members)
 		if offline_sell_plan_should_start(profile.plan) then
 			profile.has_work = true
 			profile.reason = "offline_sell"
@@ -2066,7 +2084,7 @@ function trade_path.offline_trade_profile_for_squad(squad, opts)
 			if profile.wallet.total <= 0 then
 				profile.reason = "no_trade_budget"
 			else
-				profile.needs = offline_build_buy_needs(profile.members)
+				profile.needs = offline_build_buy_needs(profile.members, profile.snapshots)
 				for i = 1, #profile.needs do
 					local price = offline_buy_section_price(profile.needs[i].section)
 					if price > 0 and profile.wallet.total >= price then
@@ -2083,6 +2101,9 @@ function trade_path.offline_trade_profile_for_squad(squad, opts)
 	if squad_id then
 		trade_path.offline_profile_cache[squad_id] = {
 			expires = now + C.OFFLINE_TRADE_PROFILE_CACHE_TTL_MS,
+			virtual_money = cached_virtual_money,
+			virtual_count = cached_virtual_count,
+			virtual_value = cached_virtual_value,
 			profile = profile,
 		}
 	end
@@ -2201,7 +2222,10 @@ function M.offline_squad_has_trade_work(squad, smart)
 	if profile.reason == "offline_buy" or profile.reason == "offline_nothing_to_trade" then
 		trade_path.offline_trade_profile_needs(profile)
 	end
-	set_offline_trade_detail(squad, profile.reason, profile.members, profile.plan, profile.wallet, profile.needs)
+	if profile.detail_written ~= true then
+		set_offline_trade_detail(squad, profile.reason, profile.members, profile.plan, profile.wallet, profile.needs)
+		profile.detail_written = true
+	end
 	return profile.has_work == true, profile.reason
 end
 

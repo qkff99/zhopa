@@ -2145,25 +2145,37 @@ function board_methods.zhopa2_register_trade_smart(self, smart)
 	if not (smart and smart.id) then
 		return false
 	end
+	self.zhopa2_trade_smart_flags = self.zhopa2_trade_smart_flags or {}
+	self.zhopa2_trade_smart_level = self.zhopa2_trade_smart_level or {}
+	self.zhopa2_trade_smarts_by_level = self.zhopa2_trade_smarts_by_level or {}
+	if M.trade_smart_blacklisted(smart) then
+		if type(self.zhopa2_unregister_trade_smart) == "function" then
+			self:zhopa2_unregister_trade_smart(smart)
+		end
+		return false
+	end
+	local loaded_jobs = type(smart.stalker_jobs) == "table" and #smart.stalker_jobs > 0
+	local previous = self.zhopa2_trade_smart_flags[smart.id]
+	if previous and (previous.loaded_jobs == true or loaded_jobs ~= true) then
+		return previous.trade_route == true
+	end
 	if type(self.zhopa2_unregister_trade_smart) == "function" then
 		self:zhopa2_unregister_trade_smart(smart)
-	end
-	if M.trade_smart_blacklisted(smart) then
-		return false
 	end
 	local level_name = obj_level(smart)
 	if not level_name then
 		return false
 	end
-	local flags = { provider = false, customer = false }
-	scan_loaded_trade_jobs(smart, flags)
-	scan_smart_ini_trade_jobs(smart, flags)
+	local flags = { provider = false, customer = false, loaded_jobs = loaded_jobs }
+	if loaded_jobs then
+		scan_loaded_trade_jobs(smart, flags)
+	else
+		scan_smart_ini_trade_jobs(smart, flags)
+	end
 	scan_beh_trade_jobs(smart, flags)
 	flags.trade_route = flags.provider == true and flags.customer == true
-	if flags.provider == true or flags.customer == true then
-		self.zhopa2_trade_smart_level[smart.id] = level_name
-		self.zhopa2_trade_smart_flags[smart.id] = flags
-	end
+	self.zhopa2_trade_smart_level[smart.id] = level_name
+	self.zhopa2_trade_smart_flags[smart.id] = flags
 	if flags.trade_route == true then
 		local bucket = level_bucket(self.zhopa2_trade_smarts_by_level, level_name)
 		if bucket then
