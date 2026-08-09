@@ -13,6 +13,7 @@ local RUNTIME_READY_RECHECK_MS = 500
 local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_index",
 	"zhopa2_topology",
+	"zhopa2_task_scoring",
 	"zhopa2_loot",
 	"zhopa2_economy",
 	"zhopa2_smart_service_slot_doctor",
@@ -59,6 +60,17 @@ local function safe_require(name)
 		pcall(require, name)
 	end
 	return rawget(_G, name)
+end
+
+function M.task_scoring()
+	return safe_require("zhopa2_task_scoring")
+end
+
+function M.notify_task_scoring(event, ...)
+	local scoring = M.task_scoring()
+	if scoring and type(scoring[event]) == "function" then
+		pcall(scoring[event], ...)
+	end
 end
 
 function M.master_enabled()
@@ -975,6 +987,7 @@ function squad_methods.zhopa2_reset_state(self)
 	self.zhopa2_managed = false
 	self.zhopa2_hunt_prepared_target = nil
 	self.zhopa2_hunt_prepared_target_signature = nil
+	self.zhopa2_hunt_prey = nil
 end
 
 function squad_methods.zhopa2_task_requires_rush(self)
@@ -1024,6 +1037,7 @@ function squad_methods.zhopa2_clear_task(self, reason)
 	self.zhopa2_managed = false
 	self.zhopa2_hunt_prepared_target = nil
 	self.zhopa2_hunt_prepared_target_signature = nil
+	self.zhopa2_hunt_prey = nil
 	self.zhopa2_artifact_id = nil
 	self.zhopa2_artifact_smart = nil
 	self.zhopa2_artifact_zone = nil
@@ -1214,6 +1228,7 @@ function squad_methods.zhopa2_assign_task(self, task, target_id, duration_sec, r
 	self.zhopa2_managed = true
 	self.zhopa2_hunt_prepared_target = nil
 	self.zhopa2_hunt_prepared_target_signature = nil
+	self.zhopa2_hunt_prey = nil
 	self.zhopa2_rest_trade_state = nil
 	self.zhopa2_rest_trade_reason = nil
 	self.zhopa2_rest_trade_result = nil
@@ -2136,6 +2151,7 @@ function board_methods.zhopa2_ensure_buckets(self)
 	self.zhopa2_trade_smarts_by_level = self.zhopa2_trade_smarts_by_level or {}
 	self.zhopa2_trade_smart_level = self.zhopa2_trade_smart_level or {}
 	self.zhopa2_trade_smart_flags = self.zhopa2_trade_smart_flags or {}
+	self.zhopa2_bucket_revision = tonumber(self.zhopa2_bucket_revision) or 0
 	if should_rebuild and type(self.zhopa2_rebuild_buckets) == "function" then
 		self:zhopa2_rebuild_buckets()
 	end
@@ -2146,6 +2162,7 @@ function board_methods.zhopa2_register_trade_smart(self, smart)
 		return false
 	end
 	self.zhopa2_trade_smart_flags = self.zhopa2_trade_smart_flags or {}
+	self.zhopa2_bucket_revision = tonumber(self.zhopa2_bucket_revision) or 0
 	self.zhopa2_trade_smart_level = self.zhopa2_trade_smart_level or {}
 	self.zhopa2_trade_smarts_by_level = self.zhopa2_trade_smarts_by_level or {}
 	if M.trade_smart_blacklisted(smart) then
@@ -2224,6 +2241,8 @@ function board_methods.zhopa2_register_smart(self, obj)
 		end
 	end
 	self:zhopa2_register_trade_smart(obj)
+	self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+	M.notify_task_scoring("on_smart_registered", self, obj)
 end
 
 function board_methods.zhopa2_unregister_smart(self, obj)
@@ -2242,6 +2261,8 @@ function board_methods.zhopa2_unregister_smart(self, obj)
 		end
 	end
 	self.zhopa2_smart_level[obj.id] = nil
+	self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+	M.notify_task_scoring("on_smart_unregistered", self, obj)
 end
 
 function board_methods.zhopa2_update_squad_level(self, squad, level_name)
@@ -2256,6 +2277,8 @@ function board_methods.zhopa2_update_squad_level(self, squad, level_name)
 			self.zhopa2_squads_by_level[old_level][squad.id] = nil
 		end
 		self.zhopa2_squad_level[squad.id] = nil
+		self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+		M.notify_task_scoring("on_squad_unregistered", squad, old_level)
 		if type(squad.zhopa2_purge_global_level_blacklist) == "function" then
 			squad:zhopa2_purge_global_level_blacklist("global_level_blacklisted")
 		end
@@ -2280,6 +2303,8 @@ function board_methods.zhopa2_update_squad_level(self, squad, level_name)
 			bucket[squad.id] = squad
 		end
 	end
+	self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+	M.notify_task_scoring("on_squad_level_changed", squad, old_level, level_name)
 end
 
 function board_methods.zhopa2_unregister_squad(self, squad)
@@ -2292,6 +2317,8 @@ function board_methods.zhopa2_unregister_squad(self, squad)
 		self.zhopa2_squads_by_level[old_level][squad.id] = nil
 	end
 	self.zhopa2_squad_level[squad.id] = nil
+	self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+	M.notify_task_scoring("on_squad_unregistered", squad, old_level)
 end
 
 function board_methods.zhopa2_rebuild_buckets(self)
@@ -2320,6 +2347,8 @@ function board_methods.zhopa2_rebuild_buckets(self)
 			end
 		end
 	end
+	self.zhopa2_bucket_revision = (tonumber(self.zhopa2_bucket_revision) or 0) + 1
+	M.notify_task_scoring("on_buckets_rebuilt", self)
 end
 
 local function install_board_methods(cls)
@@ -2345,6 +2374,7 @@ function M.patch_sim_board()
 			self.zhopa2_trade_smarts_by_level = {}
 			self.zhopa2_trade_smart_level = {}
 			self.zhopa2_trade_smart_flags = {}
+			self.zhopa2_bucket_revision = 0
 			self.zhopa2_buckets_ready = true
 			return unpack(result)
 		end
@@ -5670,6 +5700,7 @@ end
 M.SQUAD_RUNTIME_FIELDS = {
 	"zhopa2_task", "zhopa2_target", "zhopa2_started", "zhopa2_until", "zhopa2_patrol", "zhopa2_patrol_idx",
 	"zhopa2_last_reason", "zhopa2_last_result", "zhopa2_managed", "zhopa2_resume_task", "zhopa2_resume_target",
+	"zhopa2_hunt_prey",
 	"zhopa2_cached_npc_count",
 	"zhopa2_resume_until", "zhopa2_resume_patrol", "zhopa2_resume_patrol_idx", "zhopa2_resume_reason",
 	"zhopa2_recent_smarts", "zhopa2_recent_targets", "zhopa2_loot_count", "zhopa2_loot_value",
@@ -5786,6 +5817,7 @@ function M.purge_runtime_state()
 		SIMBOARD.zhopa2_trade_smarts_by_level = nil
 		SIMBOARD.zhopa2_trade_smart_level = nil
 		SIMBOARD.zhopa2_trade_smart_flags = nil
+		SIMBOARD.zhopa2_bucket_revision = nil
 		local smarts = SIMBOARD.smarts
 		if type(smarts) == "table" then
 			local fields = {

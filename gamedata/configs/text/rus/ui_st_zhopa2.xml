@@ -9,6 +9,7 @@
 	<string id="ui_mcm_zhopa2_group_systems"><text>Экономика и вспомогательные системы</text></string>
 	<string id="ui_mcm_zhopa2_group_story"><text>Сюжетные события</text></string>
 	<string id="ui_mcm_zhopa2_group_roam"><text>Доступные задачи сталкеров</text></string>
+	<string id="ui_mcm_zhopa2_group_balance"><text>Баланс выбора задач</text></string>
 	<string id="ui_mcm_zhopa2_group_weights"><text>Веса выбора задач</text></string>
 	<string id="ui_mcm_zhopa2_group_timing"><text>Длительность задач</text></string>
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Бой и сопровождение целей</text></string>
@@ -56,6 +57,17 @@
 	<string id="ui_mcm_zhopa2_tasks_stalker_hunt_enabled_desc"><text>Позволяет отрядам сталкеров активно преследовать враждебные отряды или прямые цели охоты, а не только перемещаться между смартами.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_artefact_enabled"><text>Разрешить поиск артефактов</text></string>
 	<string id="ui_mcm_zhopa2_tasks_artefact_enabled_desc"><text>Позволяет отрядам сталкеров идти к аномальным смартам и подбирать артефакты через онлайн- или оффлайн-контур артефактной логики.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_enabled"><text>Учитывать силу отряда при выборе цели</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_enabled_desc"><text>Предпочитает направления, опасность которых соответствует опыту отряда. Новички чаще выбирают безопасные районы, а ветераны охотнее идут на север.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_mode"><text>Режим баланса прямых целей</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_mode_desc"><text>Определяет, как охота и месть реагируют на слишком опасную прямую цель. Мягкий режим принимает все валидные цели, Сбалансированный иногда избегает тяжелых целей, а Строгий всегда их отклоняет.</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_soft"><text>Мягкий</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_balanced"><text>Сбалансированный</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_strict"><text>Строгий</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_presence_balance_enabled"><text>Учитывать присутствие фракций</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_presence_balance_enabled_desc"><text>При выборе обычных задач повышает привлекательность районов с союзной поддержкой и снижает ее там, где преобладают враждебные отряды.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_lore_preferences_enabled"><text>Использовать предпочтения фракций</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_lore_preferences_enabled_desc"><text>Дает фракциям характерные приоритеты: Долг чаще охотится на мутантов, ученые ищут артефакты, а ИГ исследует северные районы.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_explore_weight"><text>Вес: разведка</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_explore_weight_desc"><text>Относительный шанс, что отряд сталкеров выберет разведку, когда доступно несколько типов задач. Значение 0 убирает задачу из взвешенного выбора.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_populate_weight"><text>Вес: заселение смартов</text></string>

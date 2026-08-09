@@ -431,6 +431,14 @@ local function consider_candidate(victim_squad, offender_squad, candidate, best,
 	if not responder_ok(candidate, victim_squad, offender_squad) then
 		return best, best_dist
 	end
+	if offender_squad then
+		local tasks = tasks_mod()
+		if tasks and type(tasks.direct_target_allowed) == "function"
+			and tasks.direct_target_allowed(candidate, TASK_REVENGE, offender_squad) ~= true
+		then
+			return best, best_dist
+		end
+	end
 	local dist = squad_distance(victim_squad, candidate)
 	if not best_dist or dist < best_dist then
 		return candidate, dist
@@ -458,7 +466,7 @@ end
 local function find_responder(victim_squad, offender_squad)
 	local levels = level_pool(victim_squad)
 	local best = scan_vanilla_squads(levels, victim_squad, offender_squad)
-	return best
+	return best, offender_squad ~= nil
 end
 
 local function actor_revenge_roll_passed()
@@ -755,7 +763,8 @@ local function actor_on_update()
 	return M.apply_online_revenge_hostility()
 end
 
-function M.assign_revenge(responder, offender_target_id)
+function M.assign_revenge(responder, offender_target_id, opts)
+	opts = opts or {}
 	if not runtime_ready("revenge_assign") then
 		return false, "runtime_not_ready"
 	end
@@ -772,7 +781,9 @@ function M.assign_revenge(responder, offender_target_id)
 		return false
 	end
 	local tasks = tasks_mod()
-	local ok = tasks and type(tasks.assign_revenge_interrupt) == "function" and tasks.assign_revenge_interrupt(responder, offender_target_id) or false
+	local ok = tasks and type(tasks.assign_revenge_interrupt) == "function" and tasks.assign_revenge_interrupt(responder, offender_target_id, {
+		direct_target = opts.direct_target_checked ~= true,
+	}) or false
 	if ok and tonumber(offender_target_id) == ACTOR_TARGET_ID then
 		active_actor_revenge_squad_id = responder.id
 	end
@@ -828,11 +839,13 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 			return false
 		end
 	end
-	local responder = find_responder(victim_squad, offender_squad)
+	local responder, direct_target_checked = find_responder(victim_squad, offender_squad)
 	if not responder then
 		return false
 	end
-	local assigned = M.assign_revenge(responder, offender_target_id)
+	local assigned = M.assign_revenge(responder, offender_target_id, {
+		direct_target_checked = direct_target_checked,
+	})
 	if assigned then
 		mark_death_processed(victim_squad, offender_target_id)
 	end

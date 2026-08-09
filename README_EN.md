@@ -13,6 +13,7 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Subsystem | Behavior |
 | --- | --- |
 | Squad tasks | Stalkers explore the Zone, populate smart terrains, patrol, rest, hunt, take revenge, collect artefacts, and travel to trade. Mutants use a separate task pool. |
+| Task balance | Valid task-target pairs are weighted by squad strength, local faction pressure, and optional faction preferences. Story and safety tasks remain outside this random selection. |
 | Hunt and revenge | Targets are tracked by their actual squad position, including level transitions. Actor revenge makes only the assigned squad hostile, not its entire faction. |
 | Loot | Online logic extends vanilla pickup and prevents loops on rejected items. Offline loot is bounded virtual cargo and consumes no engine object IDs. |
 | Economy | The leader trades for the whole squad, sells real and virtual goods, pools member money, and buys basic supplies. |
@@ -70,9 +71,11 @@ Main MCM sections:
 - economy and helper systems;
 - story events;
 - stalker and mutant simulation;
-- task weights and durations;
+- task weights, balance, and durations;
 - combat, routing, and target following;
 - debugging.
+
+Task balance is enabled by default. Its numeric tuning, level overrides, squad strength overrides, and faction profiles are kept in `gamedata/configs/zhopa2_population_profiles.ltx`; MCM exposes only the three gameplay switches and the Soft / Balanced / Strict direct-target policy.
 
 ## Compatibility
 

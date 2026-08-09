@@ -1,11 +1,11 @@
 local M = {}
 
-local VERSION = 13
+local VERSION = 14
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"
 local BASE_FIELD_COUNT = 8
-local FIELD_COUNT = 42
+local FIELD_COUNT = 43
 local RECENT_LIMIT = 8
 local MAX_ARTIFACT_CARGO_HISTORY = 16
 local VIRTUAL_LOOT_SECTION_LIMIT = 64
@@ -80,6 +80,7 @@ function M.reset_squad(squad)
 	squad.zhopa2_revenge_actor_personal_goodwill = nil
 	squad.zhopa2_revenge_actor_revenge_goodwill = nil
 	squad.zhopa2_revenge_actor_member_ids = nil
+	squad.zhopa2_hunt_prey = nil
 	squad.zhopa2_state_version = VERSION
 end
 
@@ -480,6 +481,7 @@ function M.write_squad(packet, squad)
 	write_string(packet, squad and squad.zhopa2_revenge_actor_personal_goodwill)
 	write_string(packet, squad and squad.zhopa2_revenge_actor_revenge_goodwill)
 	write_string(packet, squad and squad.zhopa2_revenge_actor_member_ids)
+	write_string(packet, squad and squad.zhopa2_hunt_prey)
 	packet:w_stringZ(MARKER_END)
 end
 
@@ -546,6 +548,7 @@ function M.read_squad(packet, squad)
 	squad.zhopa2_revenge_actor_personal_goodwill = field_count >= 40 and read_string(packet) or nil
 	squad.zhopa2_revenge_actor_revenge_goodwill = field_count >= 41 and read_string(packet) or nil
 	squad.zhopa2_revenge_actor_member_ids = field_count >= 42 and read_string(packet) or nil
+	squad.zhopa2_hunt_prey = field_count >= 43 and read_string(packet) or nil
 	clamp_virtual_loot_state(squad)
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version

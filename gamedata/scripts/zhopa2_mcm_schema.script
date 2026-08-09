@@ -35,6 +35,10 @@ local OPTION_DEFS = {
 	mutant_hunt_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 35 },
 	mutant_patrol_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 30 },
 	mutant_explore_weight = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 35 },
+	geographic_balance_enabled = { type = "check", val = 1, def = true },
+	geographic_balance_mode = { type = "radio_h", val = 2, content = { { 1, "zhopa2_balance_soft" }, { 2, "zhopa2_balance_balanced" }, { 3, "zhopa2_balance_strict" } }, def = 2, force_horz = true },
+	faction_presence_balance_enabled = { type = "check", val = 1, def = true },
+	faction_lore_preferences_enabled = { type = "check", val = 1, def = true },
 	mutant_rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
 	mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
 	target_sync_enabled = { type = "check", val = 1, def = true },
@@ -64,6 +68,7 @@ local PANELS = {
 		text = "ui_mcm_zhopa2_panel_tasks",
 		["groups"] = {
 			{ id = "roam", text = "ui_mcm_zhopa2_group_roam", options = { "explore_enabled", "populate_enabled", "base_camping_enabled", "patrol_enabled", "night_rest_enabled", "stalker_hunt_enabled", "artefact_enabled" } },
+			{ id = "balance", text = "ui_mcm_zhopa2_group_balance", options = { "geographic_balance_enabled", "geographic_balance_mode", "faction_presence_balance_enabled", "faction_lore_preferences_enabled" } },
 			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "stalker_explore_weight", "stalker_populate_weight", "stalker_patrol_weight", "stalker_hunt_weight", "stalker_artefact_weight", "stalker_trade_weight" } },
 			{ id = "timing", text = "ui_mcm_zhopa2_group_timing", options = { "rest_duration_game_hours", "patrol_duration_game_hours", "rest_fallback_stay_min_sec", "rest_fallback_stay_max_sec" } },
 			{ id = "targeting", text = "ui_mcm_zhopa2_group_targeting", options = { "target_sync_enabled", "online_intent_enforce_enabled", "revenge_enabled", "revenge_actor_enabled", "revenge_actor_chance", "hunt_offline_combat_enabled", "hunt_offline_combat_interval_sec", "hunt_offline_combat_distance" } },

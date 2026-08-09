@@ -6,13 +6,13 @@ Full name: **Z.H.O.P.A. ALIFE 2.0 — Zone Hostile Operations & Population AI**.
 
 This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.0 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of August 3, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of August 9, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
 | Bootstrap and settings | `zhopa2_bootstrap`, `zhopa2_cfg`, `zhopa2_mcm*` | Startup, readiness, LTX/MCM, and user-facing controls |
 | Integration | `zhopa2_runtime_patches`, `zhopa2_index`, `zhopa2_topology` | Chain-friendly patches, runtime buckets, and inter-level routing |
-| Simulation | `zhopa2_tasks`, `zhopa2_perception`, `zhopa2_memory` | Task FSM, target selection, and serializable squad state |
+| Simulation | `zhopa2_tasks`, `zhopa2_task_scoring`, `zhopa2_perception`, `zhopa2_memory` | Task FSM, bounded task-target scoring, target selection, and serializable squad state |
 | Economy | `zhopa2_economy`, `axr_trade_manager`, `zhopa2_smart_service_slot_doctor` | Online/offline trade, customer jobs, and post-service recovery |
 | Items | `zhopa2_loot`, `zhopa2_artifacts` | Online pickup, virtual offline cargo, and artifact flow |
 | World and story | `zhopa2_service_fillers`, `zhopa2_revenge`, `zhopa2_story_*` | Base ownership, services, revenge, and story events |
@@ -61,6 +61,7 @@ Runtime modules:
 
 - `zhopa2_index`
 - `zhopa2_topology`
+- `zhopa2_task_scoring`
 - `zhopa2_loot`
 - `zhopa2_economy`
 - `zhopa2_smart_service_slot_doctor`
@@ -150,6 +151,7 @@ Key fields:
 - `zhopa2_artifact_*`
 - `zhopa2_trade_*`
 - `zhopa2_revenge_*`
+- `zhopa2_hunt_prey` for the selected hunt profile, so saved HUNT routing uses the same prey rules after load.
 
 Save state must never contain engine objects, userdata, online object handles or metatable-backed tables. Only numbers, strings, booleans and plain tables are safe.
 
@@ -170,6 +172,7 @@ Core buckets:
 - artifact reservations;
 - artifact cargo;
 - base camping targets.
+- per-level faction-strength snapshots used by the optional destination balance.
 
 Indexes are updated from vanilla events: squad first update, level change, smart enter/leave/update, artifact spawn/take/destroy and unregister cleanup.
 
@@ -199,6 +202,7 @@ Responsibilities:
 - blacklists;
 - threshold values;
 - price multiplier;
+- task-balance MCM switches;
 - safe getters.
 
 `ui_mcm.get(...)` must not be called inside `on_mcm_load()`.
@@ -318,7 +322,17 @@ Mutant random tasks:
 - `PATROL`
 - `EXPLORE`
 
-`REST`, `NIGHT_REST`, `FORCE_EXIT`, `BASE_CAMPING`, `REVENGE`, story tasks and some trade flows are assigned by explicit conditions, interrupts, safety gates or story systems rather than ordinary weighted roaming.
+`REST` enters ordinary weighted selection only when the enabled faction profile gives it a positive weight. Otherwise it remains a direct fallback or pause state. `NIGHT_REST`, `FORCE_EXIT`, `BASE_CAMPING`, `REVENGE`, story tasks and some trade flows are assigned by explicit conditions, interrupts, safety gates or story systems rather than ordinary weighted roaming.
+
+Ordinary selection is a bounded candidate pipeline. Builders first expose valid `task + target` pairs without reserving artefacts, modifying trade state, or assigning a job. Each candidate retains its task-specific level priority and carries a base weight, payload, target level, and selection class. `zhopa2_task_scoring` then applies the enabled modifiers to that concrete pair and picks one final candidate; only the selected candidate is materialized. Artefact reservation therefore happens after task assignment, never while targets are being scored.
+
+The optional balance layers are independent:
+
+- geographic balance derives level danger from registered smart game points on the configured north axis, with LTX overrides for levels and squad sections;
+- faction-presence balance consumes only incremental SIMBOARD buckets and rewards allied support while discouraging overwhelming hostile presence;
+- lore profiles supply task multipliers, prey rules, and directional preferences from `zhopa2_population_profiles.ltx`.
+
+`monster` and `zombied` remain distinct presence factions. They affect presence snapshots but have no geographic or lore profile by default. Direct `HUNT` and `REVENGE` assignments use the Soft / Balanced / Strict geography policy only when they are first accepted; an already accepted route is not cancelled merely because the target moves or local influence changes. Story, surge, and force-exit flows never go through this policy.
 
 ### 6.2 Safety order
 
@@ -594,7 +608,7 @@ When adding a new system:
 When adding a new task:
 
 1. Add a task constant in `zhopa2_tasks.script`.
-2. Define candidate selection and validation.
+2. Define a bounded valid candidate builder and validation; one-candidate legacy builders remain supported.
 3. Define completion and failure semantics.
 4. Respect blacklists at selection and active validation.
 5. Use `zhopa2_assign_task` / interrupt helpers instead of direct vanilla field writes.

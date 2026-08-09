@@ -4014,21 +4014,21 @@ function M._trade_route_smart_allowed(squad, smart, level_name)
 	return true
 end
 
-function M.pick_trade_route_smart(squad, opts)
+function M.collect_trade_route_smarts(squad, opts)
 	opts = opts or {}
 	if M.enabled() ~= true or not squad then
-		return nil, "disabled"
+		return {}, nil, "disabled"
 	end
 	local board = rawget(_G, "SIMBOARD")
 	if not (board and board.zhopa2_trade_smarts_by_level) then
-		return nil, "no_trade_index"
+		return {}, nil, "no_trade_index"
 	end
 	if type(board.zhopa2_ensure_buckets) == "function" then
 		pcall(board.zhopa2_ensure_buckets, board)
 	end
 	local current_level = M._trade_route_current_level(squad, board)
 	if type(current_level) ~= "string" or current_level == "" then
-		return nil, "no_level"
+		return {}, nil, "no_level"
 	end
 
 	local levels = M._trade_route_levels(current_level, opts)
@@ -4038,19 +4038,30 @@ function M.pick_trade_route_smart(squad, opts)
 		local bucket = board.zhopa2_trade_smarts_by_level and board.zhopa2_trade_smarts_by_level[level_name] or nil
 		for _, smart in pairs(bucket or {}) do
 			if M._trade_route_smart_allowed(squad, smart, level_name) then
-				candidates[#candidates + 1] = { smart = smart, level = level_name }
+				candidates[#candidates + 1] = {
+					smart = smart,
+					level = level_name,
+					reason = level_name == current_level and "trade_route_current" or "trade_route_neighbor",
+				}
 			end
 		end
 	end
 	if #candidates == 0 then
-		return nil, "no_trade_route"
+		return candidates, current_level, "no_trade_route"
+	end
+	return candidates, current_level
+end
+
+function M.pick_trade_route_smart(squad, opts)
+	local candidates, current_level, failure_reason = M.collect_trade_route_smarts(squad, opts)
+	if #candidates == 0 then
+		return nil, failure_reason or "no_trade_route"
 	end
 	local selected = candidates[math.random(#candidates)]
 	if not selected then
 		return nil, "no_trade_route"
 	end
-	local reason = selected.level == current_level and "trade_route_current" or "trade_route_neighbor"
-	return selected.smart, reason
+	return selected.smart, selected.reason or (selected.level == current_level and "trade_route_current" or "trade_route_neighbor")
 end
 
 function M.trade_route_task_weight(squad, base_weight, opts)
@@ -4062,12 +4073,17 @@ function M.trade_route_task_weight(squad, base_weight, opts)
 	if not has_work then
 		return 0, work_reason or "nothing_to_trade", value or 0
 	end
-	local smart, route_reason = M.pick_trade_route_smart(squad, opts or { level_mode = "current_or_neighbor" })
-	if not smart then
+	opts = opts or { level_mode = "current_or_neighbor" }
+	local routes = opts.route_candidates
+	local route_reason
+	if type(routes) ~= "table" then
+		routes, _, route_reason = M.collect_trade_route_smarts(squad, opts)
+	end
+	if #routes == 0 then
 		return 0, route_reason or "no_trade_route", value or 0
 	end
 	local bonus = math.min(M.TRADE_ROUTE_MAX_VALUE_BONUS, math.floor((tonumber(value) or 0) / M.TRADE_ROUTE_VALUE_WEIGHT_STEP))
-	return math.max(1, math.floor(base + bonus)), work_reason or route_reason or "trade_route", value or 0
+	return math.max(1, math.floor(base + bonus)), work_reason or (routes[1] and routes[1].reason) or route_reason or "trade_route", value or 0
 end
 
 local function mark_trade_lookup_failure(squad, result, reason, smart)

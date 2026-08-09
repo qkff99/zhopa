@@ -1,0 +1,100 @@
+; Runtime-only task balancing data. MCM only enables the systems and selects the direct-target policy.
+
+[geography]
+; Global game-point axis used as south-to-north. Set north_sign = -1 for maps whose north points toward decreasing coordinates.
+north_axis = z
+north_sign = 1
+default_squad_strength = 2
+danger_step_penalty = 0.18
+easy_step_penalty = 0.04
+match_bonus = 0.10
+minimum_multiplier = 0.35
+; Story/special factions and non-human presence groups retain their own behavior instead of generic strength balancing.
+excluded_factions = monolith, greh, isg, monster, zombied
+
+; Optional exact overrides. Values are ranks from 1 (novice) to 5 (master).
+[squad_strength]
+; stalker_sim_squad_novice = 1
+; stalker_sim_squad_advanced = 3
+
+; Optional level danger overrides. They win over coordinates and are useful for custom maps.
+[level_difficulty]
+; l01_escape = 1
+; l10_radar = 5
+
+; Optional north-axis overrides for maps with malformed or non-comparable global coordinates.
+[level_axis]
+; l01_escape = -500
+; l10_radar = 1200
+
+[faction_presence]
+minimum_strength = 2
+ally_bonus_per_strength = 0.025
+enemy_penalty_per_strength = 0.035
+minimum_multiplier = 0.35
+maximum_multiplier = 1.50
+
+[conditional_targets]
+balanced_min_gap = 3
+balanced_reject_chance = 50
+strict_min_gap = 2
+
+[faction_profiles]
+stalker = stalker
+csky = csky
+dolg = dolg
+freedom = freedom
+bandit = bandit
+killer = killer
+renegade = renegade
+ecolog = ecolog
+monolith = monolith
+isg = isg
+greh = greh
+
+[profile_stalker]
+task_explore = 1.25
+task_trade = 1.25
+task_artefact = 1.25
+
+[profile_csky]
+task_explore = 1.25
+task_hunt = 1.35
+hunt_prey = monster
+
+[profile_dolg]
+task_hunt = 1.50
+hunt_prey = monster
+
+[profile_freedom]
+task_populate = 1.40
+task_rest = 8
+task_hunt = 0.55
+
+[profile_bandit]
+task_hunt = 1.45
+hunt_prey = hostile_stalker
+
+[profile_killer]
+task_hunt = 1.45
+hunt_prey = hostile_stalker
+
+[profile_renegade]
+task_hunt = 1.35
+hunt_prey = hostile_stalker
+
+[profile_ecolog]
+task_artefact = 1.75
+
+[profile_monolith]
+task_hunt = 1.55
+hunt_prey = hostile_stalker
+
+[profile_isg]
+task_explore = 1.60
+explore_north_multiplier = 1.75
+explore_south_multiplier = 0.55
+
+[profile_greh]
+task_hunt = 1.50
+hunt_prey = hostile_stalker

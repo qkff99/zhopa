@@ -9,6 +9,7 @@
 	<string id="ui_mcm_zhopa2_group_systems"><text>Economy and support systems</text></string>
 	<string id="ui_mcm_zhopa2_group_story"><text>Story event systems</text></string>
 	<string id="ui_mcm_zhopa2_group_roam"><text>Available stalker tasks</text></string>
+	<string id="ui_mcm_zhopa2_group_balance"><text>Task balance</text></string>
 	<string id="ui_mcm_zhopa2_group_weights"><text>Task selection weights</text></string>
 	<string id="ui_mcm_zhopa2_group_timing"><text>Task timing</text></string>
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Combat and target handling</text></string>
@@ -56,6 +57,17 @@
 	<string id="ui_mcm_zhopa2_tasks_stalker_hunt_enabled_desc"><text>Allows stalker squads to actively pursue hostile squads or direct hunt targets instead of only moving between smart terrains.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_artefact_enabled"><text>Enable artefact search tasks</text></string>
 	<string id="ui_mcm_zhopa2_tasks_artefact_enabled_desc"><text>Allows stalker squads to travel to anomaly smart terrains and collect artefacts through the online or offline artefact logic.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_enabled"><text>Balance destinations by squad strength</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_enabled_desc"><text>Favors destinations whose danger better matches the squad's experience. Novices favor safer areas, while veterans are more willing to travel north.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_mode"><text>Direct target balance mode</text></string>
+	<string id="ui_mcm_zhopa2_tasks_geographic_balance_mode_desc"><text>Controls direct hunt and revenge targets that are far above a squad's strength. Soft keeps every valid target, Balanced sometimes avoids severe mismatches, and Strict always avoids them.</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_soft"><text>Soft</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_balanced"><text>Balanced</text></string>
+	<string id="ui_mcm_lst_zhopa2_balance_strict"><text>Strict</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_presence_balance_enabled"><text>Consider local faction presence</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_presence_balance_enabled_desc"><text>Favors regions with allied support and discourages destinations dominated by hostile squads when choosing ordinary tasks.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_lore_preferences_enabled"><text>Use faction task preferences</text></string>
+	<string id="ui_mcm_zhopa2_tasks_faction_lore_preferences_enabled_desc"><text>Lets factions favor lore-appropriate work, such as Duty hunting mutants, ecologists seeking artefacts, and ISG exploring northward.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_explore_weight"><text>Weight: exploration</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_explore_weight_desc"><text>Relative chance for a stalker squad to pick exploration when several task types are available. Set to 0 to remove it from weighted selection.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_stalker_populate_weight"><text>Weight: smart population</text></string>

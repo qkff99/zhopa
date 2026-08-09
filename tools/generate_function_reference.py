@@ -44,6 +44,7 @@ SCRIPT_ROLES = {
     "zhopa2_smart_service_slot_doctor.script": "bounded observation and vanilla smart-job reselection for stalled trade/technician customer jobs",
     "zhopa2_story_north_migration.script": "story-gated northern migration task selection and recovery",
     "zhopa2_story_psy_watchdog.script": "story-gated psi-level squad conversion into zombied squads",
+    "zhopa2_task_scoring.script": "bounded task-target scoring, runtime level geometry, faction-presence snapshots, and configurable lore preferences",
     "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, fallback rules, and server-side revenge relations",
     "zhopa2_topology.script": "level topology, neighbor levels, and route helpers",
 }

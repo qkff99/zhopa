@@ -987,6 +987,27 @@ function M.squad_relation_hostile(squad, target)
 	return squad and target and factions_hostile(M.squad_relation_faction(squad), M.squad_relation_faction(target)) or false
 end
 
+function M.faction_relation_kind(owner_faction, other_faction)
+	owner_faction = owner_faction and (relation_faction_aliases[tostring(owner_faction)] or tostring(owner_faction)) or nil
+	other_faction = other_faction and (relation_faction_aliases[tostring(other_faction)] or tostring(other_faction)) or nil
+	if not (owner_faction and other_faction) then
+		return "neutral"
+	end
+	if owner_faction == other_faction then
+		return "ally"
+	end
+	if factions_hostile(owner_faction, other_faction) then
+		return "enemy"
+	end
+	if game_relations and type(game_relations.is_factions_friends) == "function" then
+		local ok, friendly = pcall(game_relations.is_factions_friends, owner_faction, other_faction)
+		if ok and friendly == true then
+			return "ally"
+		end
+	end
+	return "neutral"
+end
+
 local function faction_relation_rank(faction, owner)
 	if not (faction and owner) then
 		return 4
@@ -1493,6 +1514,10 @@ end
 local function hunt_profile_prey_ok(squad, profile, prey, hunter_faction)
 	if prey == "stalker" then
 		return profile and profile.is_monster ~= true
+	elseif prey == "monster" then
+		return profile and profile.is_monster == true
+	elseif prey == "hostile_stalker" then
+		return profile and profile.is_monster ~= true and factions_hostile(hunter_faction or M.squad_relation_faction(squad), profile.faction)
 	elseif prey == "enemy" then
 		return profile and (profile.is_monster == true or factions_hostile(hunter_faction or M.squad_relation_faction(squad), profile.faction))
 	end
@@ -1610,7 +1635,7 @@ function M.index_squads_for_options(options, levels)
 	return index_squads_on_levels(levels)
 end
 
-local function hunt_candidate_pool(options, levels)
+local function hunt_candidate_pool(squad, options, levels)
 	options = options or {}
 	levels = levels or levels_for_options(options)
 	local prey_key = options.prey
@@ -1647,14 +1672,11 @@ local function hunt_candidate_pool(options, levels)
 		local ids = {}
 		local indexed = M.index_squads_for_options(options, levels)
 		for i = 1, #indexed do
-			local target = indexed[i]
-			local profile = hunt_target_profile(target)
-			if profile and profile.ok then
-				local prey_ok = options.prey ~= "stalker" or profile.is_monster ~= true
-				if prey_ok and options.prey == "enemy" and profile.is_monster ~= true and hunter_faction then
-					prey_ok = factions_hostile(hunter_faction, profile.faction)
-				end
-				if prey_ok then
+		local target = indexed[i]
+		local profile = hunt_target_profile(target)
+		if profile and profile.ok then
+			local prey_ok = hunt_profile_prey_ok(squad, profile, options.prey, hunter_faction)
+			if prey_ok then
 					candidates[#candidates + 1] = target
 					ids[#ids + 1] = target.id
 				end
@@ -1676,7 +1698,8 @@ function M.collect_hunt_targets(squad, opts)
 	ensure_option_neighbors(options)
 	local levels = levels_for_options(options)
 
-	local indexed = hunt_candidate_pool(options, levels)
+	options.hunter_faction = options.hunter_faction or M.squad_relation_faction(squad)
+	local indexed = hunt_candidate_pool(squad, options, levels)
 	for i = 1, #indexed do
 		local target = indexed[i]
 		if M.valid_hunt_target(squad, target, options) then
@@ -1867,7 +1890,7 @@ local function pick_hunt_target_once(squad, options)
 		local idx = index_mod()
 		local hunter_is_monster = M.is_monster_squad(squad)
 		options.hunter_faction = options.hunter_faction or M.squad_relation_faction(squad)
-		local indexed = hunt_candidate_pool(options, levels)
+		local indexed = hunt_candidate_pool(squad, options, levels)
 		for i = 1, #indexed do
 			local target = indexed[i]
 			if M.valid_hunt_target(squad, target, options) then
@@ -2021,15 +2044,31 @@ function M.collect_smarts(squad, opts)
 	options.current_level = options.current_level or M.obj_level(squad)
 	ensure_option_neighbors(options)
 	local levels = levels_for_options(options)
-	local signature = smart_options_signature(squad, options, levels)
+	local limit = math.max(0, math.floor(tonumber(options.limit) or 0))
+	local signature = smart_options_signature(squad, options, levels) .. "|limit|" .. tostring(limit)
 
 	local cached = cached_frame_value("collect_smarts|" .. signature, function()
 		local out = {}
 		local indexed = M.index_smarts_for_options(options, levels)
-		for i = 1, #indexed do
-			local smart = indexed[i]
-			if valid_smart_cached(squad, smart, options, signature) then
-				out[#out + 1] = smart
+		local count = #indexed
+		if limit > 0 and count > 0 then
+			local start = math.random(count)
+			for offset = 0, count - 1 do
+				local i = ((start + offset - 1) % count) + 1
+				local smart = indexed[i]
+				if valid_smart_cached(squad, smart, options, signature) then
+					out[#out + 1] = smart
+					if #out >= limit then
+						break
+					end
+				end
+			end
+		else
+			for i = 1, count do
+				local smart = indexed[i]
+				if valid_smart_cached(squad, smart, options, signature) then
+					out[#out + 1] = smart
+				end
 			end
 		end
 		return out
@@ -2066,21 +2105,20 @@ function M.pick_smart(squad, opts)
 	return pick_smart_from_options(squad, opts)
 end
 
-function M.pick_artifact_target(squad, opts)
+local function artifact_clone_opts(src)
+	local out = {}
+	for k, v in pairs(src or {}) do
+		out[k] = v
+	end
+	return out
+end
+
+function M.collect_artifact_targets(squad, opts)
 	local idx = index_mod()
 	if not (idx and type(idx.artifact_candidate_smarts_on_levels) == "function") then
-		return nil
+		return {}
 	end
-
-	local function artefact_clone_opts(src)
-		local out = {}
-		for k, v in pairs(src or {}) do
-			out[k] = v
-		end
-		return out
-	end
-
-	local options = artefact_clone_opts(opts or {})
+	local options = artifact_clone_opts(opts or {})
 	options.kind = "artefact"
 	options.ignore_population = true
 	options.skip_prior = true
@@ -2091,26 +2129,44 @@ function M.pick_artifact_target(squad, opts)
 	local signature = smart_options_signature(squad, options, levels) .. "|artifact|" .. tostring(idx.get_revision and idx.get_revision() or "")
 
 	local candidates = idx.artifact_candidate_smarts_on_levels(levels, squad)
-	local best
-	local best_dist
+	local out = {}
 	for i = 1, #(candidates or {}) do
 		local entry = candidates[i]
 		local smart = entry and entry.smart or nil
 		if entry and entry.artifact_id and smart and valid_smart_cached(squad, smart, options, signature) then
-			local dist = squad_distance(squad, smart) or 100000000
-			if not best_dist or dist < best_dist then
-				best = entry
-				best_dist = dist
-			end
+			out[#out + 1] = {
+				smart = smart,
+				artifact_id = entry.artifact_id,
+				zone = entry.zone,
+				section = entry.section,
+				level = entry.level,
+				reason = entry.reason or "artefact_available",
+				virtual = entry.virtual,
+			}
+		end
+	end
+	return out
+end
+
+function M.pick_artifact_target(squad, opts)
+	local options = artifact_clone_opts(opts or {})
+	local candidates = M.collect_artifact_targets(squad, options)
+	local best
+	local best_dist
+	for i = 1, #candidates do
+		local entry = candidates[i]
+		local dist = squad_distance(squad, entry.smart) or 100000000
+		if not best_dist or dist < best_dist then
+			best = entry
+			best_dist = dist
 		end
 	end
 	if best then
-		best.reason = best.reason or "artefact_available"
 		return best
 	end
 
 	if options.fallback_level_mode then
-		local fallback = artefact_clone_opts(options)
+		local fallback = artifact_clone_opts(options)
 		fallback.level_mode = options.fallback_level_mode
 		fallback.fallback_level_mode = nil
 		return M.pick_artifact_target(squad, fallback)
