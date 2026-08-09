@@ -30,9 +30,17 @@ local function make_group(schema, group)
 
 	for i = 1, #group.options do
 		local key = group.options[i]
-		local meta = schema.options and schema.options[key]
-		if type(meta) == "table" then
-			gr[#gr+1] = clone_option(meta, key)
+		if type(key) == "table" then
+			local node = {}
+			for k, v in pairs(key) do
+				node[k] = v
+			end
+			gr[#gr+1] = node
+		else
+			local meta = schema.options and schema.options[key]
+			if type(meta) == "table" then
+				gr[#gr+1] = clone_option(meta, key)
+			end
 		end
 	end
 	return gr

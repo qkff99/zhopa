@@ -99,7 +99,7 @@ local function alife_sim()
 end
 
 function M.online_enabled()
-	return cfg_bool("enabled", true) == true and cfg_bool("loot_enabled", true) == true
+	return cfg_bool("enabled", true) == true and cfg_bool("loot_enabled", false) == true
 end
 
 function M.offline_enabled()

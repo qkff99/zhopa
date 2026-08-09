@@ -15,6 +15,7 @@
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Combat and target handling</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Available mutant tasks</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Mutant task timing</text></string>
+	<string id="ui_mcm_zhopa2_general_update_notice"><text>After updating ZHOPA, use MCM's Reset to defaults before changing options so the latest recommended defaults take effect.</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled"><text>Run ZHOPA ALIFE 2</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Master runtime switch. Turning it off immediately cancels ZHOPA tasks, removes its generated service squads, clears its runtime and save data, and stops its callbacks and patches. Save the game after disabling before uninstalling the addon. Changes already made to the world cannot be reversed.</text></string>
 	<string id="ui_st_zhopa2_disabled_success"><text>ZHOPA ALIFE 2 is disabled. New saves no longer contain ZHOPA state.</text></string>
@@ -27,8 +28,8 @@
 	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Shows ZHOPA squad state on map markers and enables extra diagnostic console messages for debugging simulation behavior.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled"><text>Maintain trader and service squads</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled_desc"><text>Automatically fills marked smart terrains with missing trader, technician, medic, barman, or guide service squads when the smart needs them.</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Online managed looting</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Lets online NPCs use ZHOPA looting rules for corpses and loose items, including targeted item pickup and stuck-loot recovery.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Experimental online managed looting</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Lets online NPCs use ZHOPA looting rules for corpses and loose items. Disabled by default: leave it off to use vanilla looting, the more predictable choice for large mod packs. Artefact task pickup is unaffected.</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled"><text>Offline loot accounting</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled_desc"><text>Allows squads that fight or loot outside the loaded level to gain loot value and loot cargo in the offline simulation.</text></string>
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled"><text>Virtual artefacts for offline squads</text></string>

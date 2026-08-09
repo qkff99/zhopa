@@ -15,6 +15,7 @@
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Бой и сопровождение целей</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Доступные задачи мутантов</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Длительность задач мутантов</text></string>
+	<string id="ui_mcm_zhopa2_general_update_notice"><text>После обновления ZHOPA перед изменением настроек используйте в MCM кнопку «Сбросить по умолчанию», чтобы применились новые рекомендуемые значения.</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled"><text>Работа ZHOPA ALIFE 2</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Главный переключатель мода. При отключении ZHOPA немедленно отменяет свои задачи, удаляет созданные сервисные отряды, очищает данные рантайма и сохранения, снимает свои коллбэки и патчи. Перед удалением мода обязательно создайте новое сохранение после отключения. Уже произошедшие изменения мира не откатываются.</text></string>
 	<string id="ui_st_zhopa2_disabled_success"><text>ZHOPA ALIFE 2 отключена. Новые сохранения больше не содержат состояния ZHOPA.</text></string>
@@ -27,8 +28,8 @@
 	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Показывает состояние отрядов ZHOPA на маркерах карты и включает дополнительные диагностические сообщения в консоли.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled"><text>Поддерживать торговцев и сервисы</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled_desc"><text>Автоматически добавляет на отмеченные смарты недостающие сервисные отряды: торговцев, техников, медиков, барменов и проводников.</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Управляемый онлайн-лутинг</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Позволяет NPC на загруженной локации лутать трупы и предметы по правилам ZHOPA, включая целевой подбор и восстановление после зависания на недоступном предмете.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Экспериментальный управляемый онлайн-лутинг</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Позволяет NPC на загруженной локации лутать трупы и предметы по правилам ZHOPA. По умолчанию выключен: для более предсказуемого поведения в больших сборках оставьте его выключенным и используйте ванильный лутинг. На подбор артефактов по задачам не влияет.</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled"><text>Учет лута в оффлайне</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled_desc"><text>Позволяет отрядам, которые сражаются или лутают вне загруженной локации, получать добычу и стоимость добычи в оффлайн-симуляции.</text></string>
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled"><text>Виртуальные артефакты для оффлайна</text></string>

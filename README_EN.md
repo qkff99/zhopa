@@ -77,6 +77,8 @@ Main MCM sections:
 
 Task balance is enabled by default. Its numeric tuning, level overrides, squad strength overrides, and faction profiles are kept in `gamedata/configs/zhopa2_population_profiles.ltx`; MCM exposes only the three gameplay switches and the Soft / Balanced / Strict direct-target policy.
 
+Online managed looting is experimental and disabled by default. Leave it disabled to use vanilla looting, the more predictable choice for large mod packs; artefact tasks continue to use their separate targeted pickup path. After updating the addon, use MCM's **Reset to defaults** before changing options so the current recommended defaults take effect.
+
 ## Compatibility
 
 | Status | Mods and builds |

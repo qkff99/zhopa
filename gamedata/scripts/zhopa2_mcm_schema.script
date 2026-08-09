@@ -16,7 +16,7 @@ local OPTION_DEFS = {
 	revenge_actor_chance = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 10 },
 	artefact_enabled = { type = "check", val = 1, def = true },
 	artefact_offline_enabled = { type = "check", val = 1, def = true },
-	rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
+	rest_duration_game_hours = { type = "track", val = 2, min = 0.01, max = 6, step = 0.01, def = 0.25 },
 	patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
 	rest_fallback_stay_min_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 900 },
 	rest_fallback_stay_max_sec = { type = "track", val = 2, min = 0, max = 7200, step = 60, def = 1800 },
@@ -39,7 +39,7 @@ local OPTION_DEFS = {
 	geographic_balance_mode = { type = "radio_h", val = 2, content = { { 1, "zhopa2_balance_soft" }, { 2, "zhopa2_balance_balanced" }, { 3, "zhopa2_balance_strict" } }, def = 2, force_horz = true },
 	faction_presence_balance_enabled = { type = "check", val = 1, def = true },
 	faction_lore_preferences_enabled = { type = "check", val = 1, def = true },
-	mutant_rest_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 0.25 },
+	mutant_rest_duration_game_hours = { type = "track", val = 2, min = 0.01, max = 6, step = 0.01, def = 0.25 },
 	mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
 	target_sync_enabled = { type = "check", val = 1, def = true },
 	online_intent_enforce_enabled = { type = "check", val = 1, def = true },
@@ -49,7 +49,7 @@ local OPTION_DEFS = {
 	trade_enabled = { type = "check", val = 1, def = true },
 	npc_sell_price_multiplier = { type = "track", val = 2, min = 0, max = 1, step = 0.05, def = 0.2 },
 	service_filler_enabled = { type = "check", val = 1, def = true },
-	loot_enabled = { type = "check", val = 1, def = true },
+	loot_enabled = { type = "check", val = 1, def = false },
 	loot_offline_enabled = { type = "check", val = 1, def = true },
 }
 
@@ -58,7 +58,7 @@ local PANELS = {
 		id = "general",
 		text = "ui_mcm_zhopa2_panel_general",
 		["groups"] = {
-			{ id = "core", text = "ui_mcm_zhopa2_group_core", options = { "enabled", "stalker_movement_enabled", "mutant_movement_enabled", "debug_hud_enabled" } },
+			{ id = "core", text = "ui_mcm_zhopa2_group_core", options = { { id = "update_notice", type = "desc", text = "ui_mcm_zhopa2_general_update_notice", clr = { 255, 210, 120, 255 } }, "enabled", "stalker_movement_enabled", "mutant_movement_enabled", "debug_hud_enabled" } },
 			{ id = "systems", text = "ui_mcm_zhopa2_group_systems", options = { "service_filler_enabled", "loot_enabled", "loot_offline_enabled", "artefact_offline_enabled", "trade_enabled", "npc_sell_price_multiplier" } },
 			{ id = "story", text = "ui_mcm_zhopa2_group_story", options = { "story_psy_watchdog_enabled", "story_north_migration_enabled", "story_north_migration_percent" } },
 		},
@@ -93,7 +93,9 @@ for i = 1, #PANELS do
 		local group = panel.groups[j]
 		for k = 1, #group.options do
 			local key = group.options[k]
-			PATH_BY_KEY[key] = "zhopa2/" .. panel.id .. "/" .. key
+			if type(key) == "string" then
+				PATH_BY_KEY[key] = "zhopa2/" .. panel.id .. "/" .. key
+			end
 		end
 	end
 end
