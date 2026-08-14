@@ -5,6 +5,7 @@ local OPTION_DEFS = {
 	stalker_movement_enabled = { type = "check", val = 1, def = true },
 	mutant_movement_enabled = { type = "check", val = 1, def = true },
 	debug_hud_enabled = { type = "check", val = 1, def = false },
+	squad_dialogue_enabled = { type = "check", val = 1, def = true },
 	explore_enabled = { type = "check", val = 1, def = true },
 	populate_enabled = { type = "check", val = 1, def = true },
 	base_camping_enabled = { type = "check", val = 1, def = true },
@@ -59,7 +60,7 @@ local PANELS = {
 		text = "ui_mcm_zhopa2_panel_general",
 		["groups"] = {
 			{ id = "core", text = "ui_mcm_zhopa2_group_core", options = { { id = "update_notice", type = "desc", text = "ui_mcm_zhopa2_general_update_notice", clr = { 255, 210, 120, 255 } }, "enabled", "stalker_movement_enabled", "mutant_movement_enabled", "debug_hud_enabled" } },
-			{ id = "systems", text = "ui_mcm_zhopa2_group_systems", options = { "service_filler_enabled", "loot_enabled", "loot_offline_enabled", "artefact_offline_enabled", "trade_enabled", "npc_sell_price_multiplier" } },
+			{ id = "systems", text = "ui_mcm_zhopa2_group_systems", options = { "squad_dialogue_enabled", "service_filler_enabled", "loot_enabled", "loot_offline_enabled", "artefact_offline_enabled", "trade_enabled", "npc_sell_price_multiplier" } },
 			{ id = "story", text = "ui_mcm_zhopa2_group_story", options = { "story_psy_watchdog_enabled", "story_north_migration_enabled", "story_north_migration_percent" } },
 		},
 	},

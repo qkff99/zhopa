@@ -1,4 +1,5 @@
 # Unreleased
+- Added managed-squad commander dialogue with current/previous task descriptions, joint travel to the actual destination, time advancement, and Story Mode psi-zone protection.
 - Mod disable system reworked in MCM. Now it will disable mod and clear save.
 
 ## 2.0.1

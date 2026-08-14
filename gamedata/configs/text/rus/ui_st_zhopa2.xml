@@ -121,4 +121,46 @@
 	<string id="ui_mcm_zhopa2_mutants_mutant_rest_duration_game_hours_desc"><text>Сколько игровых часов отряд мутантов проводит в отдыхе перед выбором следующей задачи.</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours"><text>Длительность патруля мутантов</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours_desc"><text>Сколько игровых часов отряд мутантов продолжает патруль, прежде чем снова выбрать задачу.</text></string>
+
+	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled"><text>Путешествия с отрядами ZHOPA</text></string>
+	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled_desc"><text>Добавляет командирам управляемых отрядов диалог об их занятиях и позволяет отправиться вместе с движущимся отрядом к его текущей цели.</text></string>
+
+	<string id="ui_st_zhopa2_dialog_activity_question"><text>Чем сейчас занимается ваш отряд? %c[ui_lime][Инфо/Путешествие]</text></string>
+	<string id="ui_st_zhopa2_dialog_placeholder"><text>...</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_question"><text>Можно с вами?</text></string>
+	<string id="ui_st_zhopa2_dialog_understood"><text>Понятно.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_accept"><text>Хорошо. Можешь идти с нами.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_ready"><text>Я готов. Пошли.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_cancel"><text>Я передумал.</text></string>
+	<string id="ui_st_zhopa2_dialog_previous_fmt"><text>Раньше — %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_current_fmt"><text>Сейчас — %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_named_fmt"><text>Место назначения: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_smart_fmt"><text>Локация: %s. Место назначения: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_level_fmt"><text>Идём к месту назначения. Локация: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_generic"><text>Идём к месту назначения.</text></string>
+
+	<string id="ui_st_zhopa2_activity_rest"><text>отдых</text></string>
+	<string id="ui_st_zhopa2_activity_explore"><text>разведка</text></string>
+	<string id="ui_st_zhopa2_activity_force_exit"><text>выход с локации</text></string>
+	<string id="ui_st_zhopa2_activity_populate"><text>обустройство нового лагеря</text></string>
+	<string id="ui_st_zhopa2_activity_base_camping"><text>стоянка на базе</text></string>
+	<string id="ui_st_zhopa2_activity_patrol"><text>патруль</text></string>
+	<string id="ui_st_zhopa2_activity_night_rest"><text>ночной отдых</text></string>
+	<string id="ui_st_zhopa2_activity_artefact"><text>поиск артефактов</text></string>
+	<string id="ui_st_zhopa2_activity_trade"><text>торговый маршрут</text></string>
+	<string id="ui_st_zhopa2_activity_hunt"><text>охота</text></string>
+	<string id="ui_st_zhopa2_activity_revenge"><text>преследование цели</text></string>
+	<string id="ui_st_zhopa2_activity_story_north_migration"><text>миграция на север</text></string>
+	<string id="ui_st_zhopa2_activity_unknown"><text>другая задача</text></string>
+
+	<string id="ui_st_zhopa2_travel_target_changed"><text>Наша цель изменилась. Сейчас взять тебя не получится.</text></string>
+	<string id="ui_st_zhopa2_travel_busy"><text>Другое путешествие с отрядом уже выполняется.</text></string>
+	<string id="ui_st_zhopa2_travel_combat"><text>Не сейчас. Ты участвуешь в бою.</text></string>
+	<string id="ui_st_zhopa2_travel_storm"><text>Во время выброса или пси-шторма не пойдём.</text></string>
+	<string id="ui_st_zhopa2_travel_story_psi_locked"><text>Этот маршрут пока для тебя небезопасен.</text></string>
+	<string id="ui_st_zhopa2_travel_reputation"><text>Нет. У тебя слишком плохая репутация.</text></string>
+	<string id="ui_st_zhopa2_travel_goodwill"><text>Нет. Я тебе не доверяю.</text></string>
+	<string id="ui_st_zhopa2_travel_relation_unavailable"><text>Сейчас я не могу это решить.</text></string>
+	<string id="ui_st_zhopa2_travel_distance_unavailable"><text>Отсюда не получается проложить безопасный маршрут.</text></string>
+	<string id="ui_st_zhopa2_travel_failed"><text>Путешествие с отрядом не удалось завершить.</text></string>
 </string_table>

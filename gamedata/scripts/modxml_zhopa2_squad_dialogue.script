@@ -1,0 +1,27 @@
+local DIALOG_ID = "zhopa2_squad_travel_dialog"
+local callback_registered = false
+
+local function inject_dialog(xml_file_name, xml_obj)
+	if xml_file_name ~= [[gameplay\dialogs.xml]] or not xml_obj then
+		return
+	end
+	local existing = xml_obj:query("dialog[id=" .. DIALOG_ID .. "]")
+	if (type(is_not_empty) == "function" and is_not_empty(existing))
+		or (type(existing) == "table" and next(existing) ~= nil)
+	then
+		return
+	end
+	xml_obj:insertFromXMLString([[
+		<dialog id="zhopa2_squad_travel_dialog">
+			<precondition>zhopa2_squad_dialogue.can_open_dialog</precondition>
+			<init_func>zhopa2_squad_dialogue.init_dialog</init_func>
+		</dialog>
+	]])
+end
+
+function on_xml_read()
+	if callback_registered or not RegisterScriptCallback then
+		return
+	end
+	callback_registered = pcall(RegisterScriptCallback, "on_xml_read", inject_dialog) == true
+end

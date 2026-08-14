@@ -1,6 +1,7 @@
 local M = {}
 
 local MODULE_STOP_ORDER = {
+	"zhopa2_squad_dialogue",
 	"zhopa2_economy",
 	"zhopa2_artifacts",
 	"zhopa2_loot",

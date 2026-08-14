@@ -362,6 +362,25 @@ local function is_target_level(level_name)
 	return level_name ~= nil and get_psi_levels()[level_name] == true
 end
 
+function M.actor_travel_block_reason(level_name)
+	if is_story_mode_active() ~= true or has_info("bar_deactivate_radar_done") == true then
+		return nil
+	end
+
+	local community
+	local fn = rawget(_G, "get_actor_true_community")
+	if type(fn) == "function" then
+		local ok, value = pcall(fn)
+		if ok then
+			community = lower_trim(value)
+		end
+	end
+	if community and is_immune_faction(community) then
+		return nil
+	end
+	return is_target_level(level_name) and "story_psi_locked" or nil
+end
+
 local function level_name_by_gvid(gvid)
 	if not (gvid and game_graph and alife) then
 		return nil

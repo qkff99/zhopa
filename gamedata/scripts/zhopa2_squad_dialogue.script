@@ -1,0 +1,1445 @@
+local M = {}
+
+local DIALOG_ID = "zhopa2_squad_travel_dialog"
+local EVENT_ID = "zhopa2_squad_travel"
+local FADE_EFFECT_ID = 61322
+local INVALID_ID = 65535
+local FADE_DELAY_SEC = 3
+local ARRIVAL_SAFETY_RADIUS = 30
+local ARRIVAL_SAFETY_UPDATE_SEC = 1
+local ALIFE_OFFLINE_DISTANCE_FACTOR = 1.1
+local COMBAT_ARRIVAL_MIN_DISTANCE = 20
+local COMBAT_ARRIVAL_MAX_DISTANCE = 30
+local COMBAT_ARRIVAL_DISTANCES = { 25, 30, 28, 22, 20 }
+local STATE_VERSION = 1
+
+local ACTIVITY_KEYS = {
+	REST = "ui_st_zhopa2_activity_rest",
+	EXPLORE = "ui_st_zhopa2_activity_explore",
+	FORCE_EXIT = "ui_st_zhopa2_activity_force_exit",
+	POPULATE = "ui_st_zhopa2_activity_populate",
+	BASE_CAMPING = "ui_st_zhopa2_activity_base_camping",
+	PATROL = "ui_st_zhopa2_activity_patrol",
+	NIGHT_REST = "ui_st_zhopa2_activity_night_rest",
+	ARTEFACT = "ui_st_zhopa2_activity_artefact",
+	TRADE = "ui_st_zhopa2_activity_trade",
+	HUNT = "ui_st_zhopa2_activity_hunt",
+	REVENGE = "ui_st_zhopa2_activity_revenge",
+	STORY_NORTH_MIGRATION = "ui_st_zhopa2_activity_story_north_migration",
+}
+
+local REASON_TEXT = {
+	target_changed = "ui_st_zhopa2_travel_target_changed",
+	travel_busy = "ui_st_zhopa2_travel_busy",
+	combat = "ui_st_zhopa2_travel_combat",
+	storm = "ui_st_zhopa2_travel_storm",
+	story_psi_locked = "ui_st_zhopa2_travel_story_psi_locked",
+	reputation = "ui_st_zhopa2_travel_reputation",
+	goodwill = "ui_st_zhopa2_travel_goodwill",
+	relation = "ui_st_zhopa2_travel_relation_unavailable",
+	distance = "ui_st_zhopa2_travel_distance_unavailable",
+	travel_failed = "ui_st_zhopa2_travel_failed",
+}
+
+local callbacks_registered = false
+local active = false
+local pending_offer = nil
+local active_travel = nil
+local ui_locked = false
+local arrival_safety = nil
+
+local function load_module(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg_bool(key, default)
+	local cfg = load_module("zhopa2_cfg")
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok, value = pcall(cfg.get_bool, key, default)
+		if ok then
+			return value == true
+		end
+	end
+	return default == true
+end
+
+local function cfg_num(key, default)
+	local cfg = load_module("zhopa2_cfg")
+	if cfg and type(cfg.get_num) == "function" then
+		local ok, value = pcall(cfg.get_num, key, default)
+		if ok and tonumber(value) then
+			return tonumber(value)
+		end
+	end
+	return default
+end
+
+local function feature_enabled()
+	return active == true
+		and rawget(_G, "zhopa2_runtime_disabled") ~= true
+		and cfg_bool("enabled", true)
+		and cfg_bool("squad_dialogue_enabled", true)
+end
+
+local function object_id(obj)
+	if obj == nil then
+		return nil
+	end
+	local ok, value = pcall(function()
+		local id = obj.id
+		return type(id) == "function" and id(obj) or id
+	end)
+	value = ok and tonumber(value) or nil
+	return value and value ~= INVALID_ID and value or nil
+end
+
+local function npc_speaker(first_speaker, second_speaker)
+	local actor = db and db.actor or nil
+	local actor_id = object_id(actor)
+	if not actor_id then
+		return nil
+	end
+	local first_id = object_id(first_speaker)
+	if first_id and first_id ~= actor_id then
+		return first_speaker
+	end
+	local second_id = object_id(second_speaker)
+	if second_id and second_id ~= actor_id then
+		return second_speaker
+	end
+	return nil
+end
+
+local function object_alive(obj)
+	if not obj then
+		return false
+	end
+	local ok, value = pcall(function() return obj:alive() end)
+	return ok and value == true
+end
+
+local function object_is_stalker(obj)
+	local fn = rawget(_G, "IsStalker")
+	if type(fn) ~= "function" then
+		return false
+	end
+	local ok, value = pcall(fn, obj)
+	return ok and value == true
+end
+
+local function squad_for_npc(npc)
+	local fn = rawget(_G, "get_object_squad")
+	if type(fn) ~= "function" then
+		return nil
+	end
+	local ok, squad = pcall(fn, npc)
+	return ok and squad or nil
+end
+
+local function squad_commander_id(squad)
+	if not squad then
+		return nil
+	end
+	local ok, id = pcall(function() return squad:commander_id() end)
+	return ok and tonumber(id) or nil
+end
+
+local function companion_squad(squad)
+	local companions = rawget(_G, "axr_companions")
+	local squads = companions and companions.companion_squads or nil
+	local id = object_id(squad)
+	return type(squads) == "table" and id ~= nil and squads[id] ~= nil
+end
+
+local function eligible_context(npc)
+	if not (feature_enabled() and db and db.actor and object_alive(npc) and object_is_stalker(npc)) then
+		return nil
+	end
+	local squad = squad_for_npc(npc)
+	local npc_id = object_id(npc)
+	if not (squad and squad.zhopa2_managed == true and npc_id) then
+		return nil
+	end
+	if squad_commander_id(squad) ~= npc_id or companion_squad(squad) then
+		return nil
+	end
+	return squad
+end
+
+local function normalize_id(value)
+	local id = tonumber(value)
+	if not id or id <= 0 or id == INVALID_ID then
+		return nil
+	end
+	return id
+end
+
+local function alife_sim()
+	local fn = rawget(_G, "alife")
+	if type(fn) ~= "function" then
+		return nil
+	end
+	local ok, sim = pcall(fn)
+	return ok and sim or nil
+end
+
+local function resolve_alife_object(id)
+	id = normalize_id(id)
+	if not id then
+		return nil
+	end
+	local fn = rawget(_G, "alife_object")
+	if type(fn) == "function" then
+		local ok, obj = pcall(fn, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	local sim = alife_sim()
+	if sim and type(sim.object) == "function" then
+		local ok, obj = pcall(sim.object, sim, id)
+		if ok then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function entity_value(obj, field, method)
+	local ok, value = pcall(function()
+		local direct = obj[field]
+		if direct ~= nil and type(direct) ~= "function" then
+			return direct
+		end
+		local fn = obj[method]
+		return type(fn) == "function" and fn(obj) or nil
+	end)
+	return ok and value or nil
+end
+
+local function copy_position(pos)
+	if not pos then
+		return nil
+	end
+	local ok, x, y, z = pcall(function() return pos.x, pos.y, pos.z end)
+	if not (ok and tonumber(x) and tonumber(y) and tonumber(z)) then
+		return nil
+	end
+	if type(vector) == "function" then
+		local made, result = pcall(function() return vector():set(x, y, z) end)
+		if made and result then
+			return result
+		end
+	end
+	return pos
+end
+
+local function level_name_by_gvid(gvid)
+	local sim = alife_sim()
+	local gg = game_graph and game_graph() or nil
+	if not (sim and gg and gvid) then
+		return nil
+	end
+	local ok, name = pcall(function()
+		if type(gg.valid_vertex_id) == "function" and not gg:valid_vertex_id(gvid) then
+			return nil
+		end
+		return sim:level_name(gg:vertex(gvid):level_id())
+	end)
+	return ok and type(name) == "string" and name ~= "" and name or nil
+end
+
+local function entity_class_id(obj)
+	local ok, value = pcall(function() return obj:clsid() end)
+	return ok and value or nil
+end
+
+local function resolve_moving_target(squad, expected_id)
+	if not squad or tonumber(squad.current_action) ~= 0 then
+		return nil, "target_changed"
+	end
+	local target_id = normalize_id(squad.assigned_target_id)
+	if not target_id or (expected_id and target_id ~= tonumber(expected_id)) then
+		return nil, "target_changed"
+	end
+	local squad_id = object_id(squad)
+	local actor_id = object_id(db and db.actor or nil)
+	if target_id == squad_id or target_id == actor_id then
+		return nil, "target_changed"
+	end
+	local obj = resolve_alife_object(target_id)
+	if not obj then
+		return nil, "target_changed"
+	end
+	local pos = copy_position(entity_value(obj, "position", "position"))
+	local lvid = tonumber(entity_value(obj, "m_level_vertex_id", "level_vertex_id"))
+	local gvid = tonumber(entity_value(obj, "m_game_vertex_id", "game_vertex_id"))
+	local level_name = level_name_by_gvid(gvid)
+	if not (pos and lvid and lvid >= 0 and gvid and gvid >= 0 and level_name) then
+		return nil, "target_changed"
+	end
+	local class_id = entity_class_id(obj)
+	return {
+		id = target_id,
+		object = obj,
+		position = pos,
+		level_vertex_id = lvid,
+		game_vertex_id = gvid,
+		level_name = level_name,
+		is_smart = rawget(_G, "clsid") and class_id == clsid.smart_terrain or false,
+	}
+end
+
+local function translated(key)
+	if type(key) ~= "string" or key == "" or not (game and type(game.translate_string) == "function") then
+		return nil
+	end
+	local ok, value = pcall(game.translate_string, key)
+	value = ok and value and tostring(value) or nil
+	local lower = value and string.lower(value) or ""
+	if not value or value == "" or value == key or string.find(lower, "invalid string", 1, true) then
+		return nil
+	end
+	return value
+end
+
+local function translated_format(key, ...)
+	local fmt = translated(key)
+	if not fmt then
+		return "..."
+	end
+	local ok, value = pcall(string.format, fmt, ...)
+	return ok and value or fmt
+end
+
+local function smart_raw_name(obj)
+	local ok, value = pcall(function() return obj:name() end)
+	return ok and type(value) == "string" and value ~= "" and value or nil
+end
+
+local function safe_display_name(value, raw_name)
+	if type(value) ~= "string" or value == "" or value == raw_name then
+		return nil
+	end
+	local lower = string.lower(value)
+	if string.find(lower, "invalid string", 1, true)
+		or string.match(value, "^st_[%w_]+$")
+		or string.match(value, "^[a-z][a-z%d_]*_[a-z%d_]+$")
+	then
+		return nil
+	end
+	return value
+end
+
+local function smart_display_name(target)
+	if not (target and target.is_smart) then
+		return nil
+	end
+	local raw_name = smart_raw_name(target.object)
+	if not raw_name then
+		return nil
+	end
+	local smart_mod = rawget(_G, "smart_terrain")
+	if smart_mod and type(smart_mod.get_smart_terrain_name) == "function" then
+		local ok, name = pcall(smart_mod.get_smart_terrain_name, target.object)
+		name = ok and safe_display_name(name, raw_name) or nil
+		if name then
+			return name
+		end
+	end
+	return safe_display_name(translated(raw_name), raw_name)
+		or safe_display_name(translated("st_" .. raw_name .. "_name"), raw_name)
+end
+
+local function destination_text(target)
+	local smart_name = smart_display_name(target)
+	local level_name = target and translated(target.level_name) or nil
+	if smart_name and level_name then
+		return translated_format("ui_st_zhopa2_dialog_destination_smart_fmt", level_name, smart_name)
+	end
+	if smart_name then
+		return translated_format("ui_st_zhopa2_dialog_destination_named_fmt", smart_name)
+	end
+	if level_name then
+		return translated_format("ui_st_zhopa2_dialog_destination_level_fmt", level_name)
+	end
+	return translated("ui_st_zhopa2_dialog_destination_generic") or "..."
+end
+
+local function activity_name(task)
+	return translated(ACTIVITY_KEYS[tostring(task or "")])
+		or translated("ui_st_zhopa2_activity_unknown")
+		or "..."
+end
+
+function M.activity_text(first_speaker, second_speaker)
+	local npc = npc_speaker(first_speaker, second_speaker)
+	local squad = eligible_context(npc)
+	if not squad then
+		return "..."
+	end
+	local lines = {}
+	if squad.zhopa2_previous_task ~= nil then
+		lines[#lines + 1] = translated_format("ui_st_zhopa2_dialog_previous_fmt", activity_name(squad.zhopa2_previous_task))
+	end
+	lines[#lines + 1] = translated_format("ui_st_zhopa2_dialog_current_fmt", activity_name(squad.zhopa2_task))
+	local target = resolve_moving_target(squad)
+	if target then
+		lines[#lines + 1] = destination_text(target)
+	end
+	return table.concat(lines, " ")
+end
+
+function M.can_ask_activity(first_speaker, second_speaker)
+	return eligible_context(npc_speaker(first_speaker, second_speaker)) ~= nil
+end
+
+function M.can_offer_travel(first_speaker, second_speaker)
+	local npc = npc_speaker(first_speaker, second_speaker)
+	local squad = eligible_context(npc)
+	local offer = pending_offer
+	if not (offer and squad and object_id(npc) == offer.commander_id and object_id(squad) == offer.squad_id) then
+		return false
+	end
+	return resolve_moving_target(squad, offer.target_id) ~= nil
+end
+
+function M.prepare_offer(first_speaker, second_speaker)
+	pending_offer = nil
+	local npc = npc_speaker(first_speaker, second_speaker)
+	local squad = eligible_context(npc)
+	local target = squad and resolve_moving_target(squad) or nil
+	if not target then
+		return false
+	end
+	pending_offer = {
+		commander_id = object_id(npc),
+		squad_id = object_id(squad),
+		target_id = target.id,
+	}
+	return true
+end
+
+function M.clear_offer()
+	pending_offer = nil
+	return true
+end
+
+local function actor_in_combat()
+	local combat = rawget(_G, "xr_combat_ignore")
+	local fighting = combat and combat.fighting_with_actor_npcs or nil
+	local actor = db and db.actor or nil
+	if not (actor and type(fighting) == "table") then
+		return false
+	end
+	for raw_id in pairs(fighting) do
+		local id = tonumber(raw_id)
+		local storage = id and db.storage and db.storage[id] or nil
+		local enemy = storage and storage.object or nil
+		if not enemy and id and level and type(level.object_by_id) == "function" then
+			local ok, object = pcall(level.object_by_id, id)
+			enemy = ok and object or nil
+		end
+		if object_alive(enemy) then
+			local ok, active = pcall(function()
+				local best = type(enemy.best_enemy) == "function" and enemy:best_enemy() or nil
+				return object_id(best) == object_id(actor)
+					or (type(enemy.see) == "function" and enemy:see(actor) == true)
+			end)
+			if ok and active then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function storm_started()
+	local conditions = rawget(_G, "xr_conditions")
+	if conditions and type(conditions.surge_started) == "function" then
+		local ok, value = pcall(conditions.surge_started)
+		if ok and value == true then
+			return true
+		end
+	end
+	for _, name in ipairs({ "surge_manager", "psi_storm_manager" }) do
+		local manager = rawget(_G, name)
+		if manager and type(manager.is_started) == "function" then
+			local ok, value = pcall(manager.is_started)
+			if ok and value == true then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function story_travel_reason(level_name)
+	local watchdog = load_module("zhopa2_story_psy_watchdog")
+	if not (watchdog and type(watchdog.actor_travel_block_reason) == "function") then
+		return "travel_failed"
+	end
+	local ok, reason = pcall(watchdog.actor_travel_block_reason, level_name)
+	if not ok then
+		return "travel_failed"
+	end
+	if reason == nil or reason == "story_psi_locked" then
+		return reason
+	end
+	return "travel_failed"
+end
+
+local function relation_reason(npc)
+	local actor = db and db.actor or nil
+	if not (actor and npc) then
+		return "relation"
+	end
+	local ok_rep, reputation = pcall(function() return actor:character_reputation() end)
+	if not (ok_rep and tonumber(reputation)) then
+		return "relation"
+	end
+	if tonumber(reputation) < 0 then
+		return "reputation"
+	end
+	local ok_goodwill, goodwill = pcall(function() return npc:goodwill(actor) end)
+	if not (ok_goodwill and tonumber(goodwill)) then
+		return "relation"
+	end
+	return tonumber(goodwill) < -100 and "goodwill" or nil
+end
+
+local function global_distance(target)
+	local sim = alife_sim()
+	local actor = sim and type(sim.actor) == "function" and sim:actor() or nil
+	local gp = rawget(_G, "global_position")
+	local war = rawget(_G, "warfare")
+	if not (actor and target and gp and type(gp.from) == "function" and war and type(war.distance_to_xz_sqr) == "function") then
+		return nil
+	end
+	local ok, distance = pcall(function()
+		local sqr = war.distance_to_xz_sqr(gp.from(actor), gp.from(target.object))
+		if type(sqr) ~= "number" or sqr < 0 or sqr ~= sqr or sqr == math.huge then
+			return nil
+		end
+		return math.sqrt(sqr)
+	end)
+	return ok and tonumber(distance) or nil
+end
+
+local function evaluate_offer(npc, allow_active_travel)
+	local offer = allow_active_travel and active_travel or pending_offer
+	local squad = eligible_context(npc)
+	if not (offer and squad) then
+		return "target_changed"
+	end
+	if not allow_active_travel and active_travel ~= nil then
+		return "travel_busy"
+	end
+	if object_id(npc) ~= offer.commander_id or object_id(squad) ~= offer.squad_id then
+		return "target_changed"
+	end
+	local target, target_reason = resolve_moving_target(squad, offer.target_id)
+	if not target then
+		return target_reason or "target_changed"
+	end
+	if actor_in_combat() then
+		return "combat"
+	end
+	if storm_started() then
+		return "storm"
+	end
+	local story_reason = story_travel_reason(target.level_name)
+	if story_reason then
+		return story_reason
+	end
+	local rel_reason = relation_reason(npc)
+	if rel_reason then
+		return rel_reason
+	end
+	local distance = global_distance(target)
+	if distance == nil then
+		return "distance"
+	end
+	return nil, squad, target, distance
+end
+
+local function offer_reason_is(first_speaker, second_speaker, expected)
+	return pending_offer ~= nil and pending_offer.reason == expected
+end
+
+function M.offer_target_changed(a, b) return offer_reason_is(a, b, "target_changed") end
+function M.offer_travel_busy(a, b) return offer_reason_is(a, b, "travel_busy") end
+function M.offer_combat(a, b) return offer_reason_is(a, b, "combat") end
+function M.offer_storm(a, b) return offer_reason_is(a, b, "storm") end
+function M.offer_story_psi_locked(a, b) return offer_reason_is(a, b, "story_psi_locked") end
+function M.offer_reputation(a, b) return offer_reason_is(a, b, "reputation") end
+function M.offer_goodwill(a, b) return offer_reason_is(a, b, "goodwill") end
+function M.offer_relation_unavailable(a, b) return offer_reason_is(a, b, "relation") end
+function M.offer_distance_unavailable(a, b) return offer_reason_is(a, b, "distance") end
+function M.offer_travel_failed(a, b) return offer_reason_is(a, b, "travel_failed") end
+
+function M.check_offer(first_speaker, second_speaker)
+	if not pending_offer then
+		return false
+	end
+	pending_offer.reason = evaluate_offer(npc_speaker(first_speaker, second_speaker), false)
+	return true
+end
+
+function M.offer_accepted(first_speaker, second_speaker)
+	return pending_offer ~= nil and pending_offer.reason == nil
+end
+
+local function notify_reason(reason)
+	local actor = db and db.actor or nil
+	local manager = rawget(_G, "news_manager")
+	local key = REASON_TEXT[reason] or REASON_TEXT.travel_failed
+	if not (actor and manager and type(manager.send_tip) == "function") then
+		return
+	end
+	pcall(manager.send_tip, actor, translated(key) or key, nil, "swiss_knife", 10000)
+end
+
+local function scenario_autosave(actor, npc)
+	local effects = rawget(_G, "xr_effects")
+	if not (effects and type(effects.scenario_autosave) == "function") then
+		return false
+	end
+	return pcall(effects.scenario_autosave, actor, npc, { "st_save_uni_travel_generic" })
+end
+
+local function stop_dialog(actor, npc)
+	if npc then
+		pcall(function() npc:stop_talk() end)
+	end
+	if actor then
+		pcall(function() actor:stop_talk() end)
+	end
+end
+
+local function mark_time_forwarded()
+	for _, name in ipairs({ "surge_manager", "psi_storm_manager" }) do
+		local manager_mod = rawget(_G, name)
+		if manager_mod and type(manager_mod["get_" .. string.gsub(name, "_manager$", "") .. "_manager"]) == "function" then
+			local getter = manager_mod["get_" .. string.gsub(name, "_manager$", "") .. "_manager"]
+			local ok, manager = pcall(getter)
+			if ok and manager then
+				pcall(function() manager.time_forwarded = true end)
+			end
+		end
+	end
+	local weather = rawget(_G, "level_weathers")
+	if weather and type(weather.get_weather_manager) == "function" then
+		local ok, manager = pcall(weather.get_weather_manager)
+		if ok and manager and type(manager.forced_weather_change) == "function" then
+			pcall(manager.forced_weather_change, manager)
+		end
+	end
+end
+
+local function advance_world_time(distance)
+	local lvl = rawget(_G, "level")
+	if not (lvl and type(lvl.change_game_time) == "function") then
+		return false
+	end
+	local minutes_per_100m = math.max(0, tonumber(cfg_num("squad_travel_minutes_per_100m", 10)) or 10)
+	local total_minutes = math.floor(math.max(0, tonumber(distance) or 0) / 100 * minutes_per_100m)
+	local days = math.floor(total_minutes / 1440)
+	local hours = math.floor((total_minutes % 1440) / 60)
+	local minutes = total_minutes % 60
+	local ok = pcall(lvl.change_game_time, days, hours, minutes)
+	if not ok then
+		return false
+	end
+	mark_time_forwarded()
+	return true
+end
+
+local function bring_companions(position, lvid, gvid, excluded_squad_id)
+	local companions = rawget(_G, "axr_companions")
+	local task_manager = rawget(_G, "axr_task_manager")
+	local hostages = task_manager and task_manager.hostages_by_id or nil
+	local squads = companions and companions.companion_squads or nil
+	if not (type(squads) == "table" and type(companions.companion_squad_can_teleport) == "function" and type(TeleportSquad) == "function") then
+		return
+	end
+	for id, stored in pairs(squads) do
+		local squad = (type(stored) == "table" or type(stored) == "userdata") and stored or resolve_alife_object(id)
+		local commander_id = squad and squad_commander_id(squad) or nil
+		if squad and object_id(squad) ~= excluded_squad_id and not (type(hostages) == "table" and hostages[commander_id]) then
+			local ok, allowed = pcall(companions.companion_squad_can_teleport, squad)
+			if ok and allowed == true then
+				pcall(TeleportSquad, squad, position, lvid, gvid)
+			end
+		end
+	end
+end
+
+local function restore_ui(cancel_events)
+	if cancel_events and type(RemoveTimeEvent) == "function" then
+		pcall(RemoveTimeEvent, EVENT_ID, "execute_same")
+		pcall(RemoveTimeEvent, EVENT_ID, "execute_cross")
+		pcall(RemoveTimeEvent, EVENT_ID, "restore")
+	end
+	local lvl = rawget(_G, "level")
+	if lvl and type(lvl.remove_pp_effector) == "function" then
+		pcall(lvl.remove_pp_effector, FADE_EFFECT_ID)
+	end
+	if not ui_locked then
+		return
+	end
+	ui_locked = false
+	if lvl then
+		if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, true) end
+		if type(lvl.enable_input) == "function" then pcall(lvl.enable_input) end
+		if type(lvl.show_indicators) == "function" then pcall(lvl.show_indicators) end
+	end
+end
+
+local function lock_ui_for_fade()
+	local lvl = rawget(_G, "level")
+	if not lvl then
+		return false
+	end
+	ui_locked = true
+	if type(lvl.disable_input) == "function" then pcall(lvl.disable_input) end
+	if type(lvl.hide_indicators_safe) == "function" then pcall(lvl.hide_indicators_safe) end
+	if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, false) end
+	if type(lvl.add_pp_effector) == "function" then pcall(lvl.add_pp_effector, "fade_in_out.ppe", FADE_EFFECT_ID, false) end
+	return true
+end
+
+local function unlock_ui_for_level_change()
+	if not ui_locked then
+		return
+	end
+	ui_locked = false
+	local lvl = rawget(_G, "level")
+	if lvl then
+		if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, true) end
+		if type(lvl.enable_input) == "function" then pcall(lvl.enable_input) end
+		if type(lvl.show_indicators) == "function" then pcall(lvl.show_indicators) end
+	end
+end
+
+local function find_online_object(id)
+	local storage = db and db.storage and db.storage[id] or nil
+	if storage and storage.object then
+		return storage.object
+	end
+	local lvl = rawget(_G, "level")
+	if lvl and type(lvl.object_by_id) == "function" then
+		local ok, obj = pcall(lvl.object_by_id, id)
+		if ok then
+			return obj
+		end
+	end
+	return nil
+end
+
+local function position_distance_sqr(a, b)
+	if not (a and b) then
+		return nil
+	end
+	local ok, ax, ay, az, bx, by, bz = pcall(function()
+		return a.x, a.y, a.z, b.x, b.y, b.z
+	end)
+	if not (ok and tonumber(ax) and tonumber(ay) and tonumber(az)
+		and tonumber(bx) and tonumber(by) and tonumber(bz))
+	then
+		return nil
+	end
+	local dx, dy, dz = ax - bx, ay - by, az - bz
+	return dx * dx + dy * dy + dz * dz
+end
+
+local function direct_combat_target_id(squad, target)
+	local task = squad and squad.zhopa2_task or nil
+	local target_id = target and normalize_id(target.id) or nil
+	if (task ~= "HUNT" and task ~= "REVENGE")
+		or not target_id
+		or normalize_id(squad.zhopa2_target) ~= target_id
+	then
+		return nil
+	end
+	local board_squads = SIMBOARD and SIMBOARD.squads or nil
+	if type(board_squads) == "table" and board_squads[target_id] ~= nil then
+		return target_id
+	end
+	local ok, is_squad = pcall(function() return type(target.object.squad_members) == "function" end)
+	return ok and is_squad and target_id or nil
+end
+
+local function travel_arrival(squad, target)
+	local protected_target_id = direct_combat_target_id(squad, target)
+	if not protected_target_id then
+		return target, nil
+	end
+	local lvl = rawget(_G, "level")
+	local actor = db and db.actor or nil
+	if not (lvl and actor and target and target.position and type(vector) == "function"
+		and type(lvl.name) == "function" and type(lvl.vertex_in_direction) == "function"
+		and type(lvl.vertex_position) == "function")
+	then
+		return nil, protected_target_id
+	end
+	local level_ok, level_name = pcall(lvl.name)
+	if not (level_ok and level_name == target.level_name) then
+		return nil, protected_target_id
+	end
+	local origin = copy_position(entity_value(actor, "position", "position"))
+		or copy_position(entity_value(squad, "position", "position"))
+	local ok, dx, dz = pcall(function()
+		return origin.x - target.position.x, origin.z - target.position.z
+	end)
+	if not (ok and tonumber(dx) and tonumber(dz) and dx * dx + dz * dz > 0.01) then
+		return nil, protected_target_id
+	end
+	local dir_ok, direction = pcall(function() return vector():set(dx, 0, dz) end)
+	if not (dir_ok and direction) then
+		return nil, protected_target_id
+	end
+	for _, distance in ipairs(COMBAT_ARRIVAL_DISTANCES) do
+		local vertex_ok, lvid = pcall(lvl.vertex_in_direction, target.level_vertex_id, direction, distance)
+		lvid = vertex_ok and tonumber(lvid) or nil
+		if lvid and lvid >= 0 and lvid < 4294967295 then
+			local position_ok, position = pcall(lvl.vertex_position, lvid)
+			position = position_ok and copy_position(position) or nil
+			local distance_ok, actual_distance = pcall(function()
+				local x = position.x - target.position.x
+				local z = position.z - target.position.z
+				return math.sqrt(x * x + z * z)
+			end)
+			if distance_ok and actual_distance >= COMBAT_ARRIVAL_MIN_DISTANCE and actual_distance <= COMBAT_ARRIVAL_MAX_DISTANCE then
+				return {
+					position = position,
+					level_vertex_id = lvid,
+					game_vertex_id = target.game_vertex_id,
+					level_name = target.level_name,
+				}, protected_target_id
+			end
+		end
+	end
+	return nil, protected_target_id
+end
+
+local function squad_members(squad)
+	local members = {}
+	if not (squad and type(squad.squad_members) == "function") then
+		return members
+	end
+	pcall(function()
+		for member in squad:squad_members() do
+			local obj = member and member.object or nil
+			local id = member and normalize_id(member.id) or nil
+			obj = obj or (id and resolve_alife_object(id)) or nil
+			if obj then
+				members[#members + 1] = obj
+			end
+		end
+	end)
+	return members
+end
+
+local function entity_near_destination(obj, target, radius_sqr)
+	local position = copy_position(entity_value(obj, "position", "position"))
+	local gvid = tonumber(entity_value(obj, "m_game_vertex_id", "game_vertex_id"))
+	return position ~= nil
+		and level_name_by_gvid(gvid) == target.level_name
+		and (position_distance_sqr(position, target.position) or math.huge) <= radius_sqr
+end
+
+local function squad_near_destination(squad, target, radius_sqr)
+	if entity_near_destination(squad, target, radius_sqr) then
+		return true
+	end
+	for _, member in ipairs(squad_members(squad)) do
+		if entity_near_destination(member, target, radius_sqr) then
+			return true
+		end
+	end
+	return false
+end
+
+local function monster_squad(squad)
+	local perception = load_module("zhopa2_perception")
+	if perception and type(perception.is_monster_squad) == "function" then
+		local ok, value = pcall(perception.is_monster_squad, squad)
+		if ok then
+			return value == true
+		end
+	end
+	local player_id = squad and squad.player_id or nil
+	return player_id ~= nil and (
+		player_id == "monster"
+		or player_id == "monster_predatory"
+		or player_id == "monster_predatory_day"
+		or player_id == "monster_predatory_night"
+		or player_id == "monster_vegetarian"
+		or player_id == "monster_zombied"
+		or player_id == "monster_zombied_day"
+		or player_id == "monster_zombied_night"
+		or player_id == "monster_special"
+		or player_id == "zoo_monster"
+		or player_id == "zombied"
+		or (is_squad_monster and is_squad_monster[player_id] == true)
+	)
+end
+
+local function online_member_is_actor_enemy(member, actor)
+	local obj = find_online_object(object_id(member))
+	if not (obj and actor) then
+		return false
+	end
+	if rawget(_G, "game_object") and game_object.enemy ~= nil and type(obj.relation) == "function" then
+		local ok, relation = pcall(obj.relation, obj, actor)
+		if ok and relation == game_object.enemy then
+			return true
+		end
+	end
+	if type(obj.general_goodwill) == "function" then
+		local ok, goodwill = pcall(obj.general_goodwill, obj, actor)
+		local enemy_limit = rawget(_G, "game_relations") and tonumber(game_relations.ENEMIES) or -1000
+		if ok and tonumber(goodwill) and tonumber(goodwill) <= enemy_limit then
+			return true
+		end
+	end
+	return false
+end
+
+local function squad_is_actor_threat(squad)
+	if monster_squad(squad) then
+		return true
+	end
+	if not squad or squad.player_id == "actor" then
+		return false
+	end
+	local actor = db and db.actor or nil
+	for _, member in ipairs(squad_members(squad)) do
+		if online_member_is_actor_enemy(member, actor) then
+			return true
+		end
+	end
+	if type(squad.get_squad_relation) == "function" then
+		local ok, relation = pcall(squad.get_squad_relation, squad)
+		if ok and (relation == "enemy" or relation == "monster") then
+			return true
+		elseif ok and (relation == "neutral" or relation == "friends" or relation == "friend") then
+			return false
+		end
+	end
+	local relations = rawget(_G, "game_relations")
+	local true_community = rawget(_G, "get_actor_true_community")
+	if relations and type(relations.is_factions_enemies) == "function" and type(true_community) == "function" then
+		local ok, actor_community = pcall(true_community)
+		local hostile_ok, hostile = pcall(relations.is_factions_enemies, squad.player_id, ok and actor_community or nil)
+		return hostile_ok and hostile == true
+	end
+	return false
+end
+
+local function restore_arrival_safety()
+	local state = arrival_safety
+	arrival_safety = nil
+	if not (state and type(state.ids) == "table") then
+		return
+	end
+	local sim = alife_sim()
+	if not sim then
+		return
+	end
+	for id in pairs(state.ids) do
+		id = normalize_id(id)
+		if id and resolve_alife_object(id) then
+			pcall(sim.set_switch_online, sim, id, true)
+			pcall(sim.set_switch_offline, sim, id, true)
+		end
+	end
+end
+
+local function force_squad_offline(sim, squad)
+	local id = object_id(squad)
+	if not (sim and id and type(squad.can_switch_online) == "function" and type(squad.can_switch_offline) == "function") then
+		return false
+	end
+	local online_ok, can_online = pcall(squad.can_switch_online, squad)
+	local offline_ok, can_offline = pcall(squad.can_switch_offline, squad)
+	if not (online_ok and can_online == true and offline_ok and can_offline == true) then
+		return false
+	end
+	local flags_ok = pcall(function()
+		sim:set_switch_online(id, false)
+		sim:set_switch_offline(id, true)
+	end)
+	if not flags_ok then
+		pcall(sim.set_switch_online, sim, id, true)
+		pcall(sim.set_switch_offline, sim, id, true)
+		return false
+	end
+	local online = entity_value(squad, "online", "online")
+	if online == true then
+		local switched = type(squad.switch_offline) == "function" and pcall(squad.switch_offline, squad)
+		if not switched then
+			pcall(sim.set_switch_online, sim, id, true)
+			pcall(sim.set_switch_offline, sim, id, true)
+			return false
+		end
+	end
+	return true
+end
+
+local function arrival_release_distance(sim)
+	local ok, distance = pcall(function() return sim:switch_distance() end)
+	distance = ok and tonumber(distance) or nil
+	return distance and distance > 0 and distance * ALIFE_OFFLINE_DISTANCE_FACTOR or nil
+end
+
+local function suppress_arrival_threats(target, excluded_squad_id, wait_for_level, protected_squad_id)
+	restore_arrival_safety()
+	local protected_id = normalize_id(protected_squad_id)
+	local sim = alife_sim()
+	local board_squads = SIMBOARD and SIMBOARD.squads or nil
+	local release_distance = sim and arrival_release_distance(sim) or nil
+	if not (target and target.position and target.level_name and sim and type(board_squads) == "table" and release_distance) then
+		return 0
+	end
+	local state = {
+		version = STATE_VERSION,
+		level_name = target.level_name,
+		x = tonumber(target.position.x),
+		y = tonumber(target.position.y),
+		z = tonumber(target.position.z),
+		release_distance = release_distance,
+		visited = wait_for_level ~= true,
+		ids = {},
+	}
+	if not (state.x and state.y and state.z) then
+		return 0
+	end
+	local count = 0
+	local radius_sqr = ARRIVAL_SAFETY_RADIUS * ARRIVAL_SAFETY_RADIUS
+	arrival_safety = state
+	for squad_id in pairs(board_squads) do
+		squad_id = normalize_id(squad_id)
+		local squad = squad_id and squad_id ~= excluded_squad_id and squad_id ~= protected_id and resolve_alife_object(squad_id) or nil
+		if squad and squad_is_actor_threat(squad) and squad_near_destination(squad, target, radius_sqr)
+			and force_squad_offline(sim, squad)
+		then
+			state.ids[squad_id] = true
+			count = count + 1
+		end
+	end
+	arrival_safety = count > 0 and state or nil
+	return count
+end
+
+local function current_level_name()
+	local lvl = rawget(_G, "level")
+	if not (lvl and type(lvl.name) == "function") then
+		return nil
+	end
+	local ok, name = pcall(lvl.name)
+	return ok and name or nil
+end
+
+local function update_arrival_safety()
+	local state = arrival_safety
+	if not state then
+		return
+	end
+	if not feature_enabled() then
+		restore_arrival_safety()
+		return
+	end
+	local actor = db and db.actor or nil
+	local level_name = current_level_name()
+	if not (actor and level_name) then
+		return
+	end
+	if level_name ~= state.level_name then
+		if state.visited == true then
+			restore_arrival_safety()
+		end
+		return
+	end
+	if state.visited ~= true then
+		state.visited = true
+		return
+	end
+	local sim = alife_sim()
+	local current_release_distance = sim and arrival_release_distance(sim) or nil
+	if current_release_distance then
+		state.release_distance = current_release_distance
+	end
+	local ok, actor_position = pcall(actor.position, actor)
+	local center = { x = state.x, y = state.y, z = state.z }
+	local distance_sqr = ok and position_distance_sqr(actor_position, center) or nil
+	if distance_sqr and distance_sqr > state.release_distance * state.release_distance then
+		restore_arrival_safety()
+	end
+end
+
+local function arrival_safety_tick()
+	update_arrival_safety()
+	if not arrival_safety then
+		return true
+	end
+	if type(ResetTimeEvent) == "function" then
+		local ok = pcall(ResetTimeEvent, EVENT_ID, "arrival_safety", ARRIVAL_SAFETY_UPDATE_SEC)
+		if ok then
+			return false
+		end
+	end
+	restore_arrival_safety()
+	return true
+end
+
+local function schedule_arrival_safety_tick()
+	if not arrival_safety then
+		return true
+	end
+	if type(CreateTimeEvent) ~= "function" then
+		restore_arrival_safety()
+		return false
+	end
+	if type(RemoveTimeEvent) == "function" then
+		pcall(RemoveTimeEvent, EVENT_ID, "arrival_safety")
+	end
+	local ok = pcall(CreateTimeEvent, EVENT_ID, "arrival_safety", ARRIVAL_SAFETY_UPDATE_SEC, arrival_safety_tick)
+	if not ok then
+		restore_arrival_safety()
+	end
+	return ok == true
+end
+
+local function save_state(m_data)
+	if type(m_data) == "table" then
+		m_data.zhopa2_arrival_safety = arrival_safety
+	end
+end
+
+local function load_state(m_data)
+	arrival_safety = nil
+	local state = type(m_data) == "table" and m_data.zhopa2_arrival_safety or nil
+	if not (type(state) == "table" and type(state.ids) == "table" and type(state.level_name) == "string"
+		and tonumber(state.x) and tonumber(state.y) and tonumber(state.z)
+		and tonumber(state.release_distance) and tonumber(state.release_distance) > 0)
+	then
+		return
+	end
+	arrival_safety = {
+		version = tonumber(state.version) or STATE_VERSION,
+		level_name = state.level_name,
+		x = tonumber(state.x),
+		y = tonumber(state.y),
+		z = tonumber(state.z),
+		release_distance = tonumber(state.release_distance),
+		visited = state.visited == true,
+		ids = {},
+	}
+	local sim = alife_sim()
+	for raw_id in pairs(state.ids) do
+		local id = normalize_id(raw_id)
+		if id and resolve_alife_object(id) then
+			arrival_safety.ids[id] = true
+			if sim then
+				pcall(sim.set_switch_online, sim, id, false)
+				pcall(sim.set_switch_offline, sim, id, true)
+			end
+		end
+	end
+	if next(arrival_safety.ids) == nil then
+		arrival_safety = nil
+	elseif not feature_enabled() then
+		restore_arrival_safety()
+	else
+		schedule_arrival_safety_tick()
+	end
+end
+
+M._suppress_arrival_threats = suppress_arrival_threats
+M._update_arrival_safety = update_arrival_safety
+M._travel_arrival = travel_arrival
+
+local function restore_after_travel()
+	active_travel = nil
+	pending_offer = nil
+	restore_ui(false)
+	return true
+end
+
+local function perform_same_level_travel()
+	local travel = active_travel
+	local npc = travel and find_online_object(travel.commander_id) or nil
+	local reason, squad, target, distance = evaluate_offer(npc, true)
+	if reason or not (travel and target and target.level_name == travel.level_name) then
+		active_travel = nil
+		pending_offer = nil
+		restore_ui(false)
+		notify_reason(reason or "target_changed")
+		return true
+	end
+	pending_offer = nil
+	local ok = pcall(function()
+		local arrival, protected_target_id = travel_arrival(squad, target)
+		if not arrival then error("combat_arrival_missing") end
+		if not advance_world_time(distance) then error("time_advance_failed") end
+		local suppressed = suppress_arrival_threats(arrival, object_id(squad), false, protected_target_id)
+		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+		if type(TeleportSquad) ~= "function" then error("teleport_squad_missing") end
+		TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id)
+		local actor = db and db.actor or nil
+		if not actor then error("actor_missing") end
+		actor:set_actor_position(arrival.position)
+		bring_companions(arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, object_id(squad))
+	end)
+	if not ok then
+		active_travel = nil
+		restore_arrival_safety()
+		restore_ui(false)
+		notify_reason("travel_failed")
+		return true
+	end
+	if type(CreateTimeEvent) == "function" then
+		local scheduled = pcall(CreateTimeEvent, EVENT_ID, "restore", FADE_DELAY_SEC, restore_after_travel)
+		if scheduled then
+			return true
+		end
+	end
+	restore_after_travel()
+	return true
+end
+
+local function start_same_level_travel(npc, squad, target)
+	if not lock_ui_for_fade() then
+		return false
+	end
+	active_travel = {
+		commander_id = object_id(npc),
+		squad_id = object_id(squad),
+		target_id = target.id,
+		level_name = target.level_name,
+	}
+	if type(CreateTimeEvent) == "function" then
+		local ok = pcall(CreateTimeEvent, EVENT_ID, "execute_same", FADE_DELAY_SEC, perform_same_level_travel)
+		if ok then
+			return true
+		end
+	end
+	return perform_same_level_travel()
+end
+
+local function perform_cross_level_travel()
+	local travel = active_travel
+	local npc = travel and find_online_object(travel.commander_id) or nil
+	local reason, squad, target, distance = evaluate_offer(npc, true)
+	if reason or not (travel and target and target.level_name == travel.level_name) then
+		active_travel = nil
+		pending_offer = nil
+		restore_ui(false)
+		notify_reason(reason or "target_changed")
+		return true
+	end
+	pending_offer = nil
+	local ok = pcall(function()
+		local arrival, protected_target_id = travel_arrival(squad, target)
+		if not arrival then error("combat_arrival_missing") end
+		if not advance_world_time(distance) then error("time_advance_failed") end
+		local suppressed = suppress_arrival_threats(arrival, object_id(squad), true, protected_target_id)
+		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+		if type(TeleportSquad) ~= "function" then error("teleport_squad_missing") end
+		TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id)
+		if type(ChangeLevel) ~= "function" then error("change_level_missing") end
+		active_travel = nil
+		unlock_ui_for_level_change()
+		ChangeLevel(arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, VEC_ZERO, true)
+	end)
+	if not ok then
+		active_travel = nil
+		restore_arrival_safety()
+		restore_ui(false)
+		notify_reason("travel_failed")
+	end
+	return true
+end
+
+local function start_cross_level_travel(npc, squad, target)
+	if not lock_ui_for_fade() then
+		return false
+	end
+	active_travel = {
+		commander_id = object_id(npc),
+		squad_id = object_id(squad),
+		target_id = target.id,
+		level_name = target.level_name,
+	}
+	if type(CreateTimeEvent) == "function" then
+		local ok = pcall(CreateTimeEvent, EVENT_ID, "execute_cross", FADE_DELAY_SEC, perform_cross_level_travel)
+		if ok then
+			return true
+		end
+	end
+	return perform_cross_level_travel()
+end
+
+function M.travel_ready(first_speaker, second_speaker)
+	local npc = npc_speaker(first_speaker, second_speaker)
+	local reason, squad, target, distance = evaluate_offer(npc, false)
+	if reason then
+		pending_offer = nil
+		notify_reason(reason)
+		return false
+	end
+	local actor = db and db.actor or nil
+	if not scenario_autosave(actor, npc) then
+		pending_offer = nil
+		notify_reason("travel_failed")
+		return false
+	end
+	stop_dialog(actor, npc)
+	local current_level
+	if level and type(level.name) == "function" then
+		local ok, value = pcall(level.name)
+		current_level = ok and value or nil
+	end
+	local started
+	if current_level == target.level_name then
+		started = start_same_level_travel(npc, squad, target)
+	else
+		started = start_cross_level_travel(npc, squad, target)
+	end
+	if started ~= true then
+		active_travel = nil
+		pending_offer = nil
+		restore_ui(false)
+		notify_reason("travel_failed")
+	end
+	return started == true
+end
+
+local function add_phrase(dialog, parent_id, id, text, precondition, action, script_text)
+	local ok, phrase = pcall(dialog.AddPhrase, dialog, text, tostring(id), tostring(parent_id), -10000)
+	if not (ok and phrase) then
+		return nil
+	end
+	local script_ok, script = pcall(function() return phrase:GetPhraseScript() end)
+	if not script_ok then
+		return phrase
+	end
+	if script then
+		if precondition then script:AddPrecondition(precondition) end
+		if action then script:AddAction(action) end
+		if script_text then script:SetScriptText(script_text) end
+	end
+	return phrase
+end
+
+local function add_refusal(dialog, id, text, condition)
+	add_phrase(dialog, "zhopa2_travel_q", id, text, condition)
+	add_phrase(dialog, id, id .. "_ok", "ui_st_zhopa2_dialog_understood", nil, "zhopa2_squad_dialogue.clear_offer")
+end
+
+function M.init_dialog(dialog)
+	add_phrase(dialog, "", "0", "ui_st_zhopa2_dialog_activity_question", nil, "zhopa2_squad_dialogue.clear_offer")
+	add_phrase(dialog, "0", "zhopa2_activity_a", "ui_st_zhopa2_dialog_placeholder", nil, "zhopa2_squad_dialogue.prepare_offer", "zhopa2_squad_dialogue.activity_text")
+	add_phrase(dialog, "zhopa2_activity_a", "zhopa2_travel_q", "ui_st_zhopa2_dialog_travel_question", "zhopa2_squad_dialogue.can_offer_travel", "zhopa2_squad_dialogue.check_offer")
+	add_phrase(dialog, "zhopa2_activity_a", "zhopa2_activity_ok", "ui_st_zhopa2_dialog_understood", nil, "zhopa2_squad_dialogue.clear_offer")
+
+	add_refusal(dialog, "zhopa2_travel_target_changed", "ui_st_zhopa2_travel_target_changed", "zhopa2_squad_dialogue.offer_target_changed")
+	add_refusal(dialog, "zhopa2_travel_busy", "ui_st_zhopa2_travel_busy", "zhopa2_squad_dialogue.offer_travel_busy")
+	add_refusal(dialog, "zhopa2_travel_combat", "ui_st_zhopa2_travel_combat", "zhopa2_squad_dialogue.offer_combat")
+	add_refusal(dialog, "zhopa2_travel_storm", "ui_st_zhopa2_travel_storm", "zhopa2_squad_dialogue.offer_storm")
+	add_refusal(dialog, "zhopa2_travel_psi", "ui_st_zhopa2_travel_story_psi_locked", "zhopa2_squad_dialogue.offer_story_psi_locked")
+	add_refusal(dialog, "zhopa2_travel_rep", "ui_st_zhopa2_travel_reputation", "zhopa2_squad_dialogue.offer_reputation")
+	add_refusal(dialog, "zhopa2_travel_goodwill", "ui_st_zhopa2_travel_goodwill", "zhopa2_squad_dialogue.offer_goodwill")
+	add_refusal(dialog, "zhopa2_travel_relation", "ui_st_zhopa2_travel_relation_unavailable", "zhopa2_squad_dialogue.offer_relation_unavailable")
+	add_refusal(dialog, "zhopa2_travel_distance", "ui_st_zhopa2_travel_distance_unavailable", "zhopa2_squad_dialogue.offer_distance_unavailable")
+	add_refusal(dialog, "zhopa2_travel_failed", "ui_st_zhopa2_travel_failed", "zhopa2_squad_dialogue.offer_travel_failed")
+
+	add_phrase(dialog, "zhopa2_travel_q", "zhopa2_travel_yes", "ui_st_zhopa2_dialog_travel_accept", "zhopa2_squad_dialogue.offer_accepted")
+	add_phrase(dialog, "zhopa2_travel_yes", "zhopa2_travel_ready", "ui_st_zhopa2_dialog_travel_ready", nil, "zhopa2_squad_dialogue.travel_ready")
+	add_phrase(dialog, "zhopa2_travel_yes", "zhopa2_travel_cancel", "ui_st_zhopa2_dialog_travel_cancel", nil, "zhopa2_squad_dialogue.clear_offer")
+end
+
+function M.can_open_dialog(first_speaker, second_speaker)
+	return M.can_ask_activity(first_speaker, second_speaker)
+end
+
+local function add_dialog_to_list(character_id, dialog_list)
+	if not (feature_enabled() and dialog_list and type(dialog_list.add) == "function") then
+		return
+	end
+	if type(dialog_list.has) ~= "function" or dialog_list:has(DIALOG_ID) ~= true then
+		dialog_list:add(DIALOG_ID)
+	end
+end
+
+local function on_game_load()
+	pending_offer = nil
+	active_travel = nil
+	restore_ui(true)
+	if arrival_safety then
+		schedule_arrival_safety_tick()
+	end
+end
+
+local function actor_on_leave_dialog()
+	pending_offer = nil
+end
+
+function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
+	if not RegisterScriptCallback then
+		return false
+	end
+	active = true
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+	end
+	local list_ok = pcall(RegisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
+	local load_ok = pcall(RegisterScriptCallback, "on_game_load", on_game_load)
+	local leave_ok = pcall(RegisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
+	local save_ok = pcall(RegisterScriptCallback, "save_state", save_state)
+	local state_load_ok = pcall(RegisterScriptCallback, "load_state", load_state)
+	callbacks_registered = list_ok == true and load_ok == true and leave_ok == true
+		and save_ok == true and state_load_ok == true
+	return callbacks_registered
+end
+
+function M.on_master_disable()
+	active = false
+	pending_offer = nil
+	active_travel = nil
+	restore_arrival_safety()
+	if type(RemoveTimeEvent) == "function" then
+		pcall(RemoveTimeEvent, EVENT_ID, "arrival_safety")
+	end
+	restore_ui(true)
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+	end
+	callbacks_registered = false
+	return true
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_squad_dialogue = M
+return M

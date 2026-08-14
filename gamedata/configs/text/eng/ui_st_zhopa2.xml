@@ -121,4 +121,46 @@
 	<string id="ui_mcm_zhopa2_mutants_mutant_rest_duration_game_hours_desc"><text>How many in-game hours a mutant squad spends resting before it can select another task.</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours"><text>Mutant patrol duration</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours_desc"><text>How many in-game hours a mutant squad keeps patrolling before it can roll a new task.</text></string>
+
+	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled"><text>Travel with ZHOPA squads</text></string>
+	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled_desc"><text>Adds activity dialogue to managed squad commanders and lets the actor travel with a moving squad to its current destination.</text></string>
+
+	<string id="ui_st_zhopa2_dialog_activity_question"><text>What is your squad doing now? %c[ui_lime][Info/Travel]</text></string>
+	<string id="ui_st_zhopa2_dialog_placeholder"><text>...</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_question"><text>Can I come with you?</text></string>
+	<string id="ui_st_zhopa2_dialog_understood"><text>Understood.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_accept"><text>All right. You can come with us.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_ready"><text>I'm ready. Let's go.</text></string>
+	<string id="ui_st_zhopa2_dialog_travel_cancel"><text>I've changed my mind.</text></string>
+	<string id="ui_st_zhopa2_dialog_previous_fmt"><text>Previously — %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_current_fmt"><text>Now — %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_named_fmt"><text>Destination: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_smart_fmt"><text>Area: %s. Destination: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_level_fmt"><text>We're heading to the destination. Area: %s.</text></string>
+	<string id="ui_st_zhopa2_dialog_destination_generic"><text>We're heading to the destination.</text></string>
+
+	<string id="ui_st_zhopa2_activity_rest"><text>resting</text></string>
+	<string id="ui_st_zhopa2_activity_explore"><text>exploring</text></string>
+	<string id="ui_st_zhopa2_activity_force_exit"><text>leaving the area</text></string>
+	<string id="ui_st_zhopa2_activity_populate"><text>establishing an outpost</text></string>
+	<string id="ui_st_zhopa2_activity_base_camping"><text>holding a base</text></string>
+	<string id="ui_st_zhopa2_activity_patrol"><text>patrolling</text></string>
+	<string id="ui_st_zhopa2_activity_night_rest"><text>resting overnight</text></string>
+	<string id="ui_st_zhopa2_activity_artefact"><text>searching for artefacts</text></string>
+	<string id="ui_st_zhopa2_activity_trade"><text>following a trade route</text></string>
+	<string id="ui_st_zhopa2_activity_hunt"><text>hunting</text></string>
+	<string id="ui_st_zhopa2_activity_revenge"><text>pursuing a revenge target</text></string>
+	<string id="ui_st_zhopa2_activity_story_north_migration"><text>migrating northward</text></string>
+	<string id="ui_st_zhopa2_activity_unknown"><text>handling another assignment</text></string>
+
+	<string id="ui_st_zhopa2_travel_target_changed"><text>Our destination has changed. I can't take you now.</text></string>
+	<string id="ui_st_zhopa2_travel_busy"><text>Another squad trip is already in progress.</text></string>
+	<string id="ui_st_zhopa2_travel_combat"><text>Not while you're in a fight.</text></string>
+	<string id="ui_st_zhopa2_travel_storm"><text>Not during an emission or psi storm.</text></string>
+	<string id="ui_st_zhopa2_travel_story_psi_locked"><text>That route isn't safe for you yet.</text></string>
+	<string id="ui_st_zhopa2_travel_reputation"><text>No. Your reputation is too poor.</text></string>
+	<string id="ui_st_zhopa2_travel_goodwill"><text>No. I don't trust you.</text></string>
+	<string id="ui_st_zhopa2_travel_relation_unavailable"><text>I can't decide that right now.</text></string>
+	<string id="ui_st_zhopa2_travel_distance_unavailable"><text>I can't plot a safe route from here.</text></string>
+	<string id="ui_st_zhopa2_travel_failed"><text>The squad trip could not be completed.</text></string>
 </string_table>
