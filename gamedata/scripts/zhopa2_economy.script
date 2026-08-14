@@ -2479,6 +2479,7 @@ local function trade_result_terminal(result)
 		or result == "offline_traded"
 		or result == "nothing_to_trade"
 		or result == "offline_nothing_to_trade"
+		or result == "trade_no_seller"
 		or result == "trade_prepared_timeout"
 		or (type(result) == "string" and string.find(result, "trade_prepared_cancel_", 1, true) == 1)
 end
@@ -2506,7 +2507,7 @@ local function finalize_squad_trade_task(squad, result, reason)
 		squad.zhopa2_rest_trade_started_tg = nil
 	elseif squad.zhopa2_task == "BASE_CAMPING" then
 		squad.zhopa2_base_trade_result = result
-		squad.zhopa2_base_trade_next_tg = tg() + C.AUTO_TRADE_COOLDOWN_MS
+		squad.zhopa2_base_trade_next_tg = result == "trade_no_seller" and nil or tg() + C.AUTO_TRADE_COOLDOWN_MS
 	elseif squad.zhopa2_task == "TRADE" then
 		squad.zhopa2_trade_route_state = "done"
 		squad.zhopa2_trade_route_result = result
@@ -2874,6 +2875,33 @@ local function job_is_trade_customer(job, smart)
 	end
 	local suitable_l = slower(read_job_ini_string(job, "suitable", smart))
 	return contains_plain(suitable_l, "npc_has_items_to_sell") == true
+end
+
+local function bind_trade_customer_seller(npc, trader, smart, npc_info)
+	local npc_id = object_id(npc)
+	local trader_id = object_id(trader)
+	local smart_id = object_id(smart)
+	local job = npc_info and npc_info.job or nil
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	if not (npc_id and trader_id and smart_id and npc_id ~= trader_id and job and st) then
+		return false, "trade_seller_bind_missing_context"
+	end
+
+	local current_id = tonumber(job.seller_id)
+	if current_id and live_object(online_object_by_id(current_id)) then
+		st.zhopa2_trade_trader_id = current_id
+		return true, nil
+	end
+
+	local live_trader = live_object(trader)
+	local trader_smart = live_trader and trade_smart_for_npc(live_trader, nil) or nil
+	if not live_trader or object_id(trader_smart) ~= smart_id or npc_is_trade_provider(live_trader, smart) ~= true then
+		return false, "trade_seller_bind_invalid_trader"
+	end
+
+	job.seller_id = trader_id
+	st.zhopa2_trade_trader_id = trader_id
+	return true, nil
 end
 
 local function smart_has_trade_customer_job(smart)
@@ -3675,6 +3703,16 @@ function trade_path.clear(npc, st)
 	if st.zhopa2_trade_path_had_patrol_mode ~= true then
 		trade_path.set_patrol_mode(npc, false)
 	end
+	if type(st.beh) == "table" then
+		st.beh.desired_target = nil
+		st.beh.path_index = 1
+		st.beh.path_reverse = nil
+		st.beh.wait_delay = nil
+		st.beh.am_i_reached = nil
+	end
+	if npc and type(save_var) == "function" then
+		pcall(save_var, npc, "path_index", 1)
+	end
 	st.zhopa2_trade_path_override = nil
 	st.zhopa2_trade_path_points = nil
 	st.zhopa2_trade_path_had_patrol_mode = nil
@@ -4190,7 +4228,7 @@ local function prepare_npc_vanilla_trade(npc, squad, smart, trader, reason, opts
 	st.has_items_to_sell = true
 	st.zhopa2_trade_squad_id = object_id(squad)
 	st.zhopa2_trade_smart_id = object_id(smart)
-	st.zhopa2_trade_trader_id = nil
+	st.zhopa2_trade_trader_id = object_id(trader)
 	st.zhopa2_trade_job_section = opts.job_section
 	st.zhopa2_trade_priority_boosted = opts.priority_boosted == true
 	st.zhopa2_trade_reason = reason
@@ -4225,6 +4263,11 @@ local function prepare_online_trade_job(npc, squad, members, smart, trader, reas
 			st.zhopa2_trade_job_section = selected_section
 			st.zhopa2_trade_priority_boosted = false
 		end
+		local seller_bound, bind_reason = bind_trade_customer_seller(npc, trader, smart, npc_info)
+		if seller_bound ~= true then
+			clear_npc_trade_state(npc)
+			return false, bind_reason or "trade_seller_bind_failed"
+		end
 		return true, "trade_prepared", selected_section
 	end
 
@@ -4249,6 +4292,12 @@ local function prepare_online_trade_job(npc, squad, members, smart, trader, reas
 		if st then
 			st.zhopa2_trade_job_section = selected_section or section
 			st.zhopa2_trade_priority_boosted = selected_section == section
+		end
+		local seller_bound, bind_reason = bind_trade_customer_seller(npc, trader, smart, npc_info)
+		if seller_bound ~= true then
+			trade_path.restore_trade_priority_boosts(object_id(smart), object_id(squad), npc_id, bind_reason or "trade_seller_bind_failed")
+			clear_npc_trade_state(npc)
+			return false, bind_reason or "trade_seller_bind_failed"
 		end
 		return true, "trade_prepared", selected_section or section
 	end
@@ -4278,7 +4327,7 @@ local function prepare_squad_vanilla_trade(squad, members, trader, smart, reason
 		squad.zhopa2_trade_prepared_until = tg() + C.TRADE_PREPARED_TIMEOUT_MS
 		squad.zhopa2_trade_prepared_npc_id = object_id(leader)
 		squad.zhopa2_trade_prepared_smart_id = object_id(smart)
-		squad.zhopa2_trade_prepared_trader_id = nil
+		squad.zhopa2_trade_prepared_trader_id = object_id(trader)
 		squad.zhopa2_trade_prepared_job_section = job_section
 		squad.zhopa2_trade_prepared_reason = reason
 		mark_squad_trade_result(squad, "trade_prepared", reason, smart)
@@ -4426,7 +4475,7 @@ function M.try_auto_trade_npc(npc, trader, reason, opts)
 	squad.zhopa2_trade_prepared_until = tg() + C.TRADE_PREPARED_TIMEOUT_MS
 	squad.zhopa2_trade_prepared_npc_id = object_id(npc)
 	squad.zhopa2_trade_prepared_smart_id = object_id(smart)
-	squad.zhopa2_trade_prepared_trader_id = nil
+	squad.zhopa2_trade_prepared_trader_id = object_id(trader)
 	squad.zhopa2_trade_prepared_job_section = job_section
 	squad.zhopa2_trade_prepared_reason = reason or "try_auto_trade_npc"
 	mark_squad_trade_result(squad, "trade_prepared", reason or "try_auto_trade_npc", smart)
@@ -4556,6 +4605,7 @@ function M.complete_axr_online_trade(npc, smart, result, reason)
 	if not managed_context then
 		return false
 	end
+	trade_path.clear(npc, st)
 	local result_name = result == "traded" and "traded" or tostring(result or "nothing_to_trade")
 	local finish_reason = reason or st and st.zhopa2_trade_reason or squad and squad.zhopa2_trade_prepared_reason or "axr_trade"
 	trade_path.restore_trade_priority_boosts(smart_id, squad_id, npc_id, result_name)

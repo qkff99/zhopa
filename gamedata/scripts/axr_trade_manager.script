@@ -16,7 +16,7 @@ local enable_npc_trade = true
 local enable_npc_upgrade = true
 local max_upgrades_per_visit = 5
 local DEBUG_PREFIX = "[Z.H.O.P.A.][AXR_TRADE] "
-local ZHOPA_AXR_PATCH_REV = "2026-07-12-r11-tech-exit"
+local ZHOPA_AXR_PATCH_REV = "2026-08-14-r12-seller-bind"
 local ITEM_TAKE_SUPPRESS_GRACE_MS = 10000
 local ZHOPA_AXR_BIND_DIAG = {
 	next_tg = 0,
@@ -846,7 +846,8 @@ local function finalize_service_session(npc, kind, reason)
 	if kind == "trade" then
 		local economy = zhopa2_economy_mod()
 		if economy and type(economy.complete_axr_online_trade) == "function" then
-			local trade_result = status == "completed" and reason ~= "done_empty" and "traded" or "nothing_to_trade"
+			local trade_result = reason == "done_no_seller" and "trade_no_seller"
+				or (status == "completed" and reason ~= "done_empty" and "traded" or "nothing_to_trade")
 			pcall(economy.complete_axr_online_trade, npc, smart, trade_result, reason or "axr_trade_done")
 		end
 	end
@@ -1127,6 +1128,31 @@ function axr_online_object_by_id(id)
 	return obj
 end
 
+local function resolve_trade_seller(npc, smart, npc_info, st)
+	local job = npc_info and npc_info.job or nil
+	local seller_id = tonumber(job and job.seller_id)
+	local seller = seller_id and axr_online_object_by_id(seller_id) or nil
+	if seller then
+		return seller
+	end
+
+	local fallback_id = tonumber(st and st.zhopa2_trade_trader_id)
+	if not (fallback_id and job and smart) or fallback_id == axr_object_id(npc) then
+		return nil
+	end
+	seller = axr_online_object_by_id(fallback_id)
+	local seller_smart = seller and xr_gulag and xr_gulag.get_npc_smart and xr_gulag.get_npc_smart(seller) or nil
+	if not seller or axr_object_id(seller_smart) ~= axr_object_id(smart)
+		or resolve_npc_provider_role(seller, smart, fallback_id) ~= "trader"
+	then
+		return nil
+	end
+
+	job.seller_id = fallback_id
+	print_debug("trade_seller_bound npc_id=%s seller_id=%s smart=%s", tostring(axr_object_id(npc)), tostring(fallback_id), tostring(get_smart_name_safe(smart) or "-"))
+	return seller
+end
+
 local function axr_npc_money(npc)
 	if npc and type(npc.money) == "function" then
 		local ok, money = pcall(npc.money, npc)
@@ -1348,8 +1374,7 @@ ZHOPA_AXR_RUNTIME.vanilla_trade = function(npc)
 		return
 	end
 
-	local seller_id = npc_info and npc_info.job and npc_info.job.seller_id
-	local seller = seller_id and axr_online_object_by_id(seller_id) or nil
+	local seller = resolve_trade_seller(npc, smart, npc_info, st)
 	local itm, itm_base_cost, buy_sell, slot, bw, can_sell
 	for sec, count in pairs(st.trade_items) do
 		for i = count, 1 do
@@ -1484,8 +1509,7 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 	-- Get the Trader
 	local smart = xr_gulag.get_npc_smart(npc)
 	local npc_info = smart and smart.npc_info[id]
-	local seller_id = npc_info and npc_info.job and npc_info.job.seller_id
-	local seller = seller_id and axr_online_object_by_id(seller_id) or nil
+	local seller = resolve_trade_seller(npc, smart, npc_info, st)
 	if not seller then
 		clear_trade_item_intent(st)
 		finalize_service_session(npc, "trade", "done_no_seller")

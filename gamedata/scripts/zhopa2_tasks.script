@@ -747,6 +747,7 @@ local function rest_trade_result_is_final(result)
 		or result == "no_trade_budget"
 		or result == "no_offline_member"
 		or result == "offline_nothing_to_trade"
+		or result == "trade_no_seller"
 		or result == "trade_prepared_timeout"
 		or result == "no_trade_smart"
 		or result == "disabled"
@@ -904,6 +905,11 @@ local function tick_base_camping_auto_trade(squad)
 	if not (squad and squad.zhopa2_task == M.TASK_BASE_CAMPING) then
 		return false
 	end
+	if squad.zhopa2_last_result == "trade_no_seller" then
+		squad.zhopa2_base_trade_result = "trade_no_seller"
+		squad.zhopa2_base_trade_next_tg = nil
+		return false
+	end
 	if squad.zhopa2_base_trade_next_tg and now_ms() < squad.zhopa2_base_trade_next_tg then
 		return false
 	end
@@ -921,7 +927,9 @@ local function tick_base_camping_auto_trade(squad)
 	if not traded then
 		debug_trade_log(squad, "during_BASE_CAMPING_attempt", result, "try_auto_trade=false")
 	end
-	if result == "queued" or result == "trade_slot_busy" or result == "no_online_member" or result == "no_trader" or result == "runtime_not_ready" then
+	if result == "trade_no_seller" then
+		squad.zhopa2_base_trade_next_tg = nil
+	elseif result == "queued" or result == "trade_slot_busy" or result == "no_online_member" or result == "no_trader" or result == "runtime_not_ready" then
 		squad.zhopa2_base_trade_next_tg = now_ms() + REST_TRADE_RETRY_MS
 	else
 		squad.zhopa2_base_trade_next_tg = now_ms() + BASE_CAMPING_TRADE_RETRY_MS
