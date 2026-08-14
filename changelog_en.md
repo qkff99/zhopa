@@ -1,6 +1,16 @@
-# Unreleased
+# 2.1
+
+### General
 - Added managed-squad commander dialogue with current/previous task descriptions, joint travel to the actual destination, time advancement, and Story Mode psi-zone protection.
 - Mod disable system reworked in MCM. Now it will disable mod and clear save.
+- Added task balancing: squad strength, faction strength on the target level, and level difficulty now influence squad task and target selection.
+
+### Fixes
+- Fixed mutant despawning and mutant-hunting quests completing automatically when accepted.
+- Fixed stalker assassination and area-clearing quests completing automatically when accepted.
+- Added several minor performance optimizations.
+- Temporarily disabled online looting by default because it causes numerous issues; use the standard NPC looting option from Anomaly settings instead.
+- Closed another invalid trade-exit scenario.
 
 ## 2.0.1
 - Fixed npc cant reach hideout when emission started
