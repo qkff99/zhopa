@@ -1,4 +1,4 @@
-# Z.H.O.P.A. ALIFE 2.0
+# Z.H.O.P.A. ALIFE 2.2
 
 [Русский](README.md) | [Changelog](changelog_en.md) | [Architecture](docs/zhopa_alife_2_design_document_en.md) | [Function reference](docs/zhopa_alife_2_function_reference_en.md)
 
@@ -13,9 +13,10 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Subsystem | Behavior |
 | --- | --- |
 | Squad tasks | Stalkers explore the Zone, populate smart terrains, patrol, rest, hunt, take revenge, collect artefacts, travel to trade, and perform trader contracts. Mutants use a separate task pool. |
+| NPC quests | Traders publish document, clearing, occupation, hunt, and delivery jobs. Squads travel to the giver and objective, use real quest items, and return for payment; the flow works online and offline. |
 | Task balance | Valid task-target pairs are weighted by squad strength, local faction pressure, and optional faction preferences. Story and safety tasks remain outside this random selection. |
 | Hunt and revenge | Targets are tracked by their actual squad position, including level transitions. Actor revenge makes only the assigned squad hostile, not its entire faction. |
-| Dialogue and travel | A managed squad commander reports the squad's current and previous task. If the squad is moving, the actor can travel with it to the actual destination with time advancement and Story Mode psi restrictions. |
+| Dialogue and travel | A managed squad commander reports the current and previous task, including the NPC-quest type, and shows an area/smart destination card. If the squad is moving, the actor can travel to its actual destination with time advancement, optional payment, and Story Mode psi restrictions. |
 | Loot | Online logic extends vanilla pickup and prevents loops on rejected items. Offline loot is bounded virtual cargo and consumes no engine object IDs. |
 | Economy | The leader trades for the whole squad, sells real and virtual goods, pools member money, and buys basic supplies. |
 | Artefacts | Real and virtual offline artefacts are supported, including smart assignment and online pickup by a selected NPC with detector animation. |
@@ -32,6 +33,13 @@ Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PAT
 - A mechanic visit can be triggered only by a real `i_upgrade` item held by the NPC. Ordinary supply purchases do not create synthetic tech intent.
 - Offline deals sell serializable virtual cargo and use virtual squad money.
 - `npc_sell_price_multiplier` controls NPC sale income; the default value is `0.2`.
+- A quest interaction reuses the customer job and animation but exits before a monetary deal. Every service result immediately reselects the NPC's normal smart job and remains covered by the service doctor.
+
+## NPC Squad Quests
+
+`zhopa2_npc_quests` supports five contract types: documents, base clearing, base occupation, hunting a specific squad, and delivery. A giver publishes up to three available jobs from its profile. Squads search their current level first and then traders on directly adjacent levels.
+
+Online, the commander physically approaches the trader and plays the service animation. If this cannot be prepared safely or the level is offline, a one-minute simulation fallback completes the interaction at the smart. Documents and packages are real ZHOPA-owned quest items: the commander physically receives them online, while the server-side phase performs the equivalent step offline. Rewards are paid once into shared virtual squad money and then participate in the normal economy.
 
 ## Looting
 
@@ -55,7 +63,7 @@ Real artefacts are registered in runtime indexes and belong to exactly one suita
 
 1. Disable or remove old REZNYA, SISKI, and ZHOPA versions.
 2. In MO2, select `File` -> `Install Mod...`.
-3. Select the Z.H.O.P.A. ALIFE 2.0 archive and confirm installation.
+3. Select the Z.H.O.P.A. ALIFE 2.2 archive and confirm installation.
 4. Place the addon below conflicting mods when its bundled `axr_trade_manager.script` must win the conflict.
 
 ### Manual
@@ -74,13 +82,14 @@ Main MCM sections:
 - stalker and mutant simulation;
 - task weights, balance, and durations;
 - combat, routing, and target following;
+- per-faction task switches and weights;
 - debugging.
 
-Task balance is enabled by default. Its numeric tuning, level overrides, squad strength overrides, and faction profiles are kept in `gamedata/configs/zhopa2_population_profiles.ltx`; MCM exposes only the three gameplay switches and the Soft / Balanced / Strict direct-target policy.
+Task balance is enabled by default. Numeric tuning, level overrides, squad-strength overrides, and faction profiles are kept in `gamedata/configs/zhopa2_population_profiles.ltx`. The MCM **Faction Weights** tab uses global task settings by default; its master switch enables separate `QUEST`, `EXPLORE`, `POPULATE`, `PATROL`, `NIGHT_REST`, `HUNT`, `ARTEFACT`, and `TRADE` switches and weights for every human faction. Mutants and zombified squads keep their existing shared settings.
 
-Squad dialogue and joint travel are controlled by `squad_dialogue_enabled`. Travel-time tuning remains LTX-only through `squad_travel_minutes_per_100m`; the default is 10 in-game minutes per 100 meters.
+Squad dialogue and joint travel are controlled by `squad_dialogue_enabled`. Travel-time tuning remains LTX-only through `squad_travel_minutes_per_100m`; the default is 10 in-game minutes per 100 meters. Paid travel is enabled by default through `squad_travel_paid_enabled`: the base price is 1,000 RU per kilometer and the MCM `squad_travel_price_multiplier` ranges from `0.1` to `10`.
 
-NPC squad quests are controlled by `npc_quests_enabled`; `stalker_quest_weight` sets their relative selection chance. A trader smart can be excluded in `zhopa2_npc_quests.ltx` with `smart_name = disabled`.
+NPC squad quests are controlled by `npc_quests_enabled`; `stalker_quest_weight` sets their relative selection chance. Profiles, enabled types, slot counts, and reward ranges live in `zhopa2_npc_quests.ltx`; a trader smart can be excluded with `smart_name = disabled`.
 
 Online managed looting is experimental and disabled by default. Leave it disabled to use vanilla looting, the more predictable choice for large mod packs; artefact tasks continue to use their separate targeted pickup path. After updating the addon, use MCM's **Reset to defaults** before changing options so the current recommended defaults take effect.
 

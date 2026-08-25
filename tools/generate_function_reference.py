@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Z.H.O.P.A. ALIFE 2.0 function reference from Lua scripts."""
+"""Generate the Z.H.O.P.A. ALIFE 2.2 function reference from Lua scripts."""
 
 from __future__ import annotations
 
@@ -27,16 +27,18 @@ SCRIPT_HOOKS = {
 
 SCRIPT_ROLES = {
     "axr_trade_manager.script": "SISKI-derived vanilla trade-manager override that executes online squad trade and technician service through real smart customer jobs",
+    "modxml_zhopa2_squad_dialogue.script": "DXML injection that registers the managed-squad information and travel dialogue without replacing the vanilla dialogue XML",
     "zhopa2_artifacts.script": "artifact target selection, real/virtual artifact handling, and online/offline pickup flow",
     "zhopa2_bootstrap.script": "master enable/disable lifecycle, cleanup coordination, and startup bridge into the runtime patch orchestrator",
     "zhopa2_cfg.script": "configuration, MCM defaults, faction aliases, and blacklist access",
     "zhopa2_debug_hud.script": "debug PDA map markers and squad status hints",
-    "zhopa2_economy.script": "online customer-job preparation, offline trade execution, pricing, virtual cargo/money, queues, routing, and trade-job path recovery",
+    "zhopa2_economy.script": "online trade and quest-service customer-job preparation, offline trade execution, pricing, virtual cargo/money, queues, routing, and service-job recovery",
     "zhopa2_index.script": "thin access layer over SIMBOARD-owned squad/smart buckets plus artifact, ownership, and trade-smart state",
     "zhopa2_loot.script": "online loot integration, offline virtual loot accounting, artifact cargo, and loot-loop protection",
     "zhopa2_mcm.script": "MCM menu registration and settings bridge",
-    "zhopa2_mcm_schema.script": "MCM option schema and defaults",
+    "zhopa2_mcm_schema.script": "MCM option schema, defaults, paid-travel controls, and per-faction task panels",
     "zhopa2_memory.script": "serializable squad state, cargo, virtual loot, virtual money, and save/load helpers",
+    "zhopa2_npc_quests.script": "persistent trader quest pool, reservation and phase state, real document/package items, objective routing, rewards, and online/offline completion",
     "zhopa2_perception.script": "target discovery, weighted candidate selection, path levels, and faction/blacklist checks",
     "zhopa2_revenge.script": "revenge event detection, responder selection, and actor hostility scope coordinated through server ids",
     "zhopa2_runtime_patches.script": "chain-friendly runtime patching of vanilla/pack scripts",
@@ -44,9 +46,10 @@ SCRIPT_ROLES = {
     "zhopa2_smart_service_slot_doctor.script": "bounded observation and vanilla smart-job reselection for stalled trade/technician customer jobs",
     "zhopa2_story_north_migration.script": "story-gated northern migration task selection and recovery",
     "zhopa2_story_psy_watchdog.script": "story-gated psi-level squad conversion into zombied squads",
+    "zhopa2_squad_dialogue.script": "commander activity dialogue, destination cards, paid joint travel, arrival safety, time advancement, and same/cross-level recovery",
     "zhopa2_task_scoring.script": "bounded task-target scoring, runtime level geometry, faction-presence snapshots, and configurable lore preferences",
     "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, fallback rules, and server-side revenge relations",
-    "zhopa2_topology.script": "level topology, neighbor levels, and route helpers",
+    "zhopa2_topology.script": "level-changer topology rebuilt through ALife iteration, neighbor levels, and route helpers",
 }
 
 
@@ -262,11 +265,11 @@ def generate(project_root: Path) -> str:
     debug_count = sum(len(parse_functions(path)) for path in debug_files)
 
     lines: list[str] = [
-        "# Z.H.O.P.A. ALIFE 2.0 Function Reference",
+        "# Z.H.O.P.A. ALIFE 2.2 Function Reference",
         "",
         "[README](../README_EN.md) | [Architecture document](zhopa_alife_2_design_document_en.md) | [Russian README](../README.md)",
         "",
-        "This document is generated from the current ZHOPA ALIFE 2.0 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
+        "This document is generated from the current ZHOPA ALIFE 2.2 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
         "",
         "Regenerate it with:",
         "",

@@ -1,25 +1,26 @@
-# Z.H.O.P.A. ALIFE 2.0: Architecture Design Document
+# Z.H.O.P.A. ALIFE 2.2: Architecture Design Document
 
 [README](../README_EN.md) | [Russian version](zhopa_alife_2_design_document.md) | [Function reference](zhopa_alife_2_function_reference_en.md)
 
-Full name: **Z.H.O.P.A. ALIFE 2.0 — Zone Hostile Operations & Population AI**.
+Full name: **Z.H.O.P.A. ALIFE 2.2 — Zone Hostile Operations & Population AI**.
 
-This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.0 architecture after the migration from full-file overrides to chain-friendly runtime patches.
+This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.2 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of August 9, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of August 26, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
 | Bootstrap and settings | `zhopa2_bootstrap`, `zhopa2_cfg`, `zhopa2_mcm*` | Startup, readiness, LTX/MCM, and user-facing controls |
 | Integration | `zhopa2_runtime_patches`, `zhopa2_index`, `zhopa2_topology` | Chain-friendly patches, runtime buckets, and inter-level routing |
 | Simulation | `zhopa2_tasks`, `zhopa2_task_scoring`, `zhopa2_perception`, `zhopa2_memory` | Task FSM, bounded task-target scoring, target selection, and serializable squad state |
+| Interaction | `zhopa2_npc_quests`, `zhopa2_squad_dialogue`, `modxml_zhopa2_squad_dialogue` | Trader contracts, commander dialogue, destination cards, and joint travel |
 | Economy | `zhopa2_economy`, `axr_trade_manager`, `zhopa2_smart_service_slot_doctor` | Online/offline trade, customer jobs, and post-service recovery |
 | Items | `zhopa2_loot`, `zhopa2_artifacts` | Online pickup, virtual offline cargo, and artifact flow |
 | World and story | `zhopa2_service_fillers`, `zhopa2_revenge`, `zhopa2_story_*` | Base ownership, services, revenge, and story events |
 
 ## 1. Purpose
 
-ZHOPA ALIFE 2.0 does not build a separate ALife layer on top of Anomaly. It is a motive, task, consequence and economy layer integrated into vanilla SIMBOARD, `smart_terrain`, `sim_squad_scripted`, `xr_gather_items` and related callback points.
+ZHOPA ALIFE 2.2 does not build a separate ALife layer on top of Anomaly. It is a motive, task, consequence and economy layer integrated into vanilla SIMBOARD, `smart_terrain`, `sim_squad_scripted`, `xr_gather_items` and related callback points.
 
 Vanilla still owns:
 
@@ -29,7 +30,7 @@ Vanilla still owns:
 - pathfinding and concrete NPC animation life inside a smart;
 - ordinary combat behavior.
 
-ZHOPA ALIFE 2.0 owns:
+ZHOPA ALIFE 2.2 owns:
 
 - why a squad chooses the next target;
 - which tasks are available for stalkers and mutants;
@@ -70,6 +71,9 @@ Runtime modules:
 - `zhopa2_artifacts`
 - `zhopa2_story_psy_watchdog`
 - `zhopa2_story_north_migration`
+- `zhopa2_npc_quests`
+- `zhopa2_squad_dialogue`
+- `zhopa2_debug_hud`
 
 Runtime patches:
 
@@ -150,6 +154,8 @@ Key fields:
 - `zhopa2_loot_value`
 - `zhopa2_artifact_*`
 - `zhopa2_trade_*`
+- `zhopa2_previous_task` / `zhopa2_previous_target`
+- `zhopa2_npc_quest_id`
 - `zhopa2_revenge_*`
 - `zhopa2_hunt_prey` for the selected hunt profile, so saved HUNT routing uses the same prey rules after load.
 
@@ -186,6 +192,8 @@ Each module owns its own temporary state:
 - `zhopa2_artifacts` — artifact pickup stages, virtual artifact collection, detector animation flow;
 - `zhopa2_story_north_migration` — story event selection/status;
 - `zhopa2_story_psy_watchdog` — conversion queues and pending reconciliation.
+- `zhopa2_npc_quests` — global contract pool, daily revision, reservations, service phases, and bounded retired history;
+- `zhopa2_squad_dialogue` — non-serialized travel offer, UI lock, arrival safety, and deferred cross-level finalization.
 
 Module runtime state must be cleaned on unregister, death and load. Stale ids easily break the task FSM.
 
@@ -202,6 +210,8 @@ Responsibilities:
 - blacklists;
 - threshold values;
 - price multiplier;
+- paid joint travel;
+- global and per-faction task switches/weights;
 - task-balance MCM switches;
 - safe getters.
 
@@ -253,7 +263,7 @@ Tracks level adjacency:
 - vanilla nearby-level helpers;
 - cached neighbor lists.
 
-Used by `EXPLORE`, `PATROL`, `HUNT`, `ARTEFACT`, `TRADE` and `STORY_NORTH_MIGRATION`.
+Used by `EXPLORE`, `PATROL`, `HUNT`, `ARTEFACT`, `TRADE`, `QUEST`, and `STORY_NORTH_MIGRATION`. On load, the level-changer map is rebuilt through exported `alife():iterate_objects()`; the unavailable `object_count()` API is not used.
 
 ### 4.6 `zhopa2_debug_hud`
 
@@ -301,6 +311,7 @@ Current task set:
 - `NIGHT_REST`
 - `ARTEFACT`
 - `TRADE`
+- `QUEST`
 - `HUNT`
 - `REVENGE`
 - `STORY_NORTH_MIGRATION`
@@ -315,6 +326,7 @@ Stalker random tasks:
 - `HUNT`
 - `ARTEFACT`
 - `TRADE`
+- `QUEST`
 
 Mutant random tasks:
 
@@ -322,7 +334,7 @@ Mutant random tasks:
 - `PATROL`
 - `EXPLORE`
 
-`REST` enters ordinary weighted selection only when the enabled faction profile gives it a positive weight. Otherwise it remains a direct fallback or pause state. `NIGHT_REST`, `FORCE_EXIT`, `BASE_CAMPING`, `REVENGE`, story tasks and some trade flows are assigned by explicit conditions, interrupts, safety gates or story systems rather than ordinary weighted roaming.
+`REST` enters ordinary weighted selection only when the enabled faction profile gives it a positive weight. Otherwise it remains a direct fallback or pause state. `QUEST` participates only when a compatible published contract exists on the current or neighboring level; once reserved, ordinary tasks cannot interrupt it. `NIGHT_REST`, `FORCE_EXIT`, `BASE_CAMPING`, `REVENGE`, story tasks and some trade flows are assigned through explicit conditions, interrupts, safety gates, or story systems.
 
 Ordinary selection is a bounded candidate pipeline. Builders first expose valid `task + target` pairs without reserving artefacts, modifying trade state, or assigning a job. Each candidate retains its task-specific level priority and carries a base weight, payload, target level, and selection class. `zhopa2_task_scoring` then applies the enabled modifiers to that concrete pair and picks one final candidate; only the selected candidate is materialized. Artefact reservation therefore happens after task assignment, never while targets are being scored.
 
@@ -373,7 +385,25 @@ Blacklists must be respected during selection, active task validation, retargeti
 
 `TRADE` is a post-rest route task whose weight rises with sellable value. It sends the squad only to safe trader smarts on the current or direct-neighbor levels.
 
+`QUEST` reserves one published trader contract and runs its FSM from giver to objective and, when required, back for reporting. The concrete kind and phase belong to `zhopa2_npc_quests`; `zhopa2_tasks` protects the route and delegates updates.
+
 `STORY_NORTH_MIGRATION` is a story lock owned by the north migration module.
+
+### 6.4 NPC squad quests
+
+`zhopa2_npc_quests` stores a versioned global pool and supports five kinds: `documents`, `clear`, `occupy`, `hunt`, and `delivery`. A trader publishes a bounded number of jobs from its profile; squads select only existing `AVAILABLE` contracts on their current or directly adjacent level. An active contract moves through `RESERVED`, `IN_PROGRESS`, `RETURNING`, `COMPLETED`, or `FAILED` and has exactly one executor.
+
+Online interaction uses a real trade customer job only for approach and animation. `axr_trade_manager` recognizes the quest token and completes the service phase before monetary trade; path/intent state is then cleared, the NPC immediately receives `select_npc_job`, and the service doctor remains a fallback. Offline or unsafe online preparation uses a one-minute smart-level fallback.
+
+Documents and packages are real ZHOPA-specific sections. Online, the commander picks the document from the top of its backpack through pickup animation, while a delivery package is issued into commander inventory during the giver service phase; offline, the equivalent server transfer completes the phase. A reward is added exactly once to `zhopa2_virtual_money`. `clear` returns for reporting, `occupy` transitions the winner into permanent `BASE_CAMPING`, `hunt` follows the target squad, and `delivery` carries a selected package between compatible traders.
+
+### 6.5 Commander dialogue and joint travel
+
+`modxml_zhopa2_squad_dialogue` adds a dedicated dialogue without overriding `dialog_manager`. It is available only to the living commander of a managed squad. The response shows current/previous activity, NPC-quest kind, and a destination card with area image, level name, and localized smart name when available.
+
+Travel uses the moving squad's actual `assigned_target_id` and revalidates it at confirmation. Combat, emission/psi storm, relations, money, and Story Mode psi levels are checked. Ordinary arrival temporarily suppresses threats within 30 meters; `HUNT`, `REVENGE`, and combat NPC quests instead place actor and squad at a safe offset from the target without deleting it.
+
+Time uses global distance and `squad_travel_minutes_per_100m`. Optional price equals distance in meters times `squad_travel_price_multiplier`, therefore 1,000 RU per kilometer at multiplier `1`. Same-level travel can roll back position/payment after a late error. Cross-level time advancement finishes after the actor successfully netspawns on the destination level, while a rejected `ChangeLevel` restores the squad to its origin.
 
 ## 7. Economy and Trade
 
@@ -534,6 +564,8 @@ Dynamic base ownership is part of the core model. It tracks who effectively owns
 
 Service fillers must not fight the smart job system every frame. They should assign or repair service logic through bounded events and avoid per-tick job spam.
 
+After an emission or psi storm, the filler runs a bounded world-reconciliation queue that also services offline levels. Live ALife NPCs determine whether a provider exists and are cached; static smart configuration only describes available jobs and is not proof that an old trader is still alive.
+
 `zhopa2_smart_service_slot_doctor` handles visitors, not providers, in trade/tech customer jobs. It recognizes customer jobs by section name or their `suitable` condition, waits for confirmed completion/stall, and clears only the completed intent. Recovery goes through vanilla `smart:select_npc_job(npc_info, true)`; direct `state_mgr` resets, forced `idle`, and vertex teleporting are forbidden.
 
 ## 12. Blacklists
@@ -568,7 +600,7 @@ Save safety rules:
 
 The master switch provides bounded ZHOPA2 uninstall preparation for the currently loaded world. The supported procedure is to load the save with the addon enabled, disable it in MCM, wait for successful cleanup, create a new manual save, exit the game, and only then remove the addon. A cleanup error blocks safe removal.
 
-Cleanup covers ZHOPA tasks and fields, module runtime tables, script storage, generated service squads, callbacks, indexes, debug markers and restorable monkey patches. It does not reverse deaths, spawned or collected objects, completed trade, zombification, migration or changes owned by another addon. It is not a SISKI/ZHOPA1 save migration system; old-save compatibility remains non-destructive and best-effort.
+Cleanup covers ZHOPA tasks and fields, the global NPC-quest pool, temporary service/travel tables, script storage, generated service squads, callbacks, indexes, debug markers and restorable monkey patches. It does not reverse deaths, spawned or collected objects, completed trade, zombification, migration or changes owned by another addon. It is not a SISKI/ZHOPA1 save migration system; old-save compatibility remains non-destructive and best-effort.
 
 ## 14. Debug and Diagnostics
 
@@ -589,6 +621,7 @@ Diagnostics should answer:
 - which smart/artifact/trader was chosen;
 - why an active task failed;
 - whether a target came from real, virtual or fallback data.
+- which NPC-quest phase is active and why a service/travel operation was accepted, cancelled, or recovered.
 
 ## 15. Extending the System
 
@@ -645,6 +678,8 @@ The system is healthy when:
 - `ARTEFACT` chooses the right smart/artifact and completes online/offline;
 - `LOOT` does not cause corpse/item loops;
 - online/offline trade performs bounded, visible deals;
+- all five NPC-quest kinds complete online/offline without duplicate rewards or a stuck customer job;
+- joint travel keeps actor and squad together, computes time/price correctly, and restores state on failure;
 - completed trade/tech customer jobs return to smart terrain through the vanilla job lifecycle;
 - revenge causes no BusyHands and does not change the entire faction's attitude toward the actor;
 - story systems stay gated by story mode and configured triggers;
