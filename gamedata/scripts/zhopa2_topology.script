@@ -191,18 +191,27 @@ local function rebuild_current_level_changers()
 	end
 	local ok_sim, sim = pcall(alife)
 	sim = ok_sim and sim or nil
-	if not (sim and type(sim.object_count) == "function" and type(sim.object) == "function") then
+	if not (sim and type(sim.iterate_objects) == "function") then
 		return false
 	end
+	local previous_edges_by_level = edges_by_level
+	local previous_edges_by_id = edges_by_id
+	local previous_neighbors = neighbors_by_level
+	local previous_revision = topology_revision
 	edges_by_level = {}
 	edges_by_id = {}
-	local ok_count, count = pcall(sim.object_count, sim)
-	count = ok_count and math.max(0, math.floor(tonumber(count) or 0)) or 0
-	for i = 0, count - 1 do
-		local ok_obj, se_obj = pcall(sim.object, sim, i)
-		if ok_obj and is_level_changer(se_obj) then
+	local ok_iterate = pcall(sim.iterate_objects, sim, function(se_obj)
+		if is_level_changer(se_obj) then
 			set_level_changer(se_obj)
 		end
+		return false
+	end)
+	if not ok_iterate then
+		edges_by_level = previous_edges_by_level
+		edges_by_id = previous_edges_by_id
+		neighbors_by_level = previous_neighbors
+		topology_revision = previous_revision
+		return false
 	end
 	rebuild_neighbors()
 	return true

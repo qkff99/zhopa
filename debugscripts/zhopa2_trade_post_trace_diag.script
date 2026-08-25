@@ -192,6 +192,14 @@ local function bool_text(value)
 	return value == true and "true" or "false"
 end
 
+local function object_bool_text(obj, method)
+	local ok, value = safe_call(obj, method)
+	if not ok then
+		return "-"
+	end
+	return bool_text(value == true)
+end
+
 local function table_count(t)
 	if type(t) ~= "table" then
 		return 0
@@ -344,6 +352,28 @@ local function trade_text(st, now)
 	)
 end
 
+local function talk_text(npc)
+	local actor = db and db.actor or nil
+	return string.format(
+		"npc_enabled=%s npc_talking=%s actor_talking=%s",
+		object_bool_text(npc, "is_talk_enabled"),
+		object_bool_text(npc, "is_talking"),
+		object_bool_text(actor, "is_talking")
+	)
+end
+
+local function meet_text(st)
+	local meet = st and st.meet or nil
+	local manager = meet and meet.meet_manager or nil
+	return string.format(
+		"present=%s set=%s use=%s distance=%s",
+		bool_text(type(meet) == "table"),
+		bool_text(st and st.meet_set == true),
+		tostring(manager and manager.use or "-"),
+		tostring(manager and manager.current_distance or "-")
+	)
+end
+
 local function squad_text(squad)
 	if not squad then
 		return "-"
@@ -401,7 +431,7 @@ local function trace_trade_state(npc_id, entry, now)
 	local offline = db and db.offline_objects and db.offline_objects[npc_id] or nil
 
 	log(
-		"trade trace | elapsed [%s] result [%s] reason [%s] npc [%s] online [%s] pos [%s] vertex [%s] requested_smart [%s] runtime_smart [%s] smart_info [%s] owner_jobs [%s] logic [%s] active [%s] scheme [%s] state [%s] action [%s] point [%s] path [%s] trade [%s] gather [%s] squad [%s] offline_keys [%s] actual_trader [%s] slot [%s]",
+		"trade trace | elapsed [%s] result [%s] reason [%s] npc [%s] online [%s] pos [%s] vertex [%s] requested_smart [%s] runtime_smart [%s] smart_info [%s] owner_jobs [%s] logic [%s] active [%s] scheme [%s] state [%s] action [%s] point [%s] path [%s] talk [%s] meet [%s] trade [%s] gather [%s] squad [%s] offline_keys [%s] actual_trader [%s] slot [%s]",
 		tostring(elapsed),
 		tostring(entry.result or "-"),
 		tostring(entry.reason or "-"),
@@ -420,6 +450,8 @@ local function trace_trade_state(npc_id, entry, now)
 		tostring(current_action_id(npc) or "-"),
 		tostring(current_point_index(npc) or "-"),
 		tostring(load_saved_value(npc, "path_index") or "-"),
+		talk_text(npc),
+		meet_text(st),
 		trade_text(st, now),
 		gather_text(st),
 		squad_text(squad),

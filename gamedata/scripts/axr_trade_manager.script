@@ -73,6 +73,15 @@ local function zhopa2_service_doctor_mod()
 	return doctor
 end
 
+local function zhopa2_runtime_mod()
+	local runtime = rawget(_G, "zhopa2_runtime_patches")
+	if not runtime and require then
+		pcall(require, "zhopa2_runtime_patches")
+		runtime = rawget(_G, "zhopa2_runtime_patches")
+	end
+	return runtime
+end
+
 local function zhopa2_cfg_mod()
 	local cfg = rawget(_G, "zhopa2_cfg")
 	if not cfg and require then
@@ -828,6 +837,31 @@ local function clear_service_intents(st, npc_info, kind, reason)
 	end
 end
 
+local function reset_trade_behavior_state(npc, st)
+	if type(st) ~= "table" then
+		return
+	end
+	if type(st.beh) == "table" then
+		st.beh.desired_target = nil
+		st.beh.path_index = 1
+		st.beh.path_reverse = nil
+		st.beh.wait_delay = nil
+		st.beh.am_i_reached = nil
+	end
+	if npc and type(save_var) == "function" then
+		pcall(save_var, npc, "path_index", 1)
+	end
+end
+
+local function reselect_service_job(smart, npc_info)
+	if not (smart and npc_info and type(smart.select_npc_job) == "function") then
+		return false
+	end
+	npc_info.begin_job = false
+	local ok = pcall(smart.select_npc_job, smart, npc_info, true)
+	return ok == true
+end
+
 local function finalize_service_session(npc, kind, reason)
 	if zhopa_master_enabled() ~= true then
 		return false
@@ -852,6 +886,10 @@ local function finalize_service_session(npc, kind, reason)
 		end
 	end
 	clear_service_intents(st, npc_info, kind, "service_" .. tostring(kind) .. "_" .. tostring(reason))
+	if kind == "trade" then
+		reset_trade_behavior_state(npc, st)
+	end
+	reselect_service_job(smart, npc_info)
 	if status == "completed" then
 		log_trade_info(
 			"axr_service_result npc=%s id=%s sid=%s smart=%s kind=%s status=%s reason=%s job=%s section=%s scheme=%s seller_id=%s mechanic_id=%s",
@@ -1484,6 +1522,14 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 		print_debug("trade_skip reason=no_storage npc_id=%s", tostring(id))
 		return
 	end
+	local economy = zhopa2_economy_mod()
+	if economy and type(economy.complete_axr_online_quest_service) == "function" then
+		local smart = xr_gulag and xr_gulag.get_npc_smart and xr_gulag.get_npc_smart(npc) or nil
+		local ok, handled = pcall(economy.complete_axr_online_quest_service, npc, smart)
+		if ok and handled == true then
+			return
+		end
+	end
 
 	if not (st.has_items_to_sell) then
 		print_debug("trade_skip reason=has_items_to_sell_false npc_id=%s", tostring(id))
@@ -1695,10 +1741,21 @@ zhopa_npc_trade_buy_sell_impl = function(npc)
 			break
 		end
 
+		local created = create_item_self_suppressed(pick.sec, npc, "npc_trade_buy_sell")
+		if not created then
+			log_always("buy_spawn_failed npc=%s id=%s sec=%s", npc and npc:name() or "nil", tostring(id), tostring(pick.sec))
+			break
+		end
+		local paid = pcall(npc.transfer_money, npc, pick.cost, seller)
+		if not paid then
+			local created_id = axr_object_id(created)
+			if created_id and type(alife_release_id) == "function" then
+				pcall(alife_release_id, created_id)
+			end
+			break
+		end
 		size_t = size_t + 1
 		buy_sell_items[size_t] = pick.sec
-		create_item_self_suppressed(pick.sec, npc, "npc_trade_buy_sell")
-		npc:transfer_money(pick.cost, seller)
 			print_trade_event("- NPC Trade | %s bought [%s] for %s RU", npc:name(), pick.sec, pick.cost)
 		if buy_all_enabled and not pick.is_ammo then
 			log_always("buy_allow_non_ammo npc=%s sec=%s have=%s target=%s cost=%s phase=%s",

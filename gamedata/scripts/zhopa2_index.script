@@ -3,6 +3,7 @@ local M = {}
 local BASE_PULL_RADIUS = 50
 local BASE_PULL_RADIUS_SQR = BASE_PULL_RADIUS * BASE_PULL_RADIUS
 local BASE_PULL_COOLDOWN_MS = 5000
+local BASE_OWNERSHIP_REFRESH_MS = 1000
 local ANOMALY_ZONE_SECTION = "anomal_zone"
 local VIRTUAL_ARTIFACT_ID_BASE = 100000000
 local VIRTUAL_ARTIFACT_SLOT_MULT = 1000
@@ -108,6 +109,14 @@ local function cfg_bool(key, default)
 	return default == true
 end
 
+local function squad_task_enabled(squad, key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.squad_task_enabled) == "function" then
+		return cfg.squad_task_enabled(squad, key, default) == true
+	end
+	return cfg_bool(key, default)
+end
+
 function M.offline_artifacts_enabled()
 	return cfg_bool("enabled", true) == true and cfg_bool("artefact_offline_enabled", true) == true
 end
@@ -131,6 +140,15 @@ local function tasks_mod()
 		tasks = rawget(_G, "zhopa2_tasks")
 	end
 	return tasks
+end
+
+local function npc_quest_active_squad(squad)
+	local quests = rawget(_G, "zhopa2_npc_quests")
+	if not quests and require then
+		pcall(require, "zhopa2_npc_quests")
+		quests = rawget(_G, "zhopa2_npc_quests")
+	end
+	return quests and type(quests.is_active_squad) == "function" and quests.is_active_squad(squad) == true
 end
 
 function M.quest_protected_squad(squad)
@@ -2327,9 +2345,6 @@ function M.try_empty_base_pull(smart)
 	if surge_active() then
 		return false
 	end
-	if not cfg_bool("base_camping_enabled", true) then
-		return false
-	end
 	local ownership = M.smart_ownership[smart.id] or M.update_base_ownership(smart)
 	if not (ownership and ownership.presence == "empty" and ownership.state ~= "unstable") then
 		return false
@@ -2352,7 +2367,7 @@ function M.try_empty_base_pull(smart)
 	for i = 1, #candidates do
 		local squad = candidates[i]
 		local dist = distance_to_sqr(squad, smart)
-		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable_soft(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
+		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable_soft(squad) and squad_task_enabled(squad, "base_camping_enabled", true) and not npc_quest_active_squad(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
 			local priority = 0
 			local reason = "base_camping_empty_base"
 			local monster = is_monster_squad(squad)
@@ -2401,7 +2416,14 @@ end
 
 function M.on_smart_update(smart)
 	local ownership_enabled = cfg_bool("base_ownership_enabled", true)
-	local ownership = ownership_enabled and M.update_base_ownership(smart) or nil
+	local ownership = ownership_enabled and smart and smart.id and M.smart_ownership[smart.id] or nil
+	if ownership_enabled and smart and smart.id then
+		local now = time_global and time_global() or 0
+		local updated = ownership and tonumber(ownership.updated) or 0
+		if not ownership or now <= 0 or now < updated or now - updated >= BASE_OWNERSHIP_REFRESH_MS then
+			ownership = M.update_base_ownership(smart)
+		end
+	end
 	local svc = service_fillers_mod()
 	if svc and type(svc.on_smart_update) == "function" then
 		pcall(svc.on_smart_update, smart, ownership)
@@ -2448,6 +2470,7 @@ local function server_entity_on_unregister(se_obj, type_name)
 end
 
 function M.on_game_load()
+	M.smart_ownership = {}
 	restore_persisted_virtual_artifacts()
 	restore_virtual_artifact_reservations_from_squads()
 end

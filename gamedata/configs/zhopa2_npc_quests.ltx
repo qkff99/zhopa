@@ -1,0 +1,25 @@
+; NPC squad quest framework. Individual smart names may override the default profile
+; or set it to disabled. The default profile intentionally covers trade smarts created
+; by vanilla and compatible service-fillers, so an unavailable smart simply skips itself.
+
+[npc_quests]
+service_wait_minutes = 1
+
+[quest_givers]
+default = default
+
+[quest_profile_default]
+types = documents, clear, occupy, hunt, delivery
+slots = 3
+reward_min = 250
+reward_max = 750
+documents_reward_min = 300
+documents_reward_max = 800
+clear_reward_min = 450
+clear_reward_max = 1100
+occupy_reward_min = 550
+occupy_reward_max = 1300
+hunt_reward_min = 400
+hunt_reward_max = 1000
+delivery_reward_min = 250
+delivery_reward_max = 650

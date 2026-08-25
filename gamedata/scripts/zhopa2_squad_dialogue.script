@@ -8,8 +8,6 @@ local FADE_DELAY_SEC = 3
 local ARRIVAL_SAFETY_RADIUS = 30
 local ARRIVAL_SAFETY_UPDATE_SEC = 1
 local ALIFE_OFFLINE_DISTANCE_FACTOR = 1.1
-local COMBAT_ARRIVAL_MIN_DISTANCE = 20
-local COMBAT_ARRIVAL_MAX_DISTANCE = 30
 local COMBAT_ARRIVAL_DISTANCES = { 25, 30, 28, 22, 20 }
 local STATE_VERSION = 1
 
@@ -23,9 +21,46 @@ local ACTIVITY_KEYS = {
 	NIGHT_REST = "ui_st_zhopa2_activity_night_rest",
 	ARTEFACT = "ui_st_zhopa2_activity_artefact",
 	TRADE = "ui_st_zhopa2_activity_trade",
+	QUEST = "ui_st_zhopa2_activity_quest",
 	HUNT = "ui_st_zhopa2_activity_hunt",
 	REVENGE = "ui_st_zhopa2_activity_revenge",
 	STORY_NORTH_MIGRATION = "ui_st_zhopa2_activity_story_north_migration",
+}
+
+local LEVEL_IMAGE_KEYS = {
+	l01_escape = "cordon",
+	k00_marsh = "great_swamp",
+	y04_pole = "cordon",
+	l05_bar = "rostok",
+	l02_garbage = "garbage",
+	k01_darkscape = "darkscape",
+	l03_agroprom = "agroprom",
+	l04_darkvalley = "dark_valley",
+	jupiter = "jupiter",
+	zaton = "zaton",
+	l06_rostok = "wild_territory",
+	l08_yantar = "yantar",
+	l07_military = "army_warehouses",
+	k02_trucks_cemetery = "truck_cemetery",
+	l09_deadcity = "dead_city",
+	l03u_agr_underground = "agroprom_underground",
+	l10_radar = "radar",
+	l10_red_forest = "red_forest",
+	l10_limansk = "limansk",
+	l11_pripyat = "pripyat",
+	pripyat = "outskirts",
+	l11_hospital = "deserted_hospital",
+	l12_stancia = "chernobyl_npp",
+	l12_stancia_2 = "chernobyl_npp",
+	l13_generators = "generators",
+	l04u_labx18 = "lab_x18",
+	l08u_brainlab = "lab_x16",
+	jupiter_underground = "jupiter_underground",
+	l10u_bunker = "lab_x19",
+	labx8 = "lab_x8",
+	l12u_control_monolith = "monolith_control_center",
+	l12u_sarcofag = "sarcophagus",
+	l13u_warlab = "warlab",
 }
 
 local REASON_TEXT = {
@@ -39,6 +74,7 @@ local REASON_TEXT = {
 	relation = "ui_st_zhopa2_travel_relation_unavailable",
 	distance = "ui_st_zhopa2_travel_distance_unavailable",
 	travel_failed = "ui_st_zhopa2_travel_failed",
+	money = "ui_st_zhopa2_travel_money",
 }
 
 local callbacks_registered = false
@@ -47,6 +83,8 @@ local pending_offer = nil
 local active_travel = nil
 local ui_locked = false
 local arrival_safety = nil
+local pending_cross_combat_arrival = nil
+local pending_cross_time_distance = nil
 
 local function load_module(name)
 	local mod = rawget(_G, name)
@@ -79,11 +117,25 @@ local function cfg_num(key, default)
 	return default
 end
 
+local function paid_travel_enabled()
+	return cfg_bool("squad_travel_paid_enabled", true)
+end
+
+local function paid_travel_multiplier()
+	return math.max(0.1, math.min(10, tonumber(cfg_num("squad_travel_price_multiplier", 1)) or 1))
+end
+
 local function feature_enabled()
 	return active == true
 		and rawget(_G, "zhopa2_runtime_disabled") ~= true
 		and cfg_bool("enabled", true)
 		and cfg_bool("squad_dialogue_enabled", true)
+end
+
+local function travel_debug(stage, detail)
+	if cfg_bool("debug_hud_enabled", false) == true and type(printf) == "function" then
+		pcall(printf, "~ ZHOPA2 squad travel | stage [%s] detail [%s]", tostring(stage or "-"), tostring(detail or "-"))
+	end
 end
 
 local function object_id(obj)
@@ -254,34 +306,57 @@ local function level_name_by_gvid(gvid)
 	return ok and type(name) == "string" and name ~= "" and name or nil
 end
 
+local function standard_arrival(target)
+	local sim = alife_sim()
+	local gg = game_graph and game_graph() or nil
+	if not (target and sim and gg and target.game_vertex_id) then
+		return nil
+	end
+	local ok, position, lvid, level_name = pcall(function()
+		if type(gg.valid_vertex_id) == "function" and not gg:valid_vertex_id(target.game_vertex_id) then
+			return nil
+		end
+		local vertex = gg:vertex(target.game_vertex_id)
+		local level_vertex_id = vertex and tonumber(vertex:level_vertex_id()) or nil
+		local level_point = vertex and copy_position(vertex:level_point()) or nil
+		local name = vertex and sim:level_name(vertex:level_id()) or nil
+		return level_point, level_vertex_id, name
+	end)
+	if not (ok and position and lvid and lvid >= 0 and level_name == target.level_name) then
+		return nil
+	end
+	return {
+		position = position,
+		level_vertex_id = lvid,
+		game_vertex_id = target.game_vertex_id,
+		level_name = level_name,
+	}
+end
+
 local function entity_class_id(obj)
 	local ok, value = pcall(function() return obj:clsid() end)
 	return ok and value or nil
 end
 
-local function resolve_moving_target(squad, expected_id)
-	if not squad or tonumber(squad.current_action) ~= 0 then
-		return nil, "target_changed"
+local function resolve_destination_target(target_id, squad_id)
+	target_id = normalize_id(target_id)
+	if not target_id then
+		return nil
 	end
-	local target_id = normalize_id(squad.assigned_target_id)
-	if not target_id or (expected_id and target_id ~= tonumber(expected_id)) then
-		return nil, "target_changed"
-	end
-	local squad_id = object_id(squad)
 	local actor_id = object_id(db and db.actor or nil)
 	if target_id == squad_id or target_id == actor_id then
-		return nil, "target_changed"
+		return nil
 	end
 	local obj = resolve_alife_object(target_id)
 	if not obj then
-		return nil, "target_changed"
+		return nil
 	end
 	local pos = copy_position(entity_value(obj, "position", "position"))
 	local lvid = tonumber(entity_value(obj, "m_level_vertex_id", "level_vertex_id"))
 	local gvid = tonumber(entity_value(obj, "m_game_vertex_id", "game_vertex_id"))
 	local level_name = level_name_by_gvid(gvid)
 	if not (pos and lvid and lvid >= 0 and gvid and gvid >= 0 and level_name) then
-		return nil, "target_changed"
+		return nil
 	end
 	local class_id = entity_class_id(obj)
 	return {
@@ -293,6 +368,18 @@ local function resolve_moving_target(squad, expected_id)
 		level_name = level_name,
 		is_smart = rawget(_G, "clsid") and class_id == clsid.smart_terrain or false,
 	}
+end
+
+local function resolve_moving_target(squad, expected_id)
+	if not squad or tonumber(squad.current_action) ~= 0 then
+		return nil, "target_changed"
+	end
+	local target_id = normalize_id(squad.assigned_target_id)
+	if not target_id or (expected_id and target_id ~= tonumber(expected_id)) then
+		return nil, "target_changed"
+	end
+	local target = resolve_destination_target(target_id, object_id(squad))
+	return target, target and nil or "target_changed"
 end
 
 local function translated(key)
@@ -377,6 +464,63 @@ local function activity_name(task)
 		or "..."
 end
 
+local QUEST_ACTIVITY_KEYS = {
+	to_giver = "ui_st_zhopa2_dialog_quest_to_giver",
+	finding_work = "ui_st_zhopa2_dialog_quest_finding_work",
+	working = "ui_st_zhopa2_dialog_quest_working",
+	reporting = "ui_st_zhopa2_dialog_quest_reporting",
+	delivering = "ui_st_zhopa2_dialog_quest_delivering",
+}
+
+local QUEST_KIND_KEYS = {
+	documents = "ui_st_zhopa2_dialog_quest_kind_documents",
+	clear = "ui_st_zhopa2_dialog_quest_kind_clear",
+	occupy = "ui_st_zhopa2_dialog_quest_kind_occupy",
+	hunt = "ui_st_zhopa2_dialog_quest_kind_hunt",
+	delivery = "ui_st_zhopa2_dialog_quest_kind_delivery",
+}
+
+local function quest_activity_text(squad)
+	local quests = load_module("zhopa2_npc_quests")
+	if not (quests and type(quests.dialogue_context) == "function") then
+		return nil, nil, nil
+	end
+	local ok, context = pcall(quests.dialogue_context, squad)
+	if not (ok and type(context) == "table") then
+		return nil, nil, nil
+	end
+	local key = QUEST_ACTIVITY_KEYS[context.state]
+	if not key then
+		return nil, nil, nil
+	end
+	local target = resolve_destination_target(context.target_id, object_id(squad))
+	return translated(key) or activity_name("QUEST"), target, translated(QUEST_KIND_KEYS[context.kind])
+end
+
+local function activity_destination_target(squad)
+	local quest_activity, target = quest_activity_text(squad)
+	if quest_activity then
+		return target
+	end
+	return resolve_moving_target(squad)
+end
+
+local function show_destination_card(squad)
+	local target = activity_destination_target(squad)
+	local image_key = target and LEVEL_IMAGE_KEYS[target.level_name] or nil
+	local level_name = target and translated(target.level_name) or nil
+	local actor = db and db.actor or nil
+	if not (image_key and level_name and actor) then
+		return false
+	end
+	local subtitle = smart_display_name(target) or ""
+	local texture = "encyclopedia_locations_" .. image_key .. "_image"
+	local ok = pcall(function()
+		actor:give_talk_message2(level_name, subtitle, texture, "iconed_answer_item")
+	end)
+	return ok == true
+end
+
 function M.activity_text(first_speaker, second_speaker)
 	local npc = npc_speaker(first_speaker, second_speaker)
 	local squad = eligible_context(npc)
@@ -387,8 +531,16 @@ function M.activity_text(first_speaker, second_speaker)
 	if squad.zhopa2_previous_task ~= nil then
 		lines[#lines + 1] = translated_format("ui_st_zhopa2_dialog_previous_fmt", activity_name(squad.zhopa2_previous_task))
 	end
-	lines[#lines + 1] = translated_format("ui_st_zhopa2_dialog_current_fmt", activity_name(squad.zhopa2_task))
-	local target = resolve_moving_target(squad)
+	local quest_activity, target, quest_kind = quest_activity_text(squad)
+	if quest_activity then
+		lines[#lines + 1] = quest_activity
+		if quest_kind then
+			lines[#lines + 1] = quest_kind
+		end
+	else
+		lines[#lines + 1] = translated_format("ui_st_zhopa2_dialog_current_fmt", activity_name(squad.zhopa2_task))
+		target = resolve_moving_target(squad)
+	end
 	if target then
 		lines[#lines + 1] = destination_text(target)
 	end
@@ -413,6 +565,9 @@ function M.prepare_offer(first_speaker, second_speaker)
 	pending_offer = nil
 	local npc = npc_speaker(first_speaker, second_speaker)
 	local squad = eligible_context(npc)
+	if squad then
+		show_destination_card(squad)
+	end
 	local target = squad and resolve_moving_target(squad) or nil
 	if not target then
 		return false
@@ -531,6 +686,26 @@ local function global_distance(target)
 	return ok and tonumber(distance) or nil
 end
 
+local function travel_price(distance)
+	if paid_travel_enabled() ~= true then
+		return 0
+	end
+	return math.floor(math.max(0, tonumber(distance) or 0) / 1000 * 1000 * paid_travel_multiplier())
+end
+
+local function actor_can_afford(price)
+	price = math.max(0, math.floor(tonumber(price) or 0))
+	if price == 0 then
+		return true
+	end
+	local actor = db and db.actor or nil
+	if not (actor and type(actor.money) == "function") then
+		return false
+	end
+	local ok, money = pcall(actor.money, actor)
+	return ok and tonumber(money) and tonumber(money) >= price
+end
+
 local function evaluate_offer(npc, allow_active_travel)
 	local offer = allow_active_travel and active_travel or pending_offer
 	local squad = eligible_context(npc)
@@ -588,11 +763,44 @@ function M.check_offer(first_speaker, second_speaker)
 		return false
 	end
 	pending_offer.reason = evaluate_offer(npc_speaker(first_speaker, second_speaker), false)
+	travel_debug("offer_checked", pending_offer.reason or "accepted")
 	return true
 end
 
 function M.offer_accepted(first_speaker, second_speaker)
 	return pending_offer ~= nil and pending_offer.reason == nil
+end
+
+local function offer_price(npc)
+	local reason, _, _, distance = evaluate_offer(npc, false)
+	if reason then
+		return nil
+	end
+	return travel_price(distance)
+end
+
+function M.travel_accept_text(first_speaker, second_speaker)
+	local price = offer_price(npc_speaker(first_speaker, second_speaker))
+	if price and price > 0 then
+		return translated_format("ui_st_zhopa2_dialog_travel_accept_paid_fmt", price)
+	end
+	return translated("ui_st_zhopa2_dialog_travel_accept") or "..."
+end
+
+function M.can_travel_ready(first_speaker, second_speaker)
+	if M.offer_accepted(first_speaker, second_speaker) ~= true then
+		return false
+	end
+	local price = offer_price(npc_speaker(first_speaker, second_speaker))
+	return price ~= nil and actor_can_afford(price)
+end
+
+function M.travel_ready_text(first_speaker, second_speaker)
+	local price = offer_price(npc_speaker(first_speaker, second_speaker))
+	if price and price > 0 then
+		return translated_format("ui_st_zhopa2_dialog_travel_ready_paid_fmt", price)
+	end
+	return translated("ui_st_zhopa2_dialog_travel_ready") or "..."
 end
 
 local function notify_reason(reason)
@@ -611,6 +819,44 @@ local function scenario_autosave(actor, npc)
 		return false
 	end
 	return pcall(effects.scenario_autosave, actor, npc, { "st_save_uni_travel_generic" })
+end
+
+local function charge_travel(npc, price)
+	price = math.max(0, math.floor(tonumber(price) or 0))
+	if price == 0 then
+		return true
+	end
+	local actor = db and db.actor or nil
+	if not (actor and npc and actor_can_afford(price) and type(actor.transfer_money) == "function") then
+		return false, "money"
+	end
+	if not pcall(actor.transfer_money, actor, price, npc) then
+		return false, "payment_failed"
+	end
+	local manager = rawget(_G, "news_manager")
+	if manager and type(manager.relocate_money) == "function" then
+		pcall(manager.relocate_money, actor, "out", price)
+	end
+	return true
+end
+
+local function refund_travel(npc, price)
+	price = math.max(0, math.floor(tonumber(price) or 0))
+	if price == 0 then
+		return
+	end
+	local actor = db and db.actor or nil
+	if not actor then
+		return
+	end
+	local refunded = npc and type(npc.transfer_money) == "function" and pcall(npc.transfer_money, npc, price, actor)
+	if refunded ~= true and type(actor.give_money) == "function" then
+		pcall(actor.give_money, actor, price)
+	end
+	local manager = rawget(_G, "news_manager")
+	if manager and type(manager.relocate_money) == "function" then
+		pcall(manager.relocate_money, actor, "in", price)
+	end
 end
 
 local function stop_dialog(actor, npc)
@@ -643,7 +889,7 @@ local function mark_time_forwarded()
 end
 
 local function advance_world_time(distance)
-	local lvl = rawget(_G, "level")
+	local lvl = rawget(_G, "level") or level
 	if not (lvl and type(lvl.change_game_time) == "function") then
 		return false
 	end
@@ -758,74 +1004,155 @@ local function position_distance_sqr(a, b)
 	return dx * dx + dy * dy + dz * dz
 end
 
-local function direct_combat_target_id(squad, target)
+local function direct_combat_target(squad, target)
 	local task = squad and squad.zhopa2_task or nil
 	local target_id = target and normalize_id(target.id) or nil
-	if (task ~= "HUNT" and task ~= "REVENGE")
-		or not target_id
-		or normalize_id(squad.zhopa2_target) ~= target_id
-	then
+	if not target_id or normalize_id(squad.zhopa2_target) ~= target_id then
+		return nil
+	end
+	if task == "QUEST" then
+		local quests = load_module("zhopa2_npc_quests")
+		if quests and type(quests.combat_arrival_target_id) == "function" then
+			local ok, protected_id = pcall(quests.combat_arrival_target_id, squad, target_id)
+			protected_id = ok and normalize_id(protected_id) or nil
+			local combat_target = protected_id and resolve_destination_target(protected_id, object_id(squad)) or nil
+			if combat_target and combat_target.level_name == target.level_name then
+				return combat_target, protected_id
+			end
+		end
+		return nil
+	end
+	if task ~= "HUNT" and task ~= "REVENGE" then
 		return nil
 	end
 	local board_squads = SIMBOARD and SIMBOARD.squads or nil
 	if type(board_squads) == "table" and board_squads[target_id] ~= nil then
-		return target_id
+		return target, target_id
 	end
 	local ok, is_squad = pcall(function() return type(target.object.squad_members) == "function" end)
-	return ok and is_squad and target_id or nil
+	if ok and is_squad then
+		return target, target_id
+	end
+	return nil
 end
 
-local function travel_arrival(squad, target)
-	local protected_target_id = direct_combat_target_id(squad, target)
-	if not protected_target_id then
-		return target, nil
-	end
+local function combat_arrival_on_loaded_level(combat_target, direction)
 	local lvl = rawget(_G, "level")
-	local actor = db and db.actor or nil
-	if not (lvl and actor and target and target.position and type(vector) == "function"
-		and type(lvl.name) == "function" and type(lvl.vertex_in_direction) == "function"
-		and type(lvl.vertex_position) == "function")
-	then
-		return nil, protected_target_id
+	local current_name = nil
+	if lvl and type(lvl.name) == "function" then
+		local named, name = pcall(lvl.name)
+		current_name = named and name or nil
 	end
-	local level_ok, level_name = pcall(lvl.name)
-	if not (level_ok and level_name == target.level_name) then
-		return nil, protected_target_id
+	if current_name ~= combat_target.level_name then
+		return nil, "level_unloaded"
 	end
-	local origin = copy_position(entity_value(actor, "position", "position"))
-		or copy_position(entity_value(squad, "position", "position"))
-	local ok, dx, dz = pcall(function()
-		return origin.x - target.position.x, origin.z - target.position.z
-	end)
-	if not (ok and tonumber(dx) and tonumber(dz) and dx * dx + dz * dz > 0.01) then
-		return nil, protected_target_id
-	end
-	local dir_ok, direction = pcall(function() return vector():set(dx, 0, dz) end)
-	if not (dir_ok and direction) then
-		return nil, protected_target_id
+	if not (type(lvl.vertex_in_direction) == "function" and type(lvl.vertex_position) == "function") then
+		return nil, "vertex_api_missing"
 	end
 	for _, distance in ipairs(COMBAT_ARRIVAL_DISTANCES) do
-		local vertex_ok, lvid = pcall(lvl.vertex_in_direction, target.level_vertex_id, direction, distance)
-		lvid = vertex_ok and tonumber(lvid) or nil
+		local moved, lvid = pcall(lvl.vertex_in_direction, combat_target.level_vertex_id, direction, distance)
+		lvid = moved and tonumber(lvid) or nil
 		if lvid and lvid >= 0 and lvid < 4294967295 then
-			local position_ok, position = pcall(lvl.vertex_position, lvid)
-			position = position_ok and copy_position(position) or nil
-			local distance_ok, actual_distance = pcall(function()
-				local x = position.x - target.position.x
-				local z = position.z - target.position.z
-				return math.sqrt(x * x + z * z)
-			end)
-			if distance_ok and actual_distance >= COMBAT_ARRIVAL_MIN_DISTANCE and actual_distance <= COMBAT_ARRIVAL_MAX_DISTANCE then
+			local positioned, position = pcall(lvl.vertex_position, lvid)
+			position = positioned and copy_position(position) or nil
+			if position then
 				return {
 					position = position,
 					level_vertex_id = lvid,
-					game_vertex_id = target.game_vertex_id,
-					level_name = target.level_name,
-				}, protected_target_id
+					game_vertex_id = combat_target.game_vertex_id,
+					level_name = combat_target.level_name,
+				}, distance
 			end
 		end
 	end
-	return nil, protected_target_id
+	return nil, "vertex_missing"
+end
+
+local function travel_arrival(squad, target)
+	local combat_target, protected_target_id = direct_combat_target(squad, target)
+	if not combat_target then
+		local arrival = standard_arrival(target)
+		return arrival, nil, arrival and "standard_graph_vertex" or "standard_vertex_missing"
+	end
+	local sim = alife_sim()
+	local actor = sim and type(sim.actor) == "function" and sim:actor() or nil
+	local gp = rawget(_G, "global_position")
+	if not (actor and combat_target.object and combat_target.position and gp and type(gp.from) == "function") then
+		return nil, protected_target_id, "combat_global_context_missing"
+	end
+	local ok, direction = pcall(function()
+		local origin = gp.from(actor)
+		local destination = gp.from(combat_target.object)
+		local dx, dz = origin.x - destination.x, origin.z - destination.z
+		local length = math.sqrt(dx * dx + dz * dz)
+		if length <= 0.01 then
+			return nil
+		end
+		return vector():set(dx / length, 0, dz / length)
+	end)
+	if not (ok and direction) then
+		return nil, protected_target_id, "combat_arrival_position_missing"
+	end
+
+	local arrival, result = combat_arrival_on_loaded_level(combat_target, direction)
+	if arrival then
+		travel_debug("combat_arrival_vertex", "distance=" .. tostring(result) .. " lvid=" .. tostring(arrival.level_vertex_id)
+			.. " target=" .. tostring(protected_target_id))
+		return arrival, protected_target_id, "combat_offset_" .. tostring(result)
+	end
+	travel_debug("combat_arrival_anchor", "target=" .. tostring(protected_target_id) .. " reason=" .. tostring(result))
+	return combat_target, protected_target_id, "combat_target_anchor", {
+		squad_id = object_id(squad),
+		target_id = combat_target.id,
+		level_name = combat_target.level_name,
+		direction_x = direction.x,
+		direction_z = direction.z,
+	}
+end
+
+local function squad_arrival_record(squad, arrival, quiet)
+	local position = copy_position(arrival and arrival.position) or copy_position(entity_value(squad, "position", "position"))
+	local lvid = tonumber(arrival and arrival.level_vertex_id) or tonumber(entity_value(squad, "m_level_vertex_id", "level_vertex_id"))
+	local gvid = tonumber(arrival and arrival.game_vertex_id) or tonumber(entity_value(squad, "m_game_vertex_id", "game_vertex_id"))
+	if not position then
+		return nil
+	end
+	if quiet ~= true then
+		travel_debug("squad_arrival_recorded", "squad=" .. tostring(object_id(squad))
+			.. " pos=" .. tostring(position.x) .. "," .. tostring(position.y) .. "," .. tostring(position.z)
+			.. " lvid=" .. tostring(lvid) .. " gvid=" .. tostring(gvid))
+	end
+	return { position = position, level_vertex_id = lvid, game_vertex_id = gvid }
+end
+
+local function restore_travel_origin(squad, squad_origin, actor_origin)
+	local restored = true
+	if squad and squad_origin and type(TeleportSquad) == "function" then
+		local ok, result = pcall(TeleportSquad, squad, squad_origin.position, squad_origin.level_vertex_id, squad_origin.game_vertex_id)
+		restored = ok and result ~= false and restored
+	end
+	local actor = db and db.actor or nil
+	if actor and actor_origin then
+		restored = pcall(actor.set_actor_position, actor, actor_origin) and restored
+	end
+	travel_debug("travel_rollback", "restored=" .. tostring(restored))
+	return restored
+end
+
+local function place_actor_with_squad(squad, arrival, include_companions)
+	local recorded = squad_arrival_record(squad, arrival)
+	if not recorded then
+		return false, "squad_arrival_record_missing"
+	end
+	local actor = db and db.actor or nil
+	if not actor then
+		return false, "actor_missing"
+	end
+	actor:set_actor_position(recorded.position)
+	if include_companions then
+		bring_companions(recorded.position, recorded.level_vertex_id, recorded.game_vertex_id, object_id(squad))
+	end
+	return true
 end
 
 local function squad_members(squad)
@@ -1178,6 +1505,7 @@ local function perform_same_level_travel()
 	local npc = travel and find_online_object(travel.commander_id) or nil
 	local reason, squad, target, distance = evaluate_offer(npc, true)
 	if reason or not (travel and target and target.level_name == travel.level_name) then
+		travel_debug("execute_cancelled", "mode=same reason=" .. tostring(reason or "target_level_changed"))
 		active_travel = nil
 		pending_offer = nil
 		restore_ui(false)
@@ -1185,26 +1513,51 @@ local function perform_same_level_travel()
 		return true
 	end
 	pending_offer = nil
-	local ok = pcall(function()
-		local arrival, protected_target_id = travel_arrival(squad, target)
-		if not arrival then error("combat_arrival_missing") end
-		if not advance_world_time(distance) then error("time_advance_failed") end
-		local suppressed = suppress_arrival_threats(arrival, object_id(squad), false, protected_target_id)
-		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+	travel_debug("execute_started", "mode=same squad=" .. tostring(object_id(squad)) .. " target=" .. tostring(target.id))
+	local charged = false
+	local movement_started = false
+	local squad_origin = nil
+	local actor_origin = nil
+	local ok, travel_error = pcall(function()
+		local arrival, protected_target_id, arrival_reason = travel_arrival(squad, target)
+		if not arrival then error(arrival_reason or "combat_arrival_missing") end
+		travel_debug("arrival_resolved", "mode=same reason=" .. tostring(arrival_reason) .. " protected=" .. tostring(protected_target_id or "-"))
 		if type(TeleportSquad) ~= "function" then error("teleport_squad_missing") end
-		TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id)
-		local actor = db and db.actor or nil
-		if not actor then error("actor_missing") end
-		actor:set_actor_position(arrival.position)
-		bring_companions(arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, object_id(squad))
+		squad_origin = squad_arrival_record(squad, nil, true)
+		actor_origin = copy_position(entity_value(db and db.actor or nil, "position", "position"))
+		if not (squad_origin and squad_origin.level_vertex_id and squad_origin.game_vertex_id and actor_origin) then
+			error("travel_origin_missing")
+		end
+		local suppressed = suppress_arrival_threats(arrival, object_id(squad), false, protected_target_id)
+		travel_debug("arrival_safety", "suppressed=" .. tostring(suppressed) .. " protected=" .. tostring(protected_target_id or "-"))
+		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+		local paid, payment_reason = charge_travel(npc, travel.price)
+		if paid ~= true then error(payment_reason or "payment_failed") end
+		charged = tonumber(travel.price) and tonumber(travel.price) > 0
+		movement_started = true
+		if TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id) == false then error("teleport_squad_failed") end
+		travel_debug("squad_teleported", "mode=same")
+		local placed, place_reason = place_actor_with_squad(squad, arrival, false)
+		if not placed then error(place_reason or "squad_arrival_sync_failed") end
+		travel_debug("actor_teleported", "mode=same")
+		if not advance_world_time(distance) then error("time_advance_failed") end
+		travel_debug("time_forwarded", "distance=" .. tostring(math.floor(distance or 0)))
+		local companions_ok = pcall(bring_companions, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, object_id(squad))
+		if not companions_ok then
+			travel_debug("companion_teleport_failed", "mode=same")
+		end
 	end)
 	if not ok then
+		if movement_started then restore_travel_origin(squad, squad_origin, actor_origin) end
+		if charged then refund_travel(npc, travel and travel.price) end
+		travel_debug("execute_failed", "mode=same error=" .. tostring(travel_error))
 		active_travel = nil
 		restore_arrival_safety()
 		restore_ui(false)
 		notify_reason("travel_failed")
 		return true
 	end
+	travel_debug("execute_finished", "mode=same")
 	if type(CreateTimeEvent) == "function" then
 		local scheduled = pcall(CreateTimeEvent, EVENT_ID, "restore", FADE_DELAY_SEC, restore_after_travel)
 		if scheduled then
@@ -1215,8 +1568,9 @@ local function perform_same_level_travel()
 	return true
 end
 
-local function start_same_level_travel(npc, squad, target)
+local function start_same_level_travel(npc, squad, target, price)
 	if not lock_ui_for_fade() then
+		travel_debug("start_failed", "mode=same reason=ui_lock_failed")
 		return false
 	end
 	active_travel = {
@@ -1224,13 +1578,16 @@ local function start_same_level_travel(npc, squad, target)
 		squad_id = object_id(squad),
 		target_id = target.id,
 		level_name = target.level_name,
+		price = math.max(0, math.floor(tonumber(price) or 0)),
 	}
 	if type(CreateTimeEvent) == "function" then
 		local ok = pcall(CreateTimeEvent, EVENT_ID, "execute_same", FADE_DELAY_SEC, perform_same_level_travel)
 		if ok then
+			travel_debug("execute_scheduled", "mode=same")
 			return true
 		end
 	end
+	travel_debug("execute_immediate", "mode=same")
 	return perform_same_level_travel()
 end
 
@@ -1239,6 +1596,7 @@ local function perform_cross_level_travel()
 	local npc = travel and find_online_object(travel.commander_id) or nil
 	local reason, squad, target, distance = evaluate_offer(npc, true)
 	if reason or not (travel and target and target.level_name == travel.level_name) then
+		travel_debug("execute_cancelled", "mode=cross reason=" .. tostring(reason or "target_level_changed"))
 		active_travel = nil
 		pending_offer = nil
 		restore_ui(false)
@@ -1246,30 +1604,55 @@ local function perform_cross_level_travel()
 		return true
 	end
 	pending_offer = nil
-	local ok = pcall(function()
-		local arrival, protected_target_id = travel_arrival(squad, target)
-		if not arrival then error("combat_arrival_missing") end
-		if not advance_world_time(distance) then error("time_advance_failed") end
-		local suppressed = suppress_arrival_threats(arrival, object_id(squad), true, protected_target_id)
-		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+	travel_debug("execute_started", "mode=cross squad=" .. tostring(object_id(squad)) .. " target=" .. tostring(target.id))
+	local charged = false
+	local movement_started = false
+	local squad_origin = nil
+	local ok, travel_error = pcall(function()
+		local arrival, protected_target_id, arrival_reason, deferred_combat_arrival = travel_arrival(squad, target)
+		if not arrival then error(arrival_reason or "combat_arrival_missing") end
+		travel_debug("arrival_resolved", "mode=cross reason=" .. tostring(arrival_reason) .. " protected=" .. tostring(protected_target_id or "-"))
 		if type(TeleportSquad) ~= "function" then error("teleport_squad_missing") end
-		TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id)
 		if type(ChangeLevel) ~= "function" then error("change_level_missing") end
+		squad_origin = squad_arrival_record(squad, nil, true)
+		if not (squad_origin and squad_origin.level_vertex_id and squad_origin.game_vertex_id) then error("travel_origin_missing") end
+		local suppressed = suppress_arrival_threats(arrival, object_id(squad), true, protected_target_id)
+		travel_debug("arrival_safety", "suppressed=" .. tostring(suppressed) .. " protected=" .. tostring(protected_target_id or "-"))
+		if suppressed > 0 and not schedule_arrival_safety_tick() then error("arrival_safety_timer_failed") end
+		local paid, payment_reason = charge_travel(npc, travel.price)
+		if paid ~= true then error(payment_reason or "payment_failed") end
+		charged = tonumber(travel.price) and tonumber(travel.price) > 0
+		movement_started = true
+		if TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id) == false then error("teleport_squad_failed") end
+		travel_debug("squad_teleported", "mode=cross")
+		squad_arrival_record(squad, arrival)
+		pending_cross_combat_arrival = deferred_combat_arrival
+		pending_cross_time_distance = distance
 		active_travel = nil
 		unlock_ui_for_level_change()
-		ChangeLevel(arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, VEC_ZERO, true)
+		if ChangeLevel(arrival.position, arrival.level_vertex_id, arrival.game_vertex_id, VEC_ZERO, true) == false then error("change_level_failed") end
+		travel_debug("level_change_requested", "level=" .. tostring(arrival.level_name))
 	end)
 	if not ok then
+		if movement_started then restore_travel_origin(squad, squad_origin, nil) end
+		if charged then refund_travel(npc, travel and travel.price) end
+		travel_debug("execute_failed", "mode=cross error=" .. tostring(travel_error))
 		active_travel = nil
+		pending_cross_combat_arrival = nil
+		pending_cross_time_distance = nil
 		restore_arrival_safety()
 		restore_ui(false)
 		notify_reason("travel_failed")
 	end
+	if ok then
+		travel_debug("execute_finished", "mode=cross")
+	end
 	return true
 end
 
-local function start_cross_level_travel(npc, squad, target)
+local function start_cross_level_travel(npc, squad, target, price)
 	if not lock_ui_for_fade() then
+		travel_debug("start_failed", "mode=cross reason=ui_lock_failed")
 		return false
 	end
 	active_travel = {
@@ -1277,13 +1660,16 @@ local function start_cross_level_travel(npc, squad, target)
 		squad_id = object_id(squad),
 		target_id = target.id,
 		level_name = target.level_name,
+		price = math.max(0, math.floor(tonumber(price) or 0)),
 	}
 	if type(CreateTimeEvent) == "function" then
 		local ok = pcall(CreateTimeEvent, EVENT_ID, "execute_cross", FADE_DELAY_SEC, perform_cross_level_travel)
 		if ok then
+			travel_debug("execute_scheduled", "mode=cross")
 			return true
 		end
 	end
+	travel_debug("execute_immediate", "mode=cross")
 	return perform_cross_level_travel()
 end
 
@@ -1291,12 +1677,23 @@ function M.travel_ready(first_speaker, second_speaker)
 	local npc = npc_speaker(first_speaker, second_speaker)
 	local reason, squad, target, distance = evaluate_offer(npc, false)
 	if reason then
+		travel_debug("ready_rejected", "reason=" .. tostring(reason))
 		pending_offer = nil
 		notify_reason(reason)
 		return false
 	end
+	local price = travel_price(distance)
+	if actor_can_afford(price) ~= true then
+		travel_debug("ready_rejected", "reason=money price=" .. tostring(price))
+		pending_offer = nil
+		notify_reason("money")
+		return false
+	end
+	pending_cross_combat_arrival = nil
+	pending_cross_time_distance = nil
 	local actor = db and db.actor or nil
 	if not scenario_autosave(actor, npc) then
+		travel_debug("ready_rejected", "reason=autosave_failed")
 		pending_offer = nil
 		notify_reason("travel_failed")
 		return false
@@ -1309,11 +1706,14 @@ function M.travel_ready(first_speaker, second_speaker)
 	end
 	local started
 	if current_level == target.level_name then
-		started = start_same_level_travel(npc, squad, target)
+		travel_debug("ready_accepted", "mode=same target=" .. tostring(target.id) .. " distance=" .. tostring(math.floor(distance or 0)) .. " price=" .. tostring(price))
+		started = start_same_level_travel(npc, squad, target, price)
 	else
-		started = start_cross_level_travel(npc, squad, target)
+		travel_debug("ready_accepted", "mode=cross target=" .. tostring(target.id) .. " distance=" .. tostring(math.floor(distance or 0)) .. " price=" .. tostring(price))
+		started = start_cross_level_travel(npc, squad, target, price)
 	end
 	if started ~= true then
+		travel_debug("ready_failed", "reason=start_failed")
 		active_travel = nil
 		pending_offer = nil
 		restore_ui(false)
@@ -1361,8 +1761,8 @@ function M.init_dialog(dialog)
 	add_refusal(dialog, "zhopa2_travel_distance", "ui_st_zhopa2_travel_distance_unavailable", "zhopa2_squad_dialogue.offer_distance_unavailable")
 	add_refusal(dialog, "zhopa2_travel_failed", "ui_st_zhopa2_travel_failed", "zhopa2_squad_dialogue.offer_travel_failed")
 
-	add_phrase(dialog, "zhopa2_travel_q", "zhopa2_travel_yes", "ui_st_zhopa2_dialog_travel_accept", "zhopa2_squad_dialogue.offer_accepted")
-	add_phrase(dialog, "zhopa2_travel_yes", "zhopa2_travel_ready", "ui_st_zhopa2_dialog_travel_ready", nil, "zhopa2_squad_dialogue.travel_ready")
+	add_phrase(dialog, "zhopa2_travel_q", "zhopa2_travel_yes", "ui_st_zhopa2_dialog_placeholder", "zhopa2_squad_dialogue.offer_accepted", nil, "zhopa2_squad_dialogue.travel_accept_text")
+	add_phrase(dialog, "zhopa2_travel_yes", "zhopa2_travel_ready", "ui_st_zhopa2_dialog_placeholder", "zhopa2_squad_dialogue.can_travel_ready", "zhopa2_squad_dialogue.travel_ready", "zhopa2_squad_dialogue.travel_ready_text")
 	add_phrase(dialog, "zhopa2_travel_yes", "zhopa2_travel_cancel", "ui_st_zhopa2_dialog_travel_cancel", nil, "zhopa2_squad_dialogue.clear_offer")
 end
 
@@ -1388,6 +1788,50 @@ local function on_game_load()
 	end
 end
 
+local function actor_on_first_update()
+	local time_distance = pending_cross_time_distance
+	pending_cross_time_distance = nil
+	if time_distance then
+		if advance_world_time(time_distance) then
+			travel_debug("time_forwarded", "mode=cross distance=" .. tostring(math.floor(time_distance or 0)))
+		else
+			travel_debug("time_forward_failed", "mode=cross")
+		end
+	end
+	local deferred = pending_cross_combat_arrival
+	if not deferred then
+		return
+	end
+	pending_cross_combat_arrival = nil
+	if current_level_name() ~= deferred.level_name then
+		travel_debug("combat_arrival_deferred_failed", "reason=level_mismatch")
+		return
+	end
+	local squad = resolve_alife_object(deferred.squad_id)
+	local target = resolve_destination_target(deferred.target_id, deferred.squad_id)
+	local made, direction = pcall(function() return vector():set(deferred.direction_x, 0, deferred.direction_z) end)
+	if not (squad and target and made and direction) then
+		travel_debug("combat_arrival_deferred_failed", "reason=state_invalid")
+		return
+	end
+	local arrival, result = combat_arrival_on_loaded_level(target, direction)
+	if not arrival then
+		travel_debug("combat_arrival_deferred_failed", "reason=" .. tostring(result))
+		return
+	end
+	local ok, err = pcall(function()
+		if type(TeleportSquad) ~= "function" then error("teleport_squad_missing") end
+		if TeleportSquad(squad, arrival.position, arrival.level_vertex_id, arrival.game_vertex_id) == false then error("teleport_squad_failed") end
+		local placed, reason = place_actor_with_squad(squad, arrival, false)
+		if not placed then error(reason or "actor_placement_failed") end
+	end)
+	if ok then
+		travel_debug("combat_arrival_deferred_applied", "distance=" .. tostring(result) .. " lvid=" .. tostring(arrival.level_vertex_id))
+	else
+		travel_debug("combat_arrival_deferred_failed", "reason=" .. tostring(err))
+	end
+end
+
 local function actor_on_leave_dialog()
 	pending_offer = nil
 end
@@ -1403,16 +1847,18 @@ function M.on_game_start()
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
 		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 		pcall(UnregisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
 		pcall(UnregisterScriptCallback, "save_state", save_state)
 		pcall(UnregisterScriptCallback, "load_state", load_state)
 	end
 	local list_ok = pcall(RegisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
 	local load_ok = pcall(RegisterScriptCallback, "on_game_load", on_game_load)
+	local first_update_ok = pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 	local leave_ok = pcall(RegisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
 	local save_ok = pcall(RegisterScriptCallback, "save_state", save_state)
 	local state_load_ok = pcall(RegisterScriptCallback, "load_state", load_state)
-	callbacks_registered = list_ok == true and load_ok == true and leave_ok == true
+	callbacks_registered = list_ok == true and load_ok == true and first_update_ok == true and leave_ok == true
 		and save_ok == true and state_load_ok == true
 	return callbacks_registered
 end
@@ -1421,6 +1867,8 @@ function M.on_master_disable()
 	active = false
 	pending_offer = nil
 	active_travel = nil
+	pending_cross_combat_arrival = nil
+	pending_cross_time_distance = nil
 	restore_arrival_safety()
 	if type(RemoveTimeEvent) == "function" then
 		pcall(RemoveTimeEvent, EVENT_ID, "arrival_safety")
@@ -1429,6 +1877,7 @@ function M.on_master_disable()
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "on_specific_character_dialog_list", add_dialog_to_list)
 		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 		pcall(UnregisterScriptCallback, "actor_on_leave_dialog", actor_on_leave_dialog)
 		pcall(UnregisterScriptCallback, "save_state", save_state)
 		pcall(UnregisterScriptCallback, "load_state", load_state)

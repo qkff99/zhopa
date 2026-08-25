@@ -1,0 +1,2306 @@
+local M = {}
+
+local STATE_KEY = "zhopa2_npc_quests"
+local STATE_VERSION = 1
+local TASK_QUEST = "QUEST"
+local STATUS_AVAILABLE = "AVAILABLE"
+local STATUS_RESERVED = "RESERVED"
+local STATUS_IN_PROGRESS = "IN_PROGRESS"
+local STATUS_RETURNING = "RETURNING"
+local STATUS_COMPLETED = "COMPLETED"
+local STATUS_FAILED = "FAILED"
+local DEFAULT_PROFILE = "default"
+local DEFAULT_DOCUMENT_SECTION = "zhopa_npc_quest_documents"
+local DELIVERY_SECTION_PREFIX = "zhopa_npc_quest_package_"
+local FALLBACK_DELIVERY_SECTIONS = {
+	"zhopa_npc_quest_package_4",
+	"zhopa_npc_quest_package_5",
+}
+local DEFAULT_CONTAINER_SECTION = "inv_backpack"
+local REVISION_INTERVAL_MS = 1000
+local REVISION_GIVERS_PER_TICK = 2
+local RETIRED_LIMIT = 128
+local DOCUMENT_PICKUP_RADIUS_SQR = 25
+local DOCUMENT_PICKUP_DELAY_MS = 2500
+local DOCUMENT_ONLINE_CONTEXT_TIMEOUT_MS = 15000
+
+local quest_ini = ini_file_ex("zhopa2_npc_quests.ltx")
+local state = nil
+local callbacks_registered = false
+local pending_reconcile = true
+local revision_queue = {}
+local revision_day = nil
+local next_revision_tg = 0
+local suppress_task_clear = false
+local delivery_sections_cache = nil
+
+local function safe_require(name)
+	local mod = rawget(_G, name)
+	if not mod and require then
+		pcall(require, name)
+		mod = rawget(_G, name)
+	end
+	return mod
+end
+
+local function cfg()
+	return safe_require("zhopa2_cfg")
+end
+
+local function perception()
+	return safe_require("zhopa2_perception")
+end
+
+local function index()
+	return safe_require("zhopa2_index")
+end
+
+local function tasks()
+	return safe_require("zhopa2_tasks")
+end
+
+local function economy()
+	return safe_require("zhopa2_economy")
+end
+
+local function memory()
+	return safe_require("zhopa2_memory")
+end
+
+local function now_ms()
+	if type(time_global) == "function" then
+		local ok, value = pcall(time_global)
+		if ok and tonumber(value) then
+			return tonumber(value)
+		end
+	end
+	return math.floor((os and os.clock and os.clock() or 0) * 1000)
+end
+
+local function game_minutes()
+	local game_level = level
+	if not (game_level and type(game_level.get_time_days) == "function" and type(game_level.get_time_hours) == "function" and type(game_level.get_time_minutes) == "function") then
+		return nil
+	end
+	local ok_d, days = pcall(game_level.get_time_days)
+	local ok_h, hours = pcall(game_level.get_time_hours)
+	local ok_m, minutes = pcall(game_level.get_time_minutes)
+	days, hours, minutes = tonumber(days), tonumber(hours), tonumber(minutes)
+	if not (ok_d and ok_h and ok_m and days and hours and minutes) then
+		return nil
+	end
+	return days * 1440 + hours * 60 + minutes
+end
+
+local function game_day()
+	if not level or type(level.get_time_days) ~= "function" then
+		return nil
+	end
+	local ok, value = pcall(level.get_time_days)
+	return ok and tonumber(value) or nil
+end
+
+local function object_id(obj)
+	if type(obj) == "number" then
+		return obj
+	end
+	if not obj then
+		return nil
+	end
+	local ok, id = pcall(function()
+		return obj.id
+	end)
+	if ok and id ~= nil and type(id) ~= "function" then
+		return tonumber(id) or id
+	end
+	ok, id = pcall(function()
+		return obj:id()
+	end)
+	return ok and (tonumber(id) or id) or nil
+end
+
+local function object_name(obj)
+	if not obj then
+		return nil
+	end
+	local ok, name = pcall(function()
+		return obj.name
+	end)
+	if ok and name ~= nil and type(name) ~= "function" then
+		return tostring(name)
+	end
+	ok, name = pcall(function()
+		return obj:name()
+	end)
+	return ok and name and tostring(name) or nil
+end
+
+local function alife_object(id)
+	if not (id and type(alife) == "function") then
+		return nil
+	end
+	local ok_sim, sim = pcall(alife)
+	if not sim or not ok_sim or type(sim.object) ~= "function" then
+		return nil
+	end
+	local ok, obj = pcall(sim.object, sim, id)
+	return ok and obj or nil
+end
+
+local function online_object(id)
+	if not id then
+		return nil
+	end
+	id = tonumber(id) or id
+	local obj = db and db.storage and db.storage[id] and db.storage[id].object or nil
+	if not obj and level and type(level.object_by_id) == "function" then
+		local ok, found = pcall(level.object_by_id, id)
+		obj = ok and found or nil
+	end
+	return obj
+end
+
+local function alife_sim()
+	if type(alife) ~= "function" then
+		return nil
+	end
+	local ok, sim = pcall(alife)
+	return ok and sim or nil
+end
+
+local function object_alive(obj)
+	if not obj then
+		return false
+	end
+	if type(obj.alive) == "function" then
+		local ok, alive = pcall(obj.alive, obj)
+		if ok then
+			return alive == true
+		end
+	end
+	return object_id(obj) ~= nil
+end
+
+local function squad_alive(squad)
+	if not (squad and type(squad.npc_count) == "function") then
+		return false
+	end
+	local ok, count = pcall(squad.npc_count, squad)
+	return ok and (tonumber(count) or 0) > 0
+end
+
+local function object_community(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.community) == "function" then
+		local ok, value = pcall(obj.community, obj)
+		if ok and value and value ~= "" then
+			return tostring(value)
+		end
+	end
+	local ok, value = pcall(function()
+		return obj.community
+	end)
+	if ok and value and type(value) ~= "function" and value ~= "" then
+		return tostring(value)
+	end
+	return nil
+end
+
+local function provider_relation_faction(provider)
+	local provider_id = object_id(provider)
+	local live = provider_id and online_object(provider_id) or provider
+	if live and type(live.character_community) == "function" then
+		local ok, community = pcall(live.character_community, live)
+		if ok and community and community ~= "" then
+			return tostring(community)
+		end
+	end
+
+	local server = provider_id and alife_object(provider_id) or provider
+	local community = object_community(server) or object_community(provider)
+	if community then
+		return community
+	end
+
+	local ok, group_id = pcall(function()
+		return server and server.group_id
+	end)
+	if type(group_id) == "function" then
+		ok, group_id = pcall(group_id, server)
+	end
+	group_id = ok and (tonumber(group_id) or group_id) or nil
+	local squad = group_id and group_id ~= 65535 and alife_object(group_id) or nil
+	local p = perception()
+	if squad and p and type(p.squad_relation_faction) == "function" then
+		local faction_ok, faction = pcall(p.squad_relation_faction, squad)
+		if faction_ok and faction and faction ~= "" then
+			return tostring(faction)
+		end
+	end
+	return nil
+end
+
+local function factions_hostile(first, second)
+	if not (first and second and game_relations and type(game_relations.is_factions_enemies) == "function") then
+		return false
+	end
+	local ok, hostile = pcall(game_relations.is_factions_enemies, first, second)
+	return ok and hostile == true
+end
+
+local function squad_faction(squad)
+	local p = perception()
+	if p and type(p.squad_relation_faction) == "function" then
+		local ok, faction = pcall(p.squad_relation_faction, squad)
+		if ok and faction and faction ~= "" then
+			return tostring(faction)
+		end
+	end
+	return nil
+end
+
+local function object_level(obj)
+	local p = perception()
+	if p and type(p.obj_level) == "function" then
+		local ok, level_name = pcall(p.obj_level, obj)
+		if ok and level_name then
+			return tostring(level_name)
+		end
+	end
+	return nil
+end
+
+local function ini_string(section, key)
+	if not (quest_ini and type(quest_ini.r_string_ex) == "function" and section and key) then
+		return nil
+	end
+	local ok, value = pcall(quest_ini.r_string_ex, quest_ini, section, key)
+	return ok and value and tostring(value) or nil
+end
+
+local function ini_num(section, key, default)
+	return tonumber(ini_string(section, key)) or default
+end
+
+local function trim(value)
+	return type(value) == "string" and string.match(value, "^%s*(.-)%s*$") or ""
+end
+
+local function list_value(value)
+	local out = {}
+	if type(value) ~= "string" then
+		return out
+	end
+	for token in string.gmatch(value, "[^,]+") do
+		token = trim(token)
+		if token ~= "" then
+			out[#out + 1] = token
+		end
+	end
+	return out
+end
+
+local function new_state()
+	return {
+		version = STATE_VERSION,
+		next_id = 1,
+		last_revision_day = -1,
+		quests = {},
+		giver_active_ids = {},
+		executor_to_quest = {},
+		retired = {},
+	}
+end
+
+local function normalize_state(blob)
+	local out = new_state()
+	if type(blob) ~= "table" then
+		return out
+	end
+	out.next_id = math.max(1, math.floor(tonumber(blob.next_id) or 1))
+	out.last_revision_day = math.floor(tonumber(blob.last_revision_day) or -1)
+	out.quests = type(blob.quests) == "table" and blob.quests or {}
+	out.giver_active_ids = type(blob.giver_active_ids) == "table" and blob.giver_active_ids or {}
+	out.executor_to_quest = type(blob.executor_to_quest) == "table" and blob.executor_to_quest or {}
+	out.retired = type(blob.retired) == "table" and blob.retired or {}
+	out.version = STATE_VERSION
+	return out
+end
+
+local function quest_state()
+	if not state then
+		state = new_state()
+	end
+	return state
+end
+
+local function cfg_bool(key, default)
+	local c = cfg()
+	if c and type(c.get_bool) == "function" then
+		local ok, value = pcall(c.get_bool, key, default)
+		if ok then
+			return value == true
+		end
+	end
+	return default == true
+end
+
+function M.enabled()
+	if not cfg_bool("enabled", true) then
+		return false
+	end
+	local settings = cfg()
+	if settings and type(settings.faction_task_settings_enabled) == "function" and settings.faction_task_settings_enabled() == true then
+		return true
+	end
+	return cfg_bool("npc_quests_enabled", true)
+end
+
+local function debug_log(fmt, ...)
+	if cfg_bool("debug_hud_enabled", false) == true and type(printf) == "function" then
+		pcall(printf, fmt, ...)
+	end
+end
+
+local function debug_event(stage, squad, quest, reason)
+	debug_log(
+		"~ ZHOPA2 npc quest | stage [%s] squad [%s:%s] task [%s] target [%s] assigned [%s] current [%s] action [%s] quest [%s] kind [%s] status [%s] phase [%s] route [%s] reason [%s]",
+		tostring(stage or "-"),
+		tostring(object_name(squad) or "-"),
+		tostring(object_id(squad) or "-"),
+		tostring(squad and squad.zhopa2_task or "-"),
+		tostring(squad and squad.zhopa2_target or "-"),
+		tostring(squad and squad.assigned_target_id or "-"),
+		tostring(squad and squad.current_target_id or "-"),
+		tostring(squad and squad.current_action or "-"),
+		tostring(quest and quest.id or squad and squad.zhopa2_npc_quest_id or "-"),
+		tostring(quest and quest.kind or "-"),
+		tostring(quest and quest.status or "-"),
+		tostring(quest and quest.phase or "-"),
+		tostring(quest and quest.route_target_id or "-"),
+		tostring(reason or "-")
+	)
+end
+
+local function profile_for_smart(smart)
+	local name = object_name(smart)
+	local profile = name and ini_string("quest_givers", name) or nil
+	profile = profile or ini_string("quest_givers", "default") or DEFAULT_PROFILE
+	profile = trim(profile)
+	if profile == "disabled" or profile == "off" or profile == "false" then
+		return nil
+	end
+	return profile ~= "" and profile or DEFAULT_PROFILE
+end
+
+local function profile_types(profile)
+	local values = list_value(ini_string("quest_profile_" .. tostring(profile), "types"))
+	if #values == 0 then
+		values = { "documents", "clear", "occupy", "hunt", "delivery" }
+	end
+	return values
+end
+
+local function profile_slots(profile)
+	return math.max(0, math.floor(ini_num("quest_profile_" .. tostring(profile), "slots", 2)))
+end
+
+local function profile_reward(profile, kind)
+	local section = "quest_profile_" .. tostring(profile)
+	local low = math.max(0, math.floor(ini_num(section, kind .. "_reward_min", ini_num(section, "reward_min", 250))))
+	local high = math.max(low, math.floor(ini_num(section, kind .. "_reward_max", ini_num(section, "reward_max", 750))))
+	return low + math.random(math.max(0, high - low))
+end
+
+local function service_wait_minutes()
+	return math.max(1, math.floor(ini_num("npc_quests", "service_wait_minutes", 1)))
+end
+
+local function giver_key(smart, provider)
+	return tostring(object_id(smart) or "-") .. ":" .. tostring(object_id(provider) or "-")
+end
+
+local function active_status(status)
+	return status == STATUS_AVAILABLE or status == STATUS_RESERVED or status == STATUS_IN_PROGRESS or status == STATUS_RETURNING
+end
+
+local function terminal_status(status)
+	return status == STATUS_COMPLETED or status == STATUS_FAILED
+end
+
+local function quest_for_id(quest_id)
+	return quest_id and quest_state().quests[tonumber(quest_id) or quest_id] or nil
+end
+
+local function quest_for_squad(squad)
+	return quest_for_id(squad and squad.zhopa2_npc_quest_id)
+end
+
+local function provider_for_smart(smart)
+	local eco = economy()
+	if not (smart and eco) then
+		return nil
+	end
+	if type(eco.find_live_trade_provider_at_smart) == "function" then
+		local ok, provider = pcall(eco.find_live_trade_provider_at_smart, smart)
+		if ok and object_alive(provider) then
+			return provider
+		end
+	end
+	if type(eco.provider_role) ~= "function" then
+		return nil
+	end
+	local ids, checked = {}, {}
+	for _, id in pairs(smart.npc_by_job_section or {}) do
+		id = tonumber(id) or id
+		if id and not checked[id] then
+			checked[id] = true
+			ids[#ids + 1] = id
+		end
+	end
+	for id in pairs(smart.npc_info or {}) do
+		id = tonumber(id) or id
+		if id and not checked[id] then
+			checked[id] = true
+			ids[#ids + 1] = id
+		end
+	end
+	table.sort(ids, function(first, second)
+		return tostring(first) < tostring(second)
+	end)
+	local function try_id(id)
+		local npc = alife_object(id)
+		if not object_alive(npc) then
+			return nil
+		end
+		local ok, role = pcall(eco.provider_role, npc, smart)
+		return ok and (role == "trader" or role == "barman") and npc or nil
+	end
+	for i = 1, #ids do
+		local id = ids[i]
+		local npc = try_id(id)
+		if npc then
+			return npc
+		end
+	end
+	return nil
+end
+
+local function compatible_with_provider(squad, provider)
+	local first, second = squad_faction(squad), provider_relation_faction(provider)
+	if not (first and second) then
+		return false, second and "squad_faction_missing" or "provider_community_missing", first, second
+	end
+	if factions_hostile(first, second) then
+		return false, "provider_hostile", first, second
+	end
+	return true, "provider_compatible", first, second
+end
+
+local function smart_is_valid(smart)
+	return smart and object_id(smart) and smart.disabled ~= true and smart.respawn_only_smart ~= true
+end
+
+local function available_count(giver)
+	local count = 0
+	for _, quest in pairs(quest_state().quests) do
+		if quest and quest.giver_key == giver and active_status(quest.status) then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function active_kinds(giver)
+	local kinds = {}
+	for _, quest in pairs(quest_state().quests) do
+		if quest and quest.giver_key == giver and quest.kind and active_status(quest.status) then
+			kinds[quest.kind] = true
+		end
+	end
+	return kinds
+end
+
+local function release_object(obj)
+	local sim = alife_sim()
+	if not (sim and obj and type(sim.release) == "function") then
+		return false
+	end
+	return pcall(sim.release, sim, obj, true) == true
+end
+
+local function item_section(item)
+	if not (item and type(item.section_name) == "function") then
+		return nil
+	end
+	local ok, section = pcall(item.section_name, item)
+	return ok and type(section) == "string" and section or nil
+end
+
+local function game_item_section(item)
+	if not (item and type(item.section) == "function") then
+		return nil
+	end
+	local ok, section = pcall(item.section, item)
+	return ok and type(section) == "string" and section or nil
+end
+
+local function section_exists(section)
+	if not (type(section) == "string" and section ~= "" and ini_sys and type(ini_sys.section_exist) == "function") then
+		return false
+	end
+	local ok, exists = pcall(ini_sys.section_exist, ini_sys, section)
+	return ok and exists == true
+end
+
+local function is_delivery_section(section)
+	return type(section) == "string"
+		and section:sub(1, #DELIVERY_SECTION_PREFIX) == DELIVERY_SECTION_PREFIX
+		and section_exists(section)
+end
+
+local function delivery_sections()
+	if delivery_sections_cache then
+		return delivery_sections_cache
+	end
+
+	local sections = {}
+	if ini_sys and type(ini_sys.section_for_each) == "function" then
+		pcall(function()
+			ini_sys:section_for_each(function(section)
+				if is_delivery_section(section) then
+					sections[#sections + 1] = section
+				end
+				return false
+			end)
+		end)
+	end
+	if #sections == 0 then
+		for i = 1, #FALLBACK_DELIVERY_SECTIONS do
+			local section = FALLBACK_DELIVERY_SECTIONS[i]
+			if section_exists(section) then
+				sections[#sections + 1] = section
+			end
+		end
+	end
+	table.sort(sections)
+	delivery_sections_cache = sections
+	return sections
+end
+
+local function document_is_in_container(quest)
+	local doc = alife_object(quest and quest.document_id)
+	return doc and tonumber(doc.parent_id) == tonumber(quest.document_container_id), doc
+end
+
+local function delivery_section(quest)
+	local section = quest and quest.delivery_section or nil
+	if is_delivery_section(section) then
+		return section
+	end
+	local sections = delivery_sections()
+	section = #sections > 0 and sections[math.random(#sections)] or nil
+	if quest then
+		quest.delivery_section = section
+	end
+	return section
+end
+
+function M.use_delivery_package_random(obj)
+	local section = game_item_section(obj)
+	if not (type(section) == "string" and section:sub(1, #DELIVERY_SECTION_PREFIX) == DELIVERY_SECTION_PREFIX) then
+		debug_log("~ ZHOPA2 npc quest | stage [delivery_unpack_rejected] section [%s] reason [section]", tostring(section or "-"))
+		return false
+	end
+	local item_id = nil
+	if obj and type(obj.id) == "function" then
+		local ok_id, value = pcall(obj.id, obj)
+		item_id = ok_id and value or nil
+	end
+	local item_manager = itms_manager
+	local item_ini = item_manager and item_manager.ini_manager
+	if not (item_id and item_ini and type(item_ini.r_string_ex) == "function" and utils_item and type(utils_item.delay_event) == "function" and type(str_explode) == "function") then
+		debug_log("~ ZHOPA2 npc quest | stage [delivery_unpack_rejected] section [%s] reason [api]", tostring(section))
+		return false
+	end
+	local source_section = "quest_package_" .. section:sub(#DELIVERY_SECTION_PREFIX + 1)
+	local ok_content, content = pcall(item_ini.r_string_ex, item_ini, "package_content", source_section)
+	if not (ok_content and type(content) == "string" and content ~= "") then
+		debug_log("~ ZHOPA2 npc quest | stage [delivery_unpack_rejected] section [%s] reason [content]", tostring(section))
+		return false
+	end
+	local ok_list, entries = pcall(str_explode, content, ",")
+	if not (ok_list and type(entries) == "table" and #entries > 0) then
+		debug_log("~ ZHOPA2 npc quest | stage [delivery_unpack_rejected] section [%s] reason [list]", tostring(section))
+		return false
+	end
+	local picked = {}
+	for i = 1, #entries do
+		if #picked < 6 and math.random(100) < 50 then
+			picked[#picked + 1] = entries[i]
+		end
+	end
+	picked = #picked > 1 and picked or { entries[1], entries[2], entries[3], entries[4] }
+	local scheduled = pcall(utils_item.delay_event, picked, { item_id }, "package_content", true, 5) == true
+	debug_log("~ ZHOPA2 npc quest | stage [delivery_unpack_%s] section [%s] items [%s]", scheduled and "scheduled" or "failed", tostring(section), tostring(#picked))
+	return scheduled
+end
+
+local function squad_commander_id(squad)
+	if not (squad and type(squad.commander_id) == "function") then
+		return nil
+	end
+	local ok, value = pcall(squad.commander_id, squad)
+	return ok and tonumber(value) or nil
+end
+
+local function delivery_carried_by_commander(quest, squad)
+	local commander_id = squad_commander_id(squad)
+	local item = alife_object(quest and quest.delivery_item_id)
+	return item
+		and commander_id
+		and item_section(item) == delivery_section(quest)
+		and tonumber(item.parent_id) == commander_id,
+		item
+end
+
+local function online_object(id)
+	local runtime = safe_require("zhopa2_runtime_patches")
+	if runtime and type(runtime.zhopa2_online_object_by_id) == "function" then
+		local ok, obj = pcall(runtime.zhopa2_online_object_by_id, id)
+		if ok and obj then
+			return obj
+		end
+	end
+	if level and type(level.object_by_id) == "function" then
+		local ok, obj = pcall(level.object_by_id, id)
+		return ok and obj or nil
+	end
+	return nil
+end
+
+local function runtime_position(obj)
+	if not (obj and type(obj.position) == "function") then
+		return nil
+	end
+	local ok, pos = pcall(obj.position, obj)
+	return ok and pos or nil
+end
+
+local function deliver_package_to_receiver(quest, squad, receiver)
+	local carried, item = delivery_carried_by_commander(quest, squad)
+	if not carried then
+		return false, "delivery_package_missing"
+	end
+	local receiver_id = object_id(receiver)
+	if not receiver_id then
+		return false, "delivery_receiver_missing"
+	end
+	local commander = online_object(quest.delivery_carried_by_id)
+	local online_item = online_object(quest.delivery_item_id)
+	local online_receiver = online_object(receiver_id)
+	if commander and online_item and online_receiver and type(commander.transfer_item) == "function" then
+		local transferred = pcall(commander.transfer_item, commander, online_item, online_receiver)
+		if transferred then
+			quest.delivery_item_id = nil
+			quest.delivery_carried_by_id = nil
+			quest.delivery_delivered = true
+			return true, "delivery_package_transferred"
+		end
+	end
+
+	local section = delivery_section(quest)
+	if not (section and type(alife_create_item) == "function") then
+		return false, "delivery_package_transfer_unavailable"
+	end
+	local created_ok, replacement = pcall(alife_create_item, section, receiver)
+	if not (created_ok and object_id(replacement)) then
+		return false, "delivery_package_transfer_failed"
+	end
+	if not release_object(item) then
+		release_object(replacement)
+		return false, "delivery_package_release_failed"
+	end
+	quest.delivery_item_id = nil
+	quest.delivery_carried_by_id = nil
+	quest.delivery_delivered = true
+	return true, "delivery_package_recreated"
+end
+
+local function runtime_level_vertex_id(obj)
+	if not (obj and type(obj.level_vertex_id) == "function") then
+		return nil
+	end
+	local ok, value = pcall(obj.level_vertex_id, obj)
+	return ok and tonumber(value) or nil
+end
+
+local function cleanup_document(quest)
+	if not quest then
+		return
+	end
+	local in_box, doc = document_is_in_container(quest)
+	if in_box then
+		release_object(doc)
+	end
+	local box = alife_object(quest.document_container_id)
+	if box then
+		release_object(box)
+	end
+	local carried = alife_object(quest.document_carried_id)
+	if carried and tonumber(carried.parent_id) == tonumber(quest.document_carried_by_id) then
+		release_object(carried)
+	end
+	quest.document_id = nil
+	quest.document_container_id = nil
+	quest.document_carried_id = nil
+	quest.document_carried_by_id = nil
+end
+
+local function cleanup_delivery(quest)
+	local item = alife_object(quest and quest.delivery_item_id)
+	if item and tonumber(item.parent_id) == tonumber(quest.delivery_carried_by_id) then
+		local carrier = online_object(quest.delivery_carried_by_id)
+		local online_item = online_object(quest.delivery_item_id)
+		local dead_online_carrier = false
+		if carrier and online_item and type(carrier.alive) == "function" then
+			local ok, alive = pcall(carrier.alive, carrier)
+			dead_online_carrier = ok and alive ~= true
+		end
+		if dead_online_carrier then
+			debug_log("~ ZHOPA2 npc quest | stage [delivery_package_preserved_on_corpse] item [%s] carrier [%s]", tostring(quest.delivery_item_id), tostring(quest.delivery_carried_by_id))
+		else
+			release_object(item)
+		end
+	end
+	if quest then
+		quest.delivery_item_id = nil
+		quest.delivery_carried_by_id = nil
+	end
+end
+
+local function issue_delivery_to_commander(quest, squad)
+	local carried = delivery_carried_by_commander(quest, squad)
+	if carried then
+		return true, "delivery_package_already_carried"
+	end
+	if quest and quest.delivery_item_id then
+		return false, "delivery_package_missing"
+	end
+	local commander_id = squad_commander_id(squad)
+	local commander = commander_id and alife_object(commander_id) or nil
+	local section = delivery_section(quest)
+	if not (commander and section and type(alife_create_item) == "function") then
+		return false, "delivery_package_create_unavailable"
+	end
+	local ok, item = pcall(alife_create_item, section, commander)
+	local item_id = ok and object_id(item) or nil
+	if not (item_id and alife_object(item_id)) then
+		return false, "delivery_package_create_failed"
+	end
+	quest.delivery_item_id = item_id
+	quest.delivery_carried_by_id = commander_id
+	quest.cargo_serial = "npcq:" .. tostring(quest.id)
+	return true, "delivery_package_issued"
+end
+
+local function collect_document_to_commander(quest, squad)
+	local in_box, document = document_is_in_container(quest)
+	local commander_id = squad_commander_id(squad)
+	local commander = commander_id and alife_object(commander_id) or nil
+	if not in_box then
+		return false, "document_missing"
+	end
+	if not commander then
+		return false, "commander_missing"
+	end
+	if type(alife_create_item) ~= "function" then
+		return false, "item_create_missing"
+	end
+	local created_ok, carried = pcall(alife_create_item, DEFAULT_DOCUMENT_SECTION, commander)
+	local carried_id = created_ok and object_id(carried) or nil
+	if not (carried_id and alife_object(carried_id)) then
+		return false, "item_create_failed"
+	end
+	if not release_object(document) then
+		release_object(carried)
+		return false, "document_release_failed"
+	end
+	local box = alife_object(quest.document_container_id)
+	if box then
+		release_object(box)
+	end
+	quest.document_id = nil
+	quest.document_container_id = nil
+	quest.document_carried_id = carried_id
+	quest.document_carried_by_id = commander_id
+	quest.document_collected = true
+	return true, "document_transferred"
+end
+
+local function spawn_document(target_smart)
+	if not (target_smart and target_smart.position and target_smart.m_level_vertex_id and target_smart.m_game_vertex_id and type(alife_create) == "function" and type(alife_create_item) == "function") then
+		return nil, nil
+	end
+	local box_ok, box = pcall(alife_create, DEFAULT_CONTAINER_SECTION, target_smart.position, target_smart.m_level_vertex_id, target_smart.m_game_vertex_id)
+	if not (box_ok and box and object_id(box)) then
+		return nil, nil
+	end
+	local doc_ok, doc = pcall(alife_create_item, DEFAULT_DOCUMENT_SECTION, box)
+	if not (doc_ok and doc and object_id(doc)) then
+		release_object(box)
+		return nil, nil
+	end
+	return object_id(box), object_id(doc)
+end
+
+local function id_less(first, second)
+	local first_num, second_num = tonumber(first), tonumber(second)
+	if first_num and second_num then
+		return first_num < second_num
+	end
+	return tostring(first) < tostring(second)
+end
+
+local function all_provider_smarts()
+	local board = rawget(_G, "SIMBOARD")
+	if board and type(board.zhopa2_ensure_buckets) == "function" then
+		pcall(board.zhopa2_ensure_buckets, board)
+	end
+	local out, seen = {}, {}
+	local buckets = board and board.zhopa2_smarts_by_level or nil
+	for _, bucket in pairs(buckets or {}) do
+		for _, smart in pairs(bucket or {}) do
+			local id = object_id(smart)
+			if id and not seen[id] then
+				seen[id] = true
+				out[#out + 1] = smart
+			end
+		end
+	end
+	table.sort(out, function(first, second)
+		return id_less(object_id(first), object_id(second))
+	end)
+	return out
+end
+
+local function all_givers(limit, debug_reason)
+	local out = {}
+	local stats = { smarts = 0, invalid = 0, profile_disabled = 0, no_trader = 0 }
+	local smarts = all_provider_smarts()
+	for i = 1, #smarts do
+		local smart = smarts[i]
+		stats.smarts = stats.smarts + 1
+		if not smart_is_valid(smart) then
+			stats.invalid = stats.invalid + 1
+		else
+			local profile = profile_for_smart(smart)
+			local provider = profile and provider_for_smart(smart) or nil
+			if not profile then
+				stats.profile_disabled = stats.profile_disabled + 1
+			elseif not provider then
+				stats.no_trader = stats.no_trader + 1
+			else
+			out[#out + 1] = { smart = smart, provider = provider, profile = profile }
+			if limit and #out >= limit then
+				break
+			end
+			end
+		end
+	end
+	if debug_reason then
+		debug_log(
+			"~ ZHOPA2 npc quest | stage [giver_scan] reason [%s] smarts [%s] givers [%s] invalid [%s] profile_disabled [%s] no_trader [%s]",
+			tostring(debug_reason),
+			tostring(stats.smarts),
+			tostring(#out),
+			tostring(stats.invalid),
+			tostring(stats.profile_disabled),
+			tostring(stats.no_trader)
+		)
+	end
+	return out
+end
+
+local function quest_levels_for_squad(squad)
+	local current_level = object_level(squad)
+	if not current_level then
+		return {}, nil
+	end
+	local p = perception()
+	if p and type(p.nearby_levels) == "function" and type(p.level_names_for_mode) == "function" then
+		local ok_neighbors, neighbors = pcall(p.nearby_levels, current_level)
+		local ok_levels, levels = pcall(p.level_names_for_mode, current_level, "current_or_neighbor", ok_neighbors and neighbors or nil)
+		if ok_levels and type(levels) == "table" and #levels > 0 then
+			return levels, current_level
+		end
+	end
+	return { current_level }, current_level
+end
+
+local function quest_giver_allowed(squad, smart, level_name)
+	if not smart_is_valid(smart) then
+		return false, "invalid_smart"
+	end
+	local c = cfg()
+	if c and type(c.is_level_blacklisted_for_squad) == "function" then
+		local ok, blocked = pcall(c.is_level_blacklisted_for_squad, squad, level_name)
+		if ok and blocked == true then
+			return false, "level_blacklisted"
+		end
+	end
+	if c and type(c.is_smart_blacklisted_for_squad) == "function" then
+		local ok, blocked = pcall(c.is_smart_blacklisted_for_squad, squad, smart, level_name)
+		if ok and blocked == true then
+			return false, "smart_blacklisted"
+		end
+	end
+	return true
+end
+
+local function smarts_on_level(level_name, limit)
+	local idx = index()
+	if not (idx and type(idx.smarts_on_levels) == "function" and level_name) then
+		return {}
+	end
+	local ok, values = pcall(idx.smarts_on_levels, { level_name }, limit or 24)
+	return ok and type(values) == "table" and values or {}
+end
+
+local function find_base_defender(smart)
+	local board = rawget(_G, "SIMBOARD")
+	local smart_id = object_id(smart)
+	if not (board and type(board.squads) == "table" and smart_id) then
+		return nil
+	end
+	for id, stored in pairs(board.squads) do
+		local squad = type(stored) == "table" and stored.object or nil
+		squad = squad or alife_object(tonumber(id) or id)
+		if squad and squad.zhopa2_task == "BASE_CAMPING" and tonumber(squad.zhopa2_target) == tonumber(smart_id) and squad_alive(squad) then
+			return squad
+		end
+	end
+	return nil
+end
+
+local function eligible_hunt_target(target, giver_faction)
+	local p = perception()
+	if not (target and squad_alive(target) and p and type(p.quest_protected_squad) == "function") then
+		return false
+	end
+	if p.quest_protected_squad(target) then
+		return false
+	end
+	if M.is_active_squad(target) then
+		return false
+	end
+	local target_faction = squad_faction(target)
+	return giver_faction and target_faction and factions_hostile(giver_faction, target_faction)
+end
+
+local function choose_document_target(giver)
+	local level_name = object_level(giver.smart)
+	local candidates = smarts_on_level(level_name, 24)
+	local giver_id = object_id(giver.smart)
+	local start = #candidates > 0 and math.random(#candidates) or 1
+	for i = 1, #candidates do
+		local smart = candidates[((start + i - 2) % #candidates) + 1]
+		if smart_is_valid(smart) and object_id(smart) ~= giver_id and not provider_for_smart(smart) then
+			return smart
+		end
+	end
+	return nil
+end
+
+local function choose_base_target(giver)
+	local idx = index()
+	local level_name = object_level(giver.smart)
+	if not (idx and type(idx.base_camping_target_smarts_on_levels) == "function" and level_name) then
+		return nil, nil
+	end
+	local ok, candidates = pcall(idx.base_camping_target_smarts_on_levels, { level_name })
+	if not (ok and type(candidates) == "table") then
+		return nil, nil
+	end
+	local giver_faction = provider_relation_faction(giver.provider)
+	local start = #candidates > 0 and math.random(#candidates) or 1
+	for i = 1, #candidates do
+		local smart = candidates[((start + i - 2) % #candidates) + 1]
+		local defender = find_base_defender(smart)
+		if defender and giver_faction and factions_hostile(giver_faction, squad_faction(defender)) then
+			return smart, defender
+		end
+	end
+	return nil, nil
+end
+
+local function choose_hunt_target(giver)
+	local idx = index()
+	local level_name = object_level(giver.smart)
+	if not (idx and type(idx.squads_on_levels) == "function" and level_name) then
+		return nil, nil
+	end
+	local ok, candidates = pcall(idx.squads_on_levels, { level_name }, 32)
+	if not (ok and type(candidates) == "table") then
+		return nil, nil
+	end
+	local giver_faction = provider_relation_faction(giver.provider)
+	local start = #candidates > 0 and math.random(#candidates) or 1
+	for i = 1, #candidates do
+		local target = candidates[((start + i - 2) % #candidates) + 1]
+		if eligible_hunt_target(target, giver_faction) then
+			local target_smart = alife_object(target.smart_id)
+			if smart_is_valid(target_smart) then
+				return target, target_smart
+			end
+		end
+	end
+	return nil, nil
+end
+
+local function choose_delivery_receiver(giver)
+	local faction = provider_relation_faction(giver.provider)
+	local givers = all_givers(32)
+	local start = #givers > 0 and math.random(#givers) or 1
+	for i = 1, #givers do
+		local other = givers[((start + i - 2) % #givers) + 1]
+		local other_faction = other and provider_relation_faction(other.provider) or nil
+		if other and object_id(other.smart) ~= object_id(giver.smart) and faction and other_faction and not factions_hostile(faction, other_faction) then
+			return other
+		end
+	end
+	return nil
+end
+
+local function make_quest(giver, kind)
+	local qstate = quest_state()
+	local quest = {
+		id = qstate.next_id,
+		kind = kind,
+		status = STATUS_AVAILABLE,
+		phase = "AVAILABLE",
+		giver_smart_id = object_id(giver.smart),
+		giver_npc_id = object_id(giver.provider),
+		giver_key = giver_key(giver.smart, giver.provider),
+		profile = giver.profile,
+		reward = profile_reward(giver.profile, kind),
+		created_day = game_day() or 0,
+	}
+	qstate.next_id = quest.id + 1
+
+	if kind == "documents" then
+		local target = choose_document_target(giver)
+		if not target then
+			return nil, "documents_no_target"
+		end
+		local container_id, document_id = spawn_document(target)
+		if not (container_id and document_id) then
+			return nil, "documents_spawn_failed"
+		end
+		quest.objective_smart_id = object_id(target)
+		quest.document_container_id = container_id
+		quest.document_id = document_id
+	elseif kind == "clear" or kind == "occupy" then
+		local target, defender = choose_base_target(giver)
+		if not (target and defender) then
+			return nil, "base_no_target"
+		end
+		quest.objective_smart_id = object_id(target)
+		quest.target_squad_id = object_id(defender)
+	elseif kind == "hunt" then
+		local target, target_smart = choose_hunt_target(giver)
+		if not (target and target_smart) then
+			return nil, "hunt_no_target"
+		end
+		quest.target_squad_id = object_id(target)
+		quest.objective_smart_id = object_id(target_smart)
+	elseif kind == "delivery" then
+		local receiver = choose_delivery_receiver(giver)
+		if not receiver then
+			return nil, "delivery_no_receiver"
+		end
+		if not delivery_section(quest) then
+			return nil, "delivery_section_missing"
+		end
+		quest.receiver_smart_id = object_id(receiver.smart)
+		quest.receiver_npc_id = object_id(receiver.provider)
+	else
+		return nil, "unknown_type"
+	end
+	return quest, "created"
+end
+
+local function register_available(quest)
+	if not quest then
+		return false
+	end
+	quest_state().quests[quest.id] = quest
+	return true
+end
+
+local function cancel_available(quest, reason)
+	if not (quest and quest.status == STATUS_AVAILABLE) then
+		return false
+	end
+	cleanup_document(quest)
+	cleanup_delivery(quest)
+	quest_state().quests[quest.id] = nil
+	return reason or "available_cancelled"
+end
+
+local function rebind_available_giver_quests(smart, provider)
+	local smart_id = object_id(smart)
+	local provider_id = object_id(provider)
+	if not (smart_id and provider_id) then
+		return nil
+	end
+	local key = giver_key(smart, provider)
+	for _, quest in pairs(quest_state().quests) do
+		if quest and quest.status == STATUS_AVAILABLE and object_id(quest.giver_smart_id) == smart_id then
+			quest.giver_npc_id = provider_id
+			quest.giver_key = key
+		end
+	end
+	return key
+end
+
+local function giver_live(quest)
+	local smart = alife_object(quest and quest.giver_smart_id)
+	if not smart_is_valid(smart) then
+		return false, smart, nil
+	end
+	local provider = provider_for_smart(smart)
+	if not object_alive(provider) then
+		return false, smart, provider
+	end
+	if object_id(quest.giver_npc_id) ~= object_id(provider) then
+		quest.giver_npc_id = object_id(provider)
+		quest.giver_key = giver_key(smart, provider)
+	end
+	return true, smart, provider
+end
+
+local function receiver_live(quest)
+	local smart = alife_object(quest and quest.receiver_smart_id)
+	if not smart_is_valid(smart) then
+		return false, smart, nil
+	end
+	local provider = provider_for_smart(smart)
+	if not object_alive(provider) then
+		return false, smart, provider
+	end
+	if object_id(quest.receiver_npc_id) ~= object_id(provider) then
+		quest.receiver_npc_id = object_id(provider)
+	end
+	return true, smart, provider
+end
+
+local function target_still_available(quest)
+	if quest.kind == "documents" then
+		local in_box = document_is_in_container(quest)
+		return in_box
+	elseif quest.kind == "clear" or quest.kind == "occupy" then
+		local target = alife_object(quest.target_squad_id)
+		return target and squad_alive(target) and target.zhopa2_task == "BASE_CAMPING"
+	elseif quest.kind == "hunt" then
+		local target = alife_object(quest.target_squad_id)
+		return target and squad_alive(target)
+	elseif quest.kind == "delivery" then
+		return receiver_live(quest)
+	end
+	return false
+end
+
+local function quest_valid_for_executor(quest, squad)
+	local giver_ok, _, provider = giver_live(quest)
+	if not (giver_ok and compatible_with_provider(squad, provider)) then
+		return false
+	end
+	if quest.kind == "delivery" then
+		local receiver_ok, _, receiver = receiver_live(quest)
+		return receiver_ok and compatible_with_provider(squad, receiver)
+	end
+	return target_still_available(quest)
+end
+
+local function clear_quest_task(squad, reason)
+	if not (squad and squad.zhopa2_task == TASK_QUEST and type(squad.zhopa2_clear_task) == "function") then
+		return
+	end
+	debug_event("clear_request", squad, quest_for_squad(squad), reason)
+	local was_suppressed = suppress_task_clear
+	suppress_task_clear = true
+	pcall(squad.zhopa2_clear_task, squad, reason or "npc_quest_finished")
+	suppress_task_clear = was_suppressed
+end
+
+local function trim_retired()
+	local retired = quest_state().retired
+	while #retired > RETIRED_LIMIT do
+		local dropped = table.remove(retired, 1)
+		if dropped and dropped.id then
+			quest_state().quests[dropped.id] = nil
+		end
+	end
+end
+
+local function abort_online_service(quest, reason)
+	if not (quest and quest.service_mode == "online" and quest.service_token) then
+		return
+	end
+	local eco = economy()
+	if eco and type(eco.abort_online_quest_service) == "function" then
+		pcall(
+			eco.abort_online_quest_service,
+			quest.service_npc_id,
+			alife_object(quest.service_smart_id),
+			quest.service_token,
+			reason or "npc_quest_service_cancelled"
+		)
+	end
+	quest.service_mode = nil
+	quest.service_token = nil
+	quest.service_npc_id = nil
+	quest.service_smart_id = nil
+	quest.service_phase = nil
+end
+
+local function terminal(quest, status, reason, clear_task)
+	if not (quest and not terminal_status(quest.status)) then
+		return false
+	end
+	abort_online_service(quest, reason)
+	quest.status = status
+	quest.phase = status
+	quest.terminal_day = game_day() or quest.terminal_day or 0
+	quest.terminal_reason = reason or status
+	if status == STATUS_FAILED or status == STATUS_COMPLETED then
+		cleanup_document(quest)
+	end
+	if status == STATUS_FAILED then
+		cleanup_delivery(quest)
+	end
+	local qstate = quest_state()
+	local squad = alife_object(quest.executor_squad_id)
+	if quest.executor_squad_id then
+		qstate.executor_to_quest[quest.executor_squad_id] = nil
+	end
+	qstate.retired[#qstate.retired + 1] = { id = quest.id, status = status, day = quest.terminal_day }
+	trim_retired()
+	debug_event("terminal", squad, quest, reason)
+	if squad then
+		if clear_task then
+			clear_quest_task(squad, reason)
+		end
+		squad.zhopa2_npc_quest_id = nil
+	end
+	return true
+end
+
+local function reward_once(quest, squad, reason)
+	if quest.rewarded == true then
+		return true
+	end
+	local mem = memory()
+	if not (mem and type(mem.add_virtual_money) == "function" and squad) then
+		return false
+	end
+	if mem.add_virtual_money(squad, quest.reward, reason or "npc_quest_reward") ~= true then
+		return false
+	end
+	quest.rewarded = true
+	if type(printf) == "function" then
+		pcall(
+			printf,
+			"~ ZHOPA2 npc quest | stage [reward_paid] squad [%s:%s] quest [%s] kind [%s] amount [%s] balance [%s] reason [%s]",
+			tostring(object_name(squad) or "-"),
+			tostring(object_id(squad) or "-"),
+			tostring(quest.id or "-"),
+			tostring(quest.kind or "-"),
+			tostring(math.max(0, math.floor(tonumber(quest.reward) or 0))),
+			tostring(type(mem.virtual_money) == "function" and mem.virtual_money(squad) or "-"),
+			tostring(reason or "npc_quest_reward")
+		)
+	end
+	return true
+end
+
+local function finish_completed(quest, squad, reason)
+	if not reward_once(quest, squad, reason) then
+		return terminal(quest, STATUS_FAILED, "reward_failed", true)
+	end
+	return terminal(quest, STATUS_COMPLETED, reason or "npc_quest_completed", true)
+end
+
+local function set_route(squad, quest, target_id, reason)
+	if not (squad and quest and target_id) then
+		return false
+	end
+	quest.route_target_id = tonumber(target_id) or target_id
+	squad.zhopa2_target = quest.route_target_id
+	squad.scripted_target = quest.route_target_id
+	squad.assigned_target_id = nil
+	squad.current_target_id = nil
+	squad.task_target_id = nil
+	squad.current_action = 0
+	squad.zhopa2_last_reason = reason or "npc_quest_route"
+	squad.zhopa2_last_result = reason or "npc_quest_route"
+	debug_event("route_set", squad, quest, reason)
+	return true
+end
+
+local function reached_route(squad, quest)
+	if not (squad and quest and quest.route_target_id) then
+		return false
+	end
+	if type(squad.zhopa2_reached_target) == "function" then
+		local ok, reached = pcall(squad.zhopa2_reached_target, squad)
+		return ok and reached == true
+	end
+	return tonumber(squad.current_action) == 1 and tostring(squad.current_target_id) == tostring(quest.route_target_id)
+end
+
+local function start_wait(quest, phase)
+	local minutes = game_minutes()
+	if not minutes then
+		return false
+	end
+	quest.phase = phase
+	quest.wait_until_minutes = minutes + service_wait_minutes()
+	return true
+end
+
+local function start_giver_service(quest, squad, smart, phase)
+	if not start_wait(quest, phase) then
+		return false
+	end
+	quest.service_mode = "timer"
+	quest.service_route_seen = nil
+	quest.service_fallback_reason = nil
+	quest.service_phase = phase
+	quest.service_smart_id = object_id(smart)
+	quest.service_serial = (tonumber(quest.service_serial) or 0) + 1
+	quest.service_token = tostring(quest.id) .. ":" .. tostring(quest.service_serial)
+	debug_event("service_wait_started", squad, quest, phase)
+	local eco = economy()
+	if eco and type(eco.prepare_online_quest_service) == "function" then
+		local ok, prepared, npc_id = pcall(eco.prepare_online_quest_service, squad, smart, quest.service_token, phase)
+		if ok and prepared == true and npc_id then
+			quest.service_mode = "online"
+			quest.service_npc_id = tonumber(npc_id) or npc_id
+			debug_event("service_online_started", squad, quest, phase)
+			return true
+		end
+		quest.service_fallback_reason = ok and (npc_id or "service_prepare_failed") or "service_prepare_error"
+	else
+		quest.service_fallback_reason = "service_api_missing"
+	end
+	quest.service_token = nil
+	quest.service_smart_id = nil
+	quest.service_phase = nil
+	debug_event("service_timer_started", squad, quest, quest.service_fallback_reason or phase)
+	return true
+end
+
+local function clear_service_state(quest)
+	if not quest then
+		return
+	end
+	quest.service_mode = nil
+	quest.service_token = nil
+	quest.service_npc_id = nil
+	quest.service_smart_id = nil
+	quest.service_phase = nil
+	quest.service_route_seen = nil
+	quest.service_fallback_reason = nil
+end
+
+local function mark_online_service_route_seen(quest)
+	if not (quest and quest.service_mode == "online" and quest.service_npc_id and db and db.storage) then
+		return false
+	end
+	local st = db.storage[quest.service_npc_id]
+	local section = st and st.zhopa2_trade_job_section
+	if type(section) == "string" and st.active_section == section then
+		quest.service_route_seen = true
+		return true
+	end
+	return quest.service_route_seen == true
+end
+
+local function wait_done(quest)
+	local minutes = game_minutes()
+	return minutes and quest.wait_until_minutes and minutes >= quest.wait_until_minutes
+end
+
+local function objective_complete(quest, squad, reason)
+	debug_event("objective_complete", squad, quest, reason)
+	if quest.kind == "occupy" then
+		local smart = alife_object(quest.objective_smart_id)
+		local t = tasks()
+		if not (smart and t and type(t.assign_base_camping_permanent) == "function") then
+			return terminal(quest, STATUS_FAILED, "occupation_target_invalid", true)
+		end
+		local ok, assigned = pcall(t.assign_base_camping_permanent, squad, smart, "npc_quest_occupation", {
+			npc_quest_handoff_id = quest.id,
+		})
+		if not (ok and assigned == true) then
+			return terminal(quest, STATUS_FAILED, "occupation_assign_failed", false)
+		end
+		if not reward_once(quest, squad, "npc_quest_occupation_reward") then
+			return terminal(quest, STATUS_FAILED, "occupation_reward_failed", false)
+		end
+		return terminal(quest, STATUS_COMPLETED, reason or "occupation_completed", false)
+	end
+	quest.status = STATUS_RETURNING
+	quest.phase = "TO_REPORT"
+	local alive, smart = giver_live(quest)
+	if not alive then
+		return terminal(quest, STATUS_FAILED, "giver_missing_return", true)
+	end
+	return set_route(squad, quest, object_id(smart), "npc_quest_return")
+end
+
+local function complete_giver_wait(quest, squad)
+	clear_service_state(quest)
+	debug_event("service_completed", squad, quest, quest.phase)
+	local giver_ok, giver_smart = giver_live(quest)
+	if not giver_ok then
+		return terminal(quest, STATUS_FAILED, "giver_missing", true)
+	end
+	if quest.phase == "GIVER_WAIT" then
+		if quest.kind == "delivery" then
+			local issued, reason = issue_delivery_to_commander(quest, squad)
+			if not issued then
+				return terminal(quest, STATUS_FAILED, reason or "delivery_package_issue_failed", true)
+			end
+			debug_event("delivery_package_issued", squad, quest, reason)
+		end
+		quest.status = STATUS_IN_PROGRESS
+		if quest.kind == "delivery" then
+			quest.phase = "TO_RECEIVER"
+			return set_route(squad, quest, quest.receiver_smart_id, "npc_quest_delivery")
+		end
+		quest.phase = "TO_OBJECTIVE"
+		return set_route(squad, quest, quest.objective_smart_id, "npc_quest_objective")
+	elseif quest.phase == "REPORT_WAIT" then
+		return finish_completed(quest, squad, "npc_quest_reported")
+	end
+	return false
+end
+
+local function complete_delivery_to_receiver(quest, squad, reason)
+	local receiver_ok, _, receiver = receiver_live(quest)
+	if not receiver_ok then
+		return terminal(quest, STATUS_FAILED, "receiver_missing", true)
+	end
+	local delivered, delivery_reason = deliver_package_to_receiver(quest, squad, receiver)
+	if not delivered then
+		return terminal(quest, STATUS_FAILED, delivery_reason or "delivery_package_transfer_failed", true)
+	end
+	debug_event("delivery_package_delivered", squad, quest, delivery_reason)
+	return finish_completed(quest, squad, reason or "npc_quest_delivered")
+end
+
+local function document_pickup_context(quest, squad)
+	local commander_id = squad_commander_id(squad)
+	local commander = commander_id and online_object(commander_id) or nil
+	local box = online_object(quest and quest.document_container_id)
+	local server_commander = commander_id and alife_object(commander_id) or nil
+	return commander, server_commander, box
+end
+
+local function document_pickup_online(quest, squad)
+	local now = now_ms()
+	local in_box = document_is_in_container(quest)
+	if not in_box then
+		return terminal(quest, STATUS_FAILED, "document_missing_on_arrival", true)
+	end
+	local commander, server_commander, box = document_pickup_context(quest, squad)
+	if not (commander and server_commander and box) then
+		quest.document_pickup_context_since = quest.document_pickup_context_since or now
+		if now - quest.document_pickup_context_since >= DOCUMENT_ONLINE_CONTEXT_TIMEOUT_MS then
+			return terminal(quest, STATUS_FAILED, "document_online_context_missing", true)
+		end
+		return true
+	end
+	quest.document_pickup_context_since = nil
+	local box_pos = runtime_position(box)
+	local box_lvid = runtime_level_vertex_id(box)
+	local commander_pos = runtime_position(commander)
+	if not (box_pos and box_lvid and commander_pos and type(commander_pos.distance_to_sqr) == "function") then
+		return terminal(quest, STATUS_FAILED, "document_online_position_missing", true)
+	end
+	if commander_pos:distance_to_sqr(box_pos) > DOCUMENT_PICKUP_RADIUS_SQR then
+		quest.document_pickup_started = nil
+		if type(commander.set_path_type) == "function" and game_object and game_object.level_path then
+			pcall(commander.set_path_type, commander, game_object.level_path)
+		end
+		if utils_obj and type(utils_obj.send_to_nearest_accessible_vertex) == "function" then
+			pcall(utils_obj.send_to_nearest_accessible_vertex, commander, box_lvid, "npc_quest_document")
+		end
+		if state_mgr and type(state_mgr.set_state) == "function" then
+			pcall(state_mgr.set_state, commander, "rush", nil, nil, { look_position = box_pos })
+		end
+		if quest.document_pickup_stage ~= "approach" then
+			quest.document_pickup_stage = "approach"
+			debug_event("document_pickup_approach", squad, quest, "leader_to_backpack")
+		end
+		return true
+	end
+	if not quest.document_pickup_started then
+		quest.document_pickup_started = now
+		quest.document_pickup_stage = "animation"
+		if state_mgr and type(state_mgr.set_state) == "function" then
+			pcall(state_mgr.set_state, commander, "pickup_crouch", nil, nil, { look_position = box_pos })
+		end
+		if move and move.stand and type(commander.set_movement_type) == "function" then
+			pcall(commander.set_movement_type, commander, move.stand)
+		end
+		debug_event("document_pickup_started", squad, quest, "pickup_crouch")
+		return true
+	end
+	if now - quest.document_pickup_started < DOCUMENT_PICKUP_DELAY_MS then
+		return true
+	end
+	local collected, reason = collect_document_to_commander(quest, squad)
+	if not collected then
+		return terminal(quest, STATUS_FAILED, reason or "document_transfer_failed", true)
+	end
+	quest.document_pickup_started = nil
+	quest.document_pickup_stage = nil
+	debug_event("document_pickup_completed", squad, quest, reason)
+	return objective_complete(quest, squad, reason)
+end
+
+local function update_objective(quest, squad)
+	if quest.kind == "documents" then
+		if quest.phase == "TO_OBJECTIVE" and not reached_route(squad, quest) then
+			return true
+		end
+		if squad.online == true then
+			quest.phase = "DOCUMENT_PICKUP"
+			return document_pickup_online(quest, squad)
+		end
+		local collected, reason = collect_document_to_commander(quest, squad)
+		if not collected then
+			return terminal(quest, STATUS_FAILED, reason or "document_transfer_failed", true)
+		end
+		debug_event("document_pickup_offline", squad, quest, reason)
+		return objective_complete(quest, squad, reason)
+	end
+
+	if quest.kind == "clear" or quest.kind == "occupy" then
+		if not reached_route(squad, quest) then
+			return true
+		end
+		local target = alife_object(quest.target_squad_id)
+		if not (target and squad_alive(target) and target.zhopa2_task == "BASE_CAMPING") then
+			return objective_complete(quest, squad, "base_already_cleared")
+		end
+		local t = tasks()
+		if t and type(t.hunt_offline_tick) == "function" then
+			pcall(t.hunt_offline_tick, squad, target, { force = true, result = "npc_quest_offline_battle" })
+		end
+		return true
+	end
+
+	if quest.kind == "hunt" then
+		if quest.phase == "TO_OBJECTIVE" then
+			if not reached_route(squad, quest) then
+				return true
+			end
+			local target = alife_object(quest.target_squad_id)
+			if not (target and squad_alive(target)) then
+				return objective_complete(quest, squad, "hunt_already_done")
+			end
+			quest.phase = "HUNT_ENGAGE"
+			return set_route(squad, quest, object_id(target), "npc_quest_hunt_engage")
+		end
+		local target = alife_object(quest.target_squad_id)
+		if not (target and squad_alive(target)) then
+			return objective_complete(quest, squad, "hunt_completed")
+		end
+		local t = tasks()
+		if t and type(t.hunt_offline_tick) == "function" then
+			pcall(t.hunt_offline_tick, squad, target, { force = true, result = "npc_quest_hunt_offline" })
+		end
+		return true
+	end
+
+	return terminal(quest, STATUS_FAILED, "unknown_objective", true)
+end
+
+local function accept_available_at_giver(squad, giver_smart)
+	local qstate = quest_state()
+	local provider = provider_for_smart(giver_smart)
+	local compatible, relation_reason = false, "provider_missing"
+	if provider then
+		compatible, relation_reason = compatible_with_provider(squad, provider)
+	end
+	if not compatible then
+		debug_event("giver_rejected", squad, nil, relation_reason)
+		return false, relation_reason
+	end
+	local key = rebind_available_giver_quests(giver_smart, provider) or giver_key(giver_smart, provider)
+	for _, quest in pairs(qstate.quests) do
+		if quest and quest.status == STATUS_AVAILABLE and quest.giver_key == key then
+			if quest_valid_for_executor(quest, squad) then
+				quest.status = STATUS_RESERVED
+				quest.phase = "GIVER_WAIT"
+				quest.executor_squad_id = object_id(squad)
+				quest.giver_npc_id = object_id(provider)
+				qstate.executor_to_quest[quest.executor_squad_id] = quest.id
+				squad.zhopa2_npc_quest_id = quest.id
+				debug_event("quest_reserved", squad, quest, "giver_arrival")
+				if not start_giver_service(quest, squad, giver_smart, "GIVER_WAIT") then
+					return terminal(quest, STATUS_FAILED, "game_time_unavailable", true), "game_time_unavailable"
+				end
+				return true, quest
+			end
+			debug_event("available_cancelled", squad, quest, "available_invalid")
+			cancel_available(quest, "available_invalid")
+		end
+	end
+	debug_event("giver_rejected", squad, nil, "no_available_quest")
+	return false, "no_available_quest"
+end
+
+local function process_quest_squad(squad, quest)
+	if not squad_alive(squad) then
+		return terminal(quest, STATUS_FAILED, "executor_dead", true)
+	end
+	if quest.executor_squad_id ~= object_id(squad) then
+		return terminal(quest, STATUS_FAILED, "executor_mismatch", true)
+	end
+	if quest.phase == "GIVER_WAIT" or quest.phase == "REPORT_WAIT" then
+		if quest.service_mode == "online" then
+			mark_online_service_route_seen(quest)
+			if not wait_done(quest) then
+				return true
+			end
+			debug_event("service_online_timeout", squad, quest, quest.phase)
+			abort_online_service(quest, "npc_quest_service_timeout")
+			return complete_giver_wait(quest, squad)
+		end
+		if not wait_done(quest) then
+			return true
+		end
+		debug_event("service_wait_elapsed", squad, quest, quest.phase)
+		abort_online_service(quest, "npc_quest_service_timeout")
+		return complete_giver_wait(quest, squad)
+	end
+	if quest.phase == "TO_OBJECTIVE" or quest.phase == "DOCUMENT_PICKUP" or quest.phase == "HUNT_ENGAGE" then
+		return update_objective(quest, squad)
+	end
+	if quest.phase == "TO_REPORT" then
+		if not reached_route(squad, quest) then
+			return true
+		end
+		debug_event("return_arrived", squad, quest, "giver")
+		local giver_ok, giver_smart = giver_live(quest)
+		if not giver_ok then
+			return terminal(quest, STATUS_FAILED, "giver_missing_report", true)
+		end
+		return start_giver_service(quest, squad, giver_smart, "REPORT_WAIT")
+	end
+	if quest.phase == "TO_RECEIVER" then
+		local carried = delivery_carried_by_commander(quest, squad)
+		if not carried then
+			if quest.delivery_item_id then
+				return terminal(quest, STATUS_FAILED, "delivery_package_missing", true)
+			end
+			local issued, reason = issue_delivery_to_commander(quest, squad)
+			if not issued then
+				return terminal(quest, STATUS_FAILED, reason or "delivery_package_restore_failed", true)
+			end
+			debug_event("delivery_package_restored", squad, quest, reason)
+		end
+		if not reached_route(squad, quest) then
+			return true
+		end
+		debug_event("delivery_arrived", squad, quest, "receiver")
+		local receiver_ok, receiver_smart = receiver_live(quest)
+		if not receiver_ok then
+			return terminal(quest, STATUS_FAILED, "receiver_missing", true)
+		end
+		return start_giver_service(quest, squad, receiver_smart, "RECEIVER_WAIT")
+	end
+	if quest.phase == "RECEIVER_WAIT" then
+		if quest.service_mode == "online" then
+			mark_online_service_route_seen(quest)
+			if not wait_done(quest) then
+				return true
+			end
+			debug_event("delivery_online_timeout", squad, quest, "receiver")
+			abort_online_service(quest, "npc_quest_service_timeout")
+			clear_service_state(quest)
+			return complete_delivery_to_receiver(quest, squad, "npc_quest_delivered")
+		end
+		if not wait_done(quest) then
+			return true
+		end
+		debug_event("delivery_wait_elapsed", squad, quest, "receiver")
+		abort_online_service(quest, "npc_quest_service_timeout")
+		clear_service_state(quest)
+		return complete_delivery_to_receiver(quest, squad, "npc_quest_delivered")
+	end
+	return terminal(quest, STATUS_FAILED, "unknown_phase", true)
+end
+
+function M.update_squad(squad)
+	if not (squad and squad.zhopa2_task == TASK_QUEST) then
+		return false
+	end
+	if M.enabled() ~= true then
+		local quest = quest_for_squad(squad)
+		if quest then
+			debug_event("feature_disabled", squad, quest, "feature_disabled")
+			return terminal(quest, STATUS_FAILED, "feature_disabled", true)
+		end
+		clear_quest_task(squad, "feature_disabled")
+		return true
+	end
+	local quest = quest_for_squad(squad)
+	if not quest then
+		local reached = false
+		if type(squad.zhopa2_reached_target) == "function" then
+			local ok, value = pcall(squad.zhopa2_reached_target, squad)
+			reached = ok and value == true
+		end
+		if reached then
+			local giver = alife_object(squad.zhopa2_target)
+			local giver_valid = smart_is_valid(giver)
+			debug_event("giver_arrived", squad, nil, giver_valid and "valid" or "invalid")
+			local accepted, accept_reason = false, "giver_invalid"
+			if giver_valid then
+				accepted, accept_reason = accept_available_at_giver(squad, giver)
+			end
+			if not accepted then
+				clear_quest_task(squad, accept_reason or "npc_quest_no_work")
+			end
+		end
+		return true
+	end
+	return process_quest_squad(squad, quest) == true
+end
+
+function M.complete_online_service(npc, smart, token)
+	if not token then
+		return false
+	end
+	local npc_id = object_id(npc)
+	local smart_id = object_id(smart)
+	for _, quest in pairs(quest_state().quests) do
+		if quest
+			and active_status(quest.status)
+			and quest.service_mode == "online"
+			and quest.service_token == token
+			and tonumber(quest.service_npc_id) == tonumber(npc_id)
+			and tonumber(quest.service_smart_id) == tonumber(smart_id)
+		then
+			local squad = alife_object(quest.executor_squad_id)
+			if not squad_alive(squad) then
+				return terminal(quest, STATUS_FAILED, "executor_missing_service", true)
+			end
+			-- The callback originates from the native trade-job effect, after the NPC
+			-- has actually reached the trader. It is the authoritative completion signal.
+			quest.service_route_seen = true
+			debug_event("service_online_completed", squad, quest, "trade_effect")
+			if quest.phase == "GIVER_WAIT" or quest.phase == "REPORT_WAIT" then
+				return complete_giver_wait(quest, squad) == true
+			elseif quest.phase == "RECEIVER_WAIT" then
+				clear_service_state(quest)
+				return complete_delivery_to_receiver(quest, squad, "npc_quest_delivered") == true
+			end
+		end
+	end
+	return false
+end
+
+function M.get_script_target(squad)
+	local quest = quest_for_squad(squad)
+	if quest and active_status(quest.status) then
+		return quest.route_target_id
+	end
+	return squad and squad.zhopa2_target or nil
+end
+
+function M.dialogue_context(squad)
+	if not (M.enabled() and squad and squad.zhopa2_task == TASK_QUEST) then
+		return nil
+	end
+	local quest = quest_for_squad(squad)
+	if not quest then
+		return {
+			state = "to_giver",
+			target_id = squad.zhopa2_target,
+		}
+	end
+	if not active_status(quest.status) then
+		return nil
+	end
+	if quest.phase == "GIVER_WAIT" then
+		return {
+			state = "finding_work",
+			kind = quest.kind,
+			target_id = quest.giver_smart_id,
+		}
+	end
+	if quest.phase == "TO_REPORT" or quest.phase == "REPORT_WAIT" then
+		return {
+			state = "reporting",
+			kind = quest.kind,
+			target_id = quest.giver_smart_id,
+		}
+	end
+	if quest.phase == "TO_RECEIVER" or quest.phase == "RECEIVER_WAIT" then
+		return {
+			state = "delivering",
+			kind = quest.kind,
+			target_id = quest.receiver_smart_id,
+		}
+	end
+	return {
+		state = "working",
+		kind = quest.kind,
+		target_id = quest.route_target_id,
+	}
+end
+
+function M.is_active_squad(squad)
+	local quest = quest_for_squad(squad)
+	return quest and active_status(quest.status) or false
+end
+
+function M.can_handoff_to_base_camping(squad, quest_id)
+	local quest = quest_for_squad(squad)
+	return quest
+		and quest.kind == "occupy"
+		and active_status(quest.status)
+		and quest_id ~= nil
+		and tonumber(quest.id) == tonumber(quest_id)
+		or false
+end
+
+function M.allows_direct_target(squad, target_id)
+	local quest = quest_for_squad(squad)
+	return quest and quest.kind == "hunt" and quest.phase == "HUNT_ENGAGE" and tonumber(quest.target_squad_id) == tonumber(target_id) or false
+end
+
+function M.combat_arrival_target_id(squad, target_id)
+	local quest = quest_for_squad(squad)
+	if not (quest and active_status(quest.status) and quest.target_squad_id and tonumber(quest.route_target_id) == tonumber(target_id)) then
+		return nil
+	end
+	if quest.kind == "hunt" and quest.phase == "HUNT_ENGAGE" and tonumber(quest.target_squad_id) == tonumber(target_id) then
+		return quest.target_squad_id
+	end
+	if (quest.kind == "clear" or quest.kind == "occupy" or quest.kind == "hunt") and quest.phase == "TO_OBJECTIVE" then
+		return quest.target_squad_id
+	end
+	return nil
+end
+
+function M.on_squad_task_clear(squad, reason)
+	if suppress_task_clear then
+		return false
+	end
+	local quest = quest_for_squad(squad)
+	if quest
+		and quest.kind == "occupy"
+		and active_status(quest.status)
+		and tonumber(squad and squad.zhopa2_npc_quest_handoff_id) == tonumber(quest.id)
+	then
+		squad.zhopa2_npc_quest_handoff_id = nil
+		debug_event("occupation_handoff", squad, quest, reason)
+		return false
+	end
+	if quest and active_status(quest.status) then
+		debug_event("task_cleared", squad, quest, reason)
+		terminal(quest, STATUS_FAILED, reason or "task_cleared", false)
+		return true
+	end
+	return false
+end
+
+function M.build_choices(squad)
+	if not (M.enabled() and squad and squad_alive(squad) and not M.is_active_squad(squad)) then
+		return {}
+	end
+	local levels, current_level = quest_levels_for_squad(squad)
+	if not current_level then
+		debug_log("~ ZHOPA2 npc quest | stage [choice_skip] squad [%s:%s] reason [squad_level_missing]", tostring(object_name(squad) or "-"), tostring(object_id(squad) or "-"))
+		return {}
+	end
+
+	local level_rank, level_text = {}, {}
+	for i = 1, #levels do
+		level_rank[levels[i]] = i
+		level_text[#level_text + 1] = tostring(levels[i])
+	end
+	local stats = {
+		available = 0,
+		giver_missing = 0,
+		provider_changed = 0,
+		out_of_range = 0,
+		incompatible = 0,
+		provider_community_missing = 0,
+		provider_hostile = 0,
+		squad_faction_missing = 0,
+		blacklisted = 0,
+		invalid = 0,
+		duplicate = 0,
+	}
+	local qstate = quest_state()
+	local ids = {}
+	for id in pairs(qstate.quests) do
+		ids[#ids + 1] = id
+	end
+	table.sort(ids, id_less)
+
+	local candidates, seen_givers = {}, {}
+	for i = 1, #ids do
+		local quest = qstate.quests[ids[i]]
+		if quest and quest.status == STATUS_AVAILABLE then
+			stats.available = stats.available + 1
+			local giver_ok, smart, provider = giver_live(quest)
+			if not giver_ok then
+				stats.giver_missing = stats.giver_missing + 1
+			elseif object_id(provider_for_smart(smart)) ~= object_id(provider) then
+				stats.provider_changed = stats.provider_changed + 1
+			else
+				local level_name = object_level(smart)
+				local rank = level_rank[level_name]
+				if not rank then
+					stats.out_of_range = stats.out_of_range + 1
+				else
+					local compatible, relation_reason, squad_faction, provider_faction = compatible_with_provider(squad, provider)
+					if not compatible then
+						stats.incompatible = stats.incompatible + 1
+						if stats[relation_reason] ~= nil then
+							stats[relation_reason] = stats[relation_reason] + 1
+						end
+						debug_log(
+							"~ ZHOPA2 npc quest | stage [choice_rejected] squad [%s:%s] quest [%s] giver [%s:%s] reason [%s] squad_faction [%s] provider_faction [%s]",
+							tostring(object_name(squad) or "-"),
+							tostring(object_id(squad) or "-"),
+							tostring(quest.id or "-"),
+							tostring(object_name(smart) or "-"),
+							tostring(object_id(smart) or "-"),
+							tostring(relation_reason or "-"),
+							tostring(squad_faction or "-"),
+							tostring(provider_faction or "-")
+						)
+					else
+						local allowed = quest_giver_allowed(squad, smart, level_name)
+						if not allowed then
+							stats.blacklisted = stats.blacklisted + 1
+						elseif not quest_valid_for_executor(quest, squad) then
+							stats.invalid = stats.invalid + 1
+						else
+							local giver_id = object_id(smart)
+							if seen_givers[giver_id] then
+								stats.duplicate = stats.duplicate + 1
+							else
+								seen_givers[giver_id] = true
+								candidates[#candidates + 1] = { quest = quest, smart = smart, level = level_name, rank = rank }
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	table.sort(candidates, function(first, second)
+		if first.rank ~= second.rank then
+			return first.rank < second.rank
+		end
+		return id_less(first.quest.id, second.quest.id)
+	end)
+
+	debug_log(
+		"~ ZHOPA2 npc quest | stage [choice_scan] squad [%s:%s] level [%s] levels [%s] available [%s] candidates [%s] giver_missing [%s] provider_changed [%s] out_of_range [%s] incompatible [%s] provider_community_missing [%s] provider_hostile [%s] squad_faction_missing [%s] blacklisted [%s] invalid [%s] duplicate [%s]",
+		tostring(object_name(squad) or "-"),
+		tostring(object_id(squad) or "-"),
+		tostring(current_level),
+		table.concat(level_text, ","),
+		tostring(stats.available),
+		tostring(#candidates),
+		tostring(stats.giver_missing),
+		tostring(stats.provider_changed),
+		tostring(stats.out_of_range),
+		tostring(stats.incompatible),
+		tostring(stats.provider_community_missing),
+		tostring(stats.provider_hostile),
+		tostring(stats.squad_faction_missing),
+		tostring(stats.blacklisted),
+		tostring(stats.invalid),
+		tostring(stats.duplicate)
+	)
+
+	local out = {}
+	for i = 1, math.min(3, #candidates) do
+		local candidate = candidates[i]
+		out[#out + 1] = { target = object_id(candidate.smart), weight = 1, reason = "npc_quest_to_giver" }
+		debug_log(
+			"~ ZHOPA2 npc quest | stage [choice_candidate] squad [%s:%s] quest [%s] giver [%s:%s] level [%s] scope [%s]",
+			tostring(object_name(squad) or "-"),
+			tostring(object_id(squad) or "-"),
+			tostring(candidate.quest.id),
+			tostring(object_name(candidate.smart) or "-"),
+			tostring(object_id(candidate.smart) or "-"),
+			tostring(candidate.level),
+			candidate.rank == 1 and "current" or "neighbor"
+		)
+	end
+	return out
+end
+
+local function revise_giver(giver)
+	local profile = giver.profile
+	local key = rebind_available_giver_quests(giver.smart, giver.provider) or giver_key(giver.smart, giver.provider)
+	local qstate = quest_state()
+	for _, quest in pairs(qstate.quests) do
+		if quest and quest.status == STATUS_AVAILABLE and quest.giver_key == key and not target_still_available(quest) then
+			cancel_available(quest, "available_invalid")
+		end
+	end
+	trim_retired()
+	local free = profile_slots(profile) - available_count(key)
+	local types = profile_types(profile)
+	local used_types = active_kinds(key)
+	local candidates = {}
+	for i = 1, #types do
+		local kind = types[i]
+		if kind and not used_types[kind] then
+			used_types[kind] = true
+			candidates[#candidates + 1] = kind
+		end
+	end
+	debug_log(
+		"~ ZHOPA2 npc quest | stage [giver_revision] giver [%s:%s] provider [%s:%s] profile [%s] free [%s] types [%s] candidates [%s]",
+		tostring(object_name(giver.smart) or "-"),
+		tostring(object_id(giver.smart) or "-"),
+		tostring(object_name(giver.provider) or "-"),
+		tostring(object_id(giver.provider) or "-"),
+		tostring(profile),
+		tostring(math.max(0, free)),
+		table.concat(types, ","),
+		table.concat(candidates, ",")
+	)
+	for _ = 1, math.max(0, free) do
+		if #candidates == 0 then
+			break
+		end
+		local kind = table.remove(candidates, math.random(#candidates))
+		local created, failure_reason = make_quest(giver, kind)
+		if created then
+			register_available(created)
+			debug_event("quest_published", nil, created, "daily_revision")
+		else
+			debug_log(
+				"~ ZHOPA2 npc quest | stage [quest_generation_failed] giver [%s:%s] profile [%s] kind [%s] reason [%s]",
+				tostring(object_name(giver.smart) or "-"),
+				tostring(object_id(giver.smart) or "-"),
+				tostring(profile),
+				tostring(kind),
+				tostring(failure_reason or "unknown")
+			)
+		end
+	end
+end
+
+local function start_revision(day)
+	if revision_day == day and #revision_queue > 0 then
+		return
+	end
+	revision_day = day
+	local eco = economy()
+	if eco and type(eco.clear_missing_live_trade_provider_cache) == "function" then
+		pcall(eco.clear_missing_live_trade_provider_cache)
+	end
+	revision_queue = all_givers(nil, "daily_revision")
+	debug_log("~ ZHOPA2 npc quest | stage [revision_started] day [%s] givers [%s]", tostring(day), tostring(#revision_queue))
+end
+
+local function process_revision()
+	local day = game_day()
+	if day == nil or M.enabled() ~= true then
+		return
+	end
+	local qstate = quest_state()
+	if day > qstate.last_revision_day and #revision_queue == 0 then
+		start_revision(day)
+	end
+	local processed = 0
+	while #revision_queue > 0 and processed < REVISION_GIVERS_PER_TICK do
+		local giver = table.remove(revision_queue, 1)
+		if giver and smart_is_valid(giver.smart) and object_alive(giver.provider) then
+			revise_giver(giver)
+		elseif giver then
+			debug_log("~ ZHOPA2 npc quest | stage [giver_skipped] giver [%s:%s] reason [no_longer_live]", tostring(object_name(giver.smart) or "-"), tostring(object_id(giver.smart) or "-"))
+		end
+		processed = processed + 1
+	end
+	if revision_day == day and #revision_queue == 0 then
+		qstate.last_revision_day = day
+	end
+end
+
+local function reconcile()
+	local qstate = quest_state()
+	for _, quest in pairs(qstate.quests) do
+		if quest and active_status(quest.status) and quest.executor_squad_id then
+			local squad = alife_object(quest.executor_squad_id)
+			if not squad_alive(squad) then
+				terminal(quest, STATUS_FAILED, "executor_missing_after_load", false)
+			else
+				squad.zhopa2_npc_quest_id = quest.id
+				qstate.executor_to_quest[quest.executor_squad_id] = quest.id
+				if quest.service_mode == "online" then
+					clear_service_state(quest)
+					quest.wait_until_minutes = (game_minutes() or 0) + service_wait_minutes()
+				end
+				if squad.zhopa2_task ~= TASK_QUEST and quest.route_target_id and type(squad.zhopa2_assign_task) == "function" then
+					local ok, assigned = pcall(
+						squad.zhopa2_assign_task,
+						squad,
+						TASK_QUEST,
+						quest.route_target_id,
+						0,
+						"npc_quest_restore"
+					)
+					if not (ok and assigned == true) then
+						terminal(quest, STATUS_FAILED, "restore_task_failed", false)
+					end
+				end
+			end
+		end
+	end
+	pending_reconcile = false
+end
+
+local function save_state(m_data)
+	if type(m_data) == "table" then
+		m_data[STATE_KEY] = quest_state()
+	end
+end
+
+local function load_state(m_data)
+	state = normalize_state(type(m_data) == "table" and m_data[STATE_KEY] or nil)
+	revision_queue = {}
+	revision_day = nil
+	pending_reconcile = true
+end
+
+local function actor_on_first_update()
+	pending_reconcile = true
+	process_revision()
+end
+
+local function on_game_load()
+	pending_reconcile = true
+end
+
+local function actor_on_update()
+	local now = now_ms()
+	if now < next_revision_tg then
+		return
+	end
+	next_revision_tg = now + REVISION_INTERVAL_MS
+	if pending_reconcile then
+		reconcile()
+	end
+	process_revision()
+end
+
+local function on_option_change()
+	if M.enabled() then
+		quest_state().last_revision_day = -1
+		return
+	end
+	M.abort_all("feature_disabled")
+end
+
+function M.abort_all(reason)
+	local active, available = {}, {}
+	for _, quest in pairs(quest_state().quests) do
+		if quest and quest.status == STATUS_AVAILABLE then
+			available[#available + 1] = quest
+		elseif quest and active_status(quest.status) then
+			active[#active + 1] = quest
+		end
+	end
+	for i = 1, #available do
+		cancel_available(available[i], reason or "aborted")
+	end
+	for i = 1, #active do
+		terminal(active[i], STATUS_FAILED, reason or "aborted", true)
+	end
+	return true
+end
+
+function M.on_game_start()
+	if not RegisterScriptCallback then
+		return false
+	end
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "on_option_change", on_option_change)
+	end
+	local ok = true
+	local function reg(name, callback)
+		local success = pcall(RegisterScriptCallback, name, callback)
+		return success == true
+	end
+	ok = reg("save_state", save_state) and ok
+	ok = reg("load_state", load_state) and ok
+	ok = reg("actor_on_first_update", actor_on_first_update) and ok
+	ok = reg("on_game_load", on_game_load) and ok
+	ok = reg("actor_on_update", actor_on_update) and ok
+	ok = reg("on_option_change", on_option_change) and ok
+	callbacks_registered = ok
+	return ok
+end
+
+function M.on_master_disable()
+	suppress_task_clear = true
+	M.abort_all("master_disabled")
+	suppress_task_clear = false
+	if UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
+		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
+		pcall(UnregisterScriptCallback, "actor_on_update", actor_on_update)
+		pcall(UnregisterScriptCallback, "on_option_change", on_option_change)
+	end
+	callbacks_registered = false
+	pending_reconcile = false
+	revision_queue = {}
+	revision_day = nil
+	next_revision_tg = 0
+	state = new_state()
+	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
+		local ok, save = pcall(alife_storage_manager.get_state)
+		if ok and type(save) == "table" then
+			save[STATE_KEY] = nil
+		end
+	end
+	return true
+end
+
+M.STATE_KEY = STATE_KEY
+M.TASK_QUEST = TASK_QUEST
+M.save_state = save_state
+M.load_state = load_state
+
+_G.zhopa2_npc_quests = M
+return M

@@ -261,6 +261,24 @@ local function story_status_line(squad)
 	return "story: north_migration"
 end
 
+local function quest_status_line(squad)
+	if not (squad and squad.zhopa2_task == "QUEST") then
+		return nil
+	end
+	local quests = rawget(_G, "zhopa2_npc_quests")
+	if not quests and require then
+		pcall(require, "zhopa2_npc_quests")
+		quests = rawget(_G, "zhopa2_npc_quests")
+	end
+	if quests and type(quests.dialogue_context) == "function" then
+		local ok, context = pcall(quests.dialogue_context, squad)
+		if ok and type(context) == "table" and type(context.kind) == "string" then
+			return strformat("quest: %s | phase: %s", context.kind, tostring(context.state or "-"))
+		end
+	end
+	return "quest: pending_acceptance"
+end
+
 local function build_hint(squad)
 	local tostr = tostring
 	local lines = {
@@ -283,6 +301,10 @@ local function build_hint(squad)
 	local story_line = story_status_line(squad)
 	if story_line then
 		lines[#lines + 1] = story_line
+	end
+	local quest_line = quest_status_line(squad)
+	if quest_line then
+		lines[#lines + 1] = quest_line
 	end
 	return table.concat(lines, "\\n")
 end

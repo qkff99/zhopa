@@ -12,7 +12,7 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 
 | Subsystem | Behavior |
 | --- | --- |
-| Squad tasks | Stalkers explore the Zone, populate smart terrains, patrol, rest, hunt, take revenge, collect artefacts, and travel to trade. Mutants use a separate task pool. |
+| Squad tasks | Stalkers explore the Zone, populate smart terrains, patrol, rest, hunt, take revenge, collect artefacts, travel to trade, and perform trader contracts. Mutants use a separate task pool. |
 | Task balance | Valid task-target pairs are weighted by squad strength, local faction pressure, and optional faction preferences. Story and safety tasks remain outside this random selection. |
 | Hunt and revenge | Targets are tracked by their actual squad position, including level transitions. Actor revenge makes only the assigned squad hostile, not its entire faction. |
 | Dialogue and travel | A managed squad commander reports the squad's current and previous task. If the squad is moving, the actor can travel with it to the actual destination with time advancement and Story Mode psi restrictions. |
@@ -22,7 +22,7 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Bases and services | The addon tracks base ownership and can refill suitable service roles after an emission. |
 | Story events | Story mode enables psi zombification and northern migration after the Brain Scorcher shutdown. These systems do not run in freeplay. |
 
-Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
+Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `QUEST`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
 
 ## Trade and Economy
 
@@ -79,6 +79,8 @@ Main MCM sections:
 Task balance is enabled by default. Its numeric tuning, level overrides, squad strength overrides, and faction profiles are kept in `gamedata/configs/zhopa2_population_profiles.ltx`; MCM exposes only the three gameplay switches and the Soft / Balanced / Strict direct-target policy.
 
 Squad dialogue and joint travel are controlled by `squad_dialogue_enabled`. Travel-time tuning remains LTX-only through `squad_travel_minutes_per_100m`; the default is 10 in-game minutes per 100 meters.
+
+NPC squad quests are controlled by `npc_quests_enabled`; `stalker_quest_weight` sets their relative selection chance. A trader smart can be excluded in `zhopa2_npc_quests.ltx` with `smart_name = disabled`.
 
 Online managed looting is experimental and disabled by default. Leave it disabled to use vanilla looting, the more predictable choice for large mod packs; artefact tasks continue to use their separate targeted pickup path. After updating the addon, use MCM's **Reset to defaults** before changing options so the current recommended defaults take effect.
 

@@ -46,6 +46,14 @@ local function cfg_num(key, default)
 	return default
 end
 
+local function squad_task_enabled(squad, key, default)
+	local cfg = cfg_mod()
+	if cfg and type(cfg.squad_task_enabled) == "function" then
+		return cfg.squad_task_enabled(squad, key, default) == true
+	end
+	return cfg_bool(key, default)
+end
+
 local function hour_is_night(hour)
 	hour = tonumber(hour) or 12
 	return hour >= 21 or hour <= 5
@@ -620,9 +628,6 @@ function M.apply_online_revenge_hostility()
 	if not runtime_ready("revenge_hostility") then
 		return false, "runtime_not_ready"
 	end
-	if not cfg_bool("revenge_enabled", true) then
-		return false
-	end
 	if revenge_disabled_for_night() then
 		return false
 	end
@@ -650,7 +655,7 @@ function M.apply_online_revenge_hostility()
 		end
 		seen[squad_id] = true
 		local squad = alife_object(squad_id)
-		if squad and squad.zhopa2_task == TASK_REVENGE and obj_level(squad) == level_name then
+		if squad and squad.zhopa2_task == TASK_REVENGE and squad_task_enabled(squad, "revenge_enabled", true) and obj_level(squad) == level_name then
 			processed = processed + 1
 			applied = tasks.apply_revenge_hostility(squad) or applied
 		end
@@ -774,6 +779,9 @@ function M.assign_revenge(responder, offender_target_id, opts)
 	if not responder_manageable_soft(responder) then
 		return false
 	end
+	if not squad_task_enabled(responder, "revenge_enabled", true) then
+		return false
+	end
 	if revenge_disabled_for_night() then
 		return false
 	end
@@ -797,9 +805,6 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 	if not (victim_squad and victim_squad.id and se_npc and se_killer) then
 		return false
 	end
-	if not cfg_bool("revenge_enabled", true) then
-		return false
-	end
 	if revenge_disabled_for_night() then
 		return false
 	end
@@ -821,9 +826,6 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 		return false
 	end
 	local is_actor_target = offender_target_id == ACTOR_TARGET_ID
-	if is_actor_target and not cfg_bool("revenge_actor_enabled", true) then
-		return false
-	end
 	if offender_squad and offender_squad.id == victim_squad.id then
 		return false
 	end
@@ -841,6 +843,9 @@ function M.on_squad_npc_death(victim_squad, se_npc, se_killer)
 	end
 	local responder, direct_target_checked = find_responder(victim_squad, offender_squad)
 	if not responder then
+		return false
+	end
+	if is_actor_target and not squad_task_enabled(responder, "revenge_actor_enabled", true) then
 		return false
 	end
 	local assigned = M.assign_revenge(responder, offender_target_id, {

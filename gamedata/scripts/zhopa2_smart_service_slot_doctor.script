@@ -17,6 +17,7 @@ local alife = _G.alife
 local load_var = _G.load_var
 local empty_table = _G.empty_table
 local utils_data = _G.utils_data
+local utils_obj = _G.utils_obj
 
 local inst = zhopa2_smart_service_slot_doctor
 
@@ -27,6 +28,7 @@ local POST_COMPLETE_TRADE_TO_TECH_VERIFY_MS = 10000
 local POST_TECH_UNKNOWN_GRACE_MS = 10000
 local POST_TECH_UNKNOWN_STALL_MS = 15000
 local POST_TECH_UNKNOWN_WATCH_MAX_MS = 45000
+local STATE_FLUSH_UPDATES = 5
 local REPAIR_MAX_PER_TICK = 2
 local INGRESS_NO_PROGRESS_MS = {
     trade = 25000,
@@ -359,6 +361,9 @@ local function has_active_prepared_trade(entry, snapshot, npc_id)
 end
 
 local function has_active_trade_intent(entry, snapshot, npc_id)
+	if entry and entry.st and entry.st.zhopa2_quest_service_token then
+		return false
+	end
     if has_active_prepared_trade(entry, snapshot, npc_id) then
         return true
     end
@@ -1114,9 +1119,6 @@ local function clear_post_tech_watch(npc_id)
 end
 
 local function arm_completed_watch(npc, smart, kind, status, reason)
-    if status ~= "completed" then
-        return false
-    end
     if not (npc and type(npc.id) == "function") then
         return false
     end
@@ -1448,6 +1450,64 @@ local function clear_service_intent(st, job, rule)
     end
 end
 
+local function flush_npc_runtime_state(issue)
+    local entry = issue and issue.entry or nil
+    local npc = entry and entry.obj or get_live_object(issue and issue.npc_id)
+    local st = entry and entry.st or nil
+    if not is_alive_object(npc) then
+        return false, "no_live_npc"
+    end
+
+    local state_mgr = st and st.state_mgr or nil
+    if type(npc.clear_animations) == "function" then
+        pcall(npc.clear_animations, npc)
+    end
+    if type(npc.inactualize_patrol_path) == "function" then
+        pcall(npc.inactualize_patrol_path, npc)
+    end
+    if utils_obj and type(utils_obj.send_to_nearest_accessible_vertex) == "function" and type(npc.level_vertex_id) == "function" then
+        local ok_lvid, lvid = pcall(npc.level_vertex_id, npc)
+        if ok_lvid and lvid then
+            pcall(utils_obj.send_to_nearest_accessible_vertex, npc, lvid, "zhopa2_smart_service_slot_doctor")
+        end
+    end
+    if state_mgr then
+        local animation = state_mgr.animation
+        if animation and type(animation.set_state) == "function" then
+            pcall(animation.set_state, animation, nil, true)
+            if type(animation.set_control) == "function" then
+                pcall(animation.set_control, animation)
+            end
+        end
+        local animstate = state_mgr.animstate
+        if animstate and type(animstate.set_state) == "function" then
+            pcall(animstate.set_state, animstate, nil, true)
+            if type(animstate.set_control) == "function" then
+                pcall(animstate.set_control, animstate)
+            end
+        end
+        if type(state_mgr.set_state) == "function" then
+            pcall(state_mgr.set_state, state_mgr, "idle", nil, nil, nil, { fast_set = true })
+        end
+        if type(state_mgr.update) == "function" then
+            for _ = 1, STATE_FLUSH_UPDATES do
+                pcall(state_mgr.update, state_mgr)
+            end
+        end
+    end
+
+    log_warn(
+        "state_flush smart=%s npc=%s id=%s kind=%s rule=%s active=%s",
+        tostring(issue and issue.smart_name or "-"),
+        npc and npc:name() or tostring(issue and issue.npc_id or "-"),
+        tostring(issue and issue.npc_id or "-"),
+        tostring(issue and issue.kind or "-"),
+        issue and issue.rule and issue.rule.name or "?",
+        tostring(issue and issue.active_section or "-")
+    )
+    return true
+end
+
 local function reselect_npc_smart_job(issue)
     local smart = issue and issue.smart or nil
     local npc_id = issue and tonumber(issue.npc_id) or nil
@@ -1482,7 +1542,22 @@ local function reselect_npc_smart_job(issue)
         tostring(old_section or "-"),
         tostring(info.job.section or "-")
     )
-    return true, nil
+	return true, nil
+end
+
+local function abort_quest_service_issue(issue, tag)
+	local entry = issue and issue.entry or nil
+	local token = entry and entry.st and entry.st.zhopa2_quest_service_token or nil
+	if not token then
+		return false
+	end
+	local economy = economy_mod()
+	if not (economy and type(economy.abort_online_quest_service) == "function") then
+		return false
+	end
+	local npc = entry.obj or issue.npc_id
+	local ok, aborted = pcall(economy.abort_online_quest_service, npc, issue.smart, token, "doctor_" .. tostring(tag or "service_stuck"))
+	return ok and aborted == true
 end
 
 resolve_issue_with_reselect = function(issue, tag)
@@ -1493,9 +1568,22 @@ resolve_issue_with_reselect = function(issue, tag)
         return false
     end
 
-    state.last_action_tg = tg
+	state.last_action_tg = tg
 
-    local ok_reselect, reason = reselect_npc_smart_job(issue)
+	abort_quest_service_issue(issue, tag)
+	local flushed, flush_reason = flush_npc_runtime_state(issue)
+	if not flushed then
+		log_warn(
+			"state_flush_failed smart=%s id=%s kind=%s rule=%s reason=%s tag=%s",
+			tostring(issue.smart_name or "-"),
+			tostring(issue.npc_id or "-"),
+			tostring(issue.kind or "-"),
+			issue.rule and issue.rule.name or "?",
+			tostring(flush_reason or "-"),
+			tostring(tag or "-")
+		)
+	end
+	local ok_reselect, reason = reselect_npc_smart_job(issue)
     if not ok_reselect then
         log_warn(
             "job_reselect_failed smart=%s id=%s kind=%s rule=%s reason=%s slot=%s active=%s tag=%s",

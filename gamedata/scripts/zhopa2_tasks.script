@@ -9,6 +9,7 @@ M.TASK_PATROL = "PATROL"
 M.TASK_NIGHT_REST = "NIGHT_REST"
 M.TASK_ARTEFACT = "ARTEFACT"
 M.TASK_TRADE = "TRADE"
+M.TASK_QUEST = "QUEST"
 M.TASK_HUNT = "HUNT"
 M.TASK_REVENGE = "REVENGE"
 M.TASK_STORY_NORTH_MIGRATION = "STORY_NORTH_MIGRATION"
@@ -135,6 +136,31 @@ local function cfg_num(key, default)
 		return tonumber(c.get_num(key, default)) or default
 	end
 	return default
+end
+
+local function stalker_task_enabled(squad, key, default)
+	local c = cfg()
+	if c and type(c.squad_task_enabled) == "function" then
+		return c.squad_task_enabled(squad, key, default) == true
+	end
+	return cfg_bool(key, default)
+end
+
+local function stalker_task_weight(squad, key, default)
+	local c = cfg()
+	if c and type(c.squad_task_weight) == "function" then
+		return tonumber(c.squad_task_weight(squad, key, default)) or default
+	end
+	return cfg_num(key, default)
+end
+
+local function npc_quests_mod()
+	local mod = rawget(_G, "zhopa2_npc_quests")
+	if not mod and require then
+		pcall(require, "zhopa2_npc_quests")
+		mod = rawget(_G, "zhopa2_npc_quests")
+	end
+	return mod
 end
 
 local function scoring_pipeline_enabled()
@@ -534,6 +560,7 @@ local mutant_invalid_stalker_tasks = {
 	[M.TASK_NIGHT_REST] = true,
 	[M.TASK_ARTEFACT] = true,
 	[M.TASK_TRADE] = true,
+	[M.TASK_QUEST] = true,
 }
 
 local function mutant_has_stalker_task(squad, task)
@@ -570,6 +597,7 @@ local registry_weight_keys = {
 		["HUNT"] = { key = "stalker_hunt_weight", default = 15, enabled = "stalker_hunt_enabled", enabled_default = true },
 		["ARTEFACT"] = { key = "stalker_artefact_weight", default = 10, enabled = "artefact_enabled", enabled_default = true },
 		["TRADE"] = { key = "stalker_trade_weight", default = 10, enabled = "trade_enabled", enabled_default = true },
+		["QUEST"] = { key = "stalker_quest_weight", default = 10, enabled = "npc_quests_enabled", enabled_default = true },
 	},
 	["mutant"] = {
 		["HUNT"] = { key = "mutant_hunt_weight", default = 35, enabled = "mutant_hunt_enabled", enabled_default = true },
@@ -593,7 +621,7 @@ local function register_task(pool, name, builder, weight_fn)
 		task_registry[pool] = list
 	end
 	local meta = registry_weight_meta(pool, name) or {}
-	list[#list + 1] = { name = name, build = builder, weight_fn = weight_fn, weight_key = meta.key, weight_default = meta.default or 1, enabled_key = meta.enabled, enabled_default = meta.enabled_default }
+	list[#list + 1] = { pool = pool, name = name, build = builder, weight_fn = weight_fn, weight_key = meta.key, weight_default = meta.default or 1, enabled_key = meta.enabled, enabled_default = meta.enabled_default }
 end
 M.register_task = register_task
 
@@ -631,10 +659,18 @@ local function registry_entry_weight(entry, squad, context)
 	if not entry then
 		return 0
 	end
-	if entry.enabled_key and not cfg_bool(entry.enabled_key, entry.enabled_default ~= false) then
+	local enabled = nil
+	if entry.enabled_key then
+		if entry.pool == "stalker" then
+			enabled = stalker_task_enabled(squad, entry.enabled_key, entry.enabled_default ~= false)
+		else
+			enabled = cfg_bool(entry.enabled_key, entry.enabled_default ~= false)
+		end
+	end
+	if enabled == false then
 		return 0
 	end
-	local value = entry.weight_key and task_weight(entry.weight_key, entry.weight_default or 1) or entry.weight_default or 1
+	local value = entry.weight_key and (entry.pool == "stalker" and stalker_task_weight(squad, entry.weight_key, entry.weight_default or 1) or task_weight(entry.weight_key, entry.weight_default or 1)) or entry.weight_default or 1
 	value = tonumber(value) or 0
 	if value < 0 then
 		return 0
@@ -680,6 +716,7 @@ function M.should_skip_task_update(squad)
 		or task == M.TASK_REVENGE
 		or task == M.TASK_ARTEFACT
 		or task == M.TASK_TRADE
+		or task == M.TASK_QUEST
 		or task == M.TASK_FORCE_EXIT
 		or task == M.TASK_STORY_NORTH_MIGRATION
 	then
@@ -953,7 +990,7 @@ local function trade_route_task_weight(squad, context, base_weight, route_candid
 	if not (economy and type(economy.trade_route_task_weight) == "function") then
 		return 0
 	end
-	local base = tonumber(base_weight) or task_weight("stalker_trade_weight", 10)
+	local base = tonumber(base_weight) or stalker_task_weight(squad, "stalker_trade_weight", 10)
 	local routes = route_candidates or (context and context.zhopa2_trade_route_candidates)
 	if type(routes) ~= "table" and type(economy.collect_trade_route_smarts) == "function" then
 		local ok_routes, collected, current_level = pcall(economy.collect_trade_route_smarts, squad, { level_mode = "current_or_neighbor" })
@@ -1217,22 +1254,22 @@ end
 
 local function build_stalker_explore(squad)
 	local p = perception()
-	if not (cfg_bool("explore_enabled", true) and p) then
+	if not (stalker_task_enabled(squad, "explore_enabled", true) and p) then
 		return nil
 	end
 	local opts = { level_mode = "neighbor", fallback_level_mode = "nearby", kind = "rest", ignore_population = false, exclude_current = true, skip_prior = true }
 	if scoring_pipeline_enabled() then
-		return build_smart_target_choices(squad, M.TASK_EXPLORE, task_weight("stalker_explore_weight", 40), "explore", opts, { "neighbor", "nearby" })
+		return build_smart_target_choices(squad, M.TASK_EXPLORE, stalker_task_weight(squad, "stalker_explore_weight", 40), "explore", opts, { "neighbor", "nearby" })
 	end
 	local smart = p.pick_weighted_smart and p.pick_weighted_smart(squad, opts)
 		or p.pick_smart and p.pick_smart(squad, { level_mode = "current_or_neighbor", ignore_population = false, exclude_current = true, skip_prior = true })
 	smart = final_smart(p, squad, smart, opts)
-	return smart and make_choice(M.TASK_EXPLORE, smart.id, task_weight("stalker_explore_weight", 40), "explore") or nil
+	return smart and make_choice(M.TASK_EXPLORE, smart.id, stalker_task_weight(squad, "stalker_explore_weight", 40), "explore") or nil
 end
 
 local function build_stalker_populate(squad)
 	local p = perception()
-	if not (cfg_bool("populate_enabled", true) and p and p.pick_weighted_smart) then
+	if not (stalker_task_enabled(squad, "populate_enabled", true) and p and p.pick_weighted_smart) then
 		return nil
 	end
 	local smart
@@ -1256,12 +1293,12 @@ local function build_stalker_populate(squad)
 	local opts = { level_mode = "current_or_neighbor", fallback_level_mode = "nearby", kind = "rest", populate = true, exclude_current = true, skip_prior = true }
 	if not smart then
 		if scoring_pipeline_enabled() then
-			return build_smart_target_choices(squad, M.TASK_POPULATE, task_weight("stalker_populate_weight", 20), populate_reason, opts, { "same", "neighbor", "nearby" })
+			return build_smart_target_choices(squad, M.TASK_POPULATE, stalker_task_weight(squad, "stalker_populate_weight", 20), populate_reason, opts, { "same", "neighbor", "nearby" })
 		end
 		smart = p.pick_weighted_smart(squad, opts)
 	end
 	smart = final_smart(p, squad, smart, opts)
-	local choice = smart and make_choice(M.TASK_POPULATE, smart.id, task_weight("stalker_populate_weight", 20), populate_reason) or nil
+	local choice = smart and make_choice(M.TASK_POPULATE, smart.id, stalker_task_weight(squad, "stalker_populate_weight", 20), populate_reason) or nil
 	if choice and type(p.obj_level) == "function" then
 		choice.target_level = p.obj_level(smart)
 	end
@@ -1270,7 +1307,7 @@ end
 
 local function build_stalker_patrol(squad)
 	local p = perception()
-	if not (cfg_bool("patrol_enabled", true) and p and p.make_patrol) then
+	if not (stalker_task_enabled(squad, "patrol_enabled", true) and p and p.make_patrol) then
 		return nil
 	end
 	local patrol = p.make_patrol(squad, nil)
@@ -1278,7 +1315,7 @@ local function build_stalker_patrol(squad)
 		return nil
 	end
 	local packed = p.pack_ids and p.pack_ids(patrol) or nil
-	return make_choice(M.TASK_PATROL, patrol[1], task_weight("stalker_patrol_weight", 25), "patrol", cfg_num("patrol_duration_game_hours", 1) * 3600, packed)
+	return make_choice(M.TASK_PATROL, patrol[1], stalker_task_weight(squad, "stalker_patrol_weight", 25), "patrol", cfg_num("patrol_duration_game_hours", 1) * 3600, packed)
 end
 
 local function pick_hunt_target_with_policy(squad, p, options)
@@ -1307,7 +1344,7 @@ end
 
 local function build_stalker_hunt(squad)
 	local p = perception()
-	if not (cfg_bool("stalker_hunt_enabled", true) and p and p.pick_hunt_target) then
+	if not (stalker_task_enabled(squad, "stalker_hunt_enabled", true) and p and p.pick_hunt_target) then
 		return nil
 	end
 	if task_no_target_cooldown_active(squad, "HUNT") then
@@ -1320,7 +1357,7 @@ local function build_stalker_hunt(squad)
 	end
 	local target, direct_target_checked = pick_hunt_target_with_policy(squad, p, options)
 	if target then
-		local choice = make_choice(M.TASK_HUNT, target.id, task_weight("stalker_hunt_weight", 15), "stalker_hunt")
+		local choice = make_choice(M.TASK_HUNT, target.id, stalker_task_weight(squad, "stalker_hunt_weight", 15), "stalker_hunt")
 		if choice then
 			choice.hunt_prey = options.prey
 			choice.direct_target_checked = direct_target_checked
@@ -1332,7 +1369,7 @@ end
 
 local function build_stalker_artefact(squad)
 	local p = perception()
-	if not (cfg_bool("artefact_enabled", true) and p and type(p.pick_artifact_target) == "function") then
+	if not (stalker_task_enabled(squad, "artefact_enabled", true) and p and type(p.pick_artifact_target) == "function") then
 		return nil
 	end
 	if scoring_pipeline_enabled() and type(p.collect_artifact_targets) == "function" then
@@ -1342,7 +1379,7 @@ local function build_stalker_artefact(squad)
 			if #targets > 0 then
 				local choices = {}
 				local limit = math.min(#targets, TASK_CANDIDATES_PER_BUILDER)
-				local target_weight = task_weight("stalker_artefact_weight", 10) / limit
+			local target_weight = stalker_task_weight(squad, "stalker_artefact_weight", 10) / limit
 				for j = 1, limit do
 					local target = targets[j]
 					local smart = target and target.smart or nil
@@ -1367,7 +1404,7 @@ local function build_stalker_artefact(squad)
 	if not smart then
 		return nil
 	end
-	local choice = make_choice(M.TASK_ARTEFACT, smart.id, task_weight("stalker_artefact_weight", 10), target.reason or "artefact_route")
+	local choice = make_choice(M.TASK_ARTEFACT, smart.id, stalker_task_weight(squad, "stalker_artefact_weight", 10), target.reason or "artefact_route")
 	if choice then
 		choice.artifact_id = target.artifact_id
 		choice.artifact_section = target.section
@@ -1379,7 +1416,7 @@ local function build_stalker_artefact(squad)
 end
 
 local function build_stalker_trade(squad, context)
-	if not (cfg_bool("trade_enabled", true) and trade_route_allowed_from_context(context)) then
+	if not (stalker_task_enabled(squad, "trade_enabled", true) and trade_route_allowed_from_context(context)) then
 		return nil
 	end
 	local economy = economy_mod()
@@ -1398,7 +1435,7 @@ local function build_stalker_trade(squad, context)
 	if not (type(routes) == "table" and #routes > 0) then
 		return nil
 	end
-	local weight = trade_route_task_weight(squad, context, task_weight("stalker_trade_weight", 10), routes)
+	local weight = trade_route_task_weight(squad, context, stalker_task_weight(squad, "stalker_trade_weight", 10), routes)
 	if weight <= 0 then
 		return nil
 	end
@@ -1428,6 +1465,31 @@ local function build_stalker_trade(squad, context)
 		end
 	end
 	return choices
+end
+
+local function build_stalker_quest(squad, context)
+	if not stalker_task_enabled(squad, "npc_quests_enabled", true) then
+		return nil
+	end
+	local quests = npc_quests_mod()
+	if not (quests and type(quests.build_choices) == "function") then
+		return nil
+	end
+	local ok, candidates = pcall(quests.build_choices, squad, context)
+	if not (ok and type(candidates) == "table") then
+		return nil
+	end
+	local choices = {}
+	local weight = stalker_task_weight(squad, "stalker_quest_weight", 10)
+	local limit = math.min(#candidates, TASK_CANDIDATES_PER_BUILDER)
+	for i = 1, limit do
+		local candidate = candidates[i]
+		local choice = candidate and make_choice(M.TASK_QUEST, candidate.target, weight / limit, candidate.reason or "npc_quest_to_giver") or nil
+		if choice then
+			choices[#choices + 1] = choice
+		end
+	end
+	return #choices > 0 and choices or nil
 end
 
 local function build_mutant_hunt(squad)
@@ -1503,6 +1565,7 @@ register_task("stalker", M.TASK_PATROL, build_stalker_patrol)
 register_task("stalker", M.TASK_HUNT, build_stalker_hunt)
 register_task("stalker", M.TASK_ARTEFACT, build_stalker_artefact)
 register_task("stalker", M.TASK_TRADE, build_stalker_trade, trade_route_task_weight)
+register_task("stalker", M.TASK_QUEST, build_stalker_quest)
 register_task("stalker", M.TASK_REST, build_stalker_profile_rest, function(squad)
 	local scoring = task_scoring()
 	local weight = scoring and type(scoring.profile_task_weight) == "function" and scoring.profile_task_weight(squad, M.TASK_REST) or 0
@@ -1621,7 +1684,7 @@ function select_stalker_night_rest(squad)
 	end
 
 	local p = perception()
-	if cfg_bool("night_rest_enabled", true) and p and p.is_night and p.is_night() then
+	if stalker_task_enabled(squad, "night_rest_enabled", true) and p and p.is_night and p.is_night() then
 		local order = {
 			{ "same", "base", "night_rest_base" },
 			{ "same", "surge", "night_rest_surge" },
@@ -1867,8 +1930,18 @@ function M.interrupt_task(squad, task, target_id, duration_sec, reason, patrol, 
 	end
 
 	local clear_reason = opts.clear_reason or reason or "interrupt"
+	local npc_quest_handoff_id = opts.npc_quest_handoff_id
+	local npc_quest_handoff = current_task == M.TASK_QUEST
+		and npc_quest_handoff_id ~= nil
+		and tonumber(squad.zhopa2_npc_quest_id) == tonumber(npc_quest_handoff_id)
 	if opts.cleanup_current ~= false and current_task and type(squad.zhopa2_clear_task) == "function" then
+		if npc_quest_handoff then
+			squad.zhopa2_npc_quest_handoff_id = npc_quest_handoff_id
+		end
 		squad:zhopa2_clear_task(clear_reason)
+		if npc_quest_handoff then
+			squad.zhopa2_npc_quest_handoff_id = nil
+		end
 	end
 
 	if squad:zhopa2_assign_task(task, target_id, duration_sec or 0, reason or task, patrol) ~= true then
@@ -1896,7 +1969,8 @@ function M.assign_revenge_interrupt(responder, offender_target_id, opts)
 	})
 end
 
-function M.assign_base_camping_permanent(squad, smart, reason)
+function M.assign_base_camping_permanent(squad, smart, reason, opts)
+	opts = opts or {}
 	if not (squad and smart and smart.id) then
 		return false
 	end
@@ -1910,7 +1984,22 @@ function M.assign_base_camping_permanent(squad, smart, reason)
 		[M.TASK_NIGHT_REST] = true,
 		[M.TASK_FORCE_EXIT] = true,
 		[M.TASK_STORY_NORTH_MIGRATION] = true,
+		[M.TASK_QUEST] = true,
 	}
+	local npc_quest_handoff_id = opts.npc_quest_handoff_id
+	local npc_quest_handoff = false
+	if squad.zhopa2_task == M.TASK_QUEST and npc_quest_handoff_id ~= nil then
+		local quests = npc_quests_mod()
+		if quests and type(quests.can_handoff_to_base_camping) == "function" then
+			local ok, allowed = pcall(quests.can_handoff_to_base_camping, squad, npc_quest_handoff_id)
+			npc_quest_handoff = ok and allowed == true
+		end
+	end
+	if squad.zhopa2_task == M.TASK_QUEST
+		and npc_quest_handoff
+	then
+		base_camping_deny_from[M.TASK_QUEST] = nil
+	end
 	local assign_reason = reason or "base_camping_empty_base"
 	return M.interrupt_task(squad, M.TASK_BASE_CAMPING, smart.id, 0, assign_reason, nil, {
 		snapshot = true,
@@ -1918,6 +2007,7 @@ function M.assign_base_camping_permanent(squad, smart, reason)
 		clear_reason = assign_reason,
 		result = "base_camping_permanent",
 		deny_from = base_camping_deny_from,
+		npc_quest_handoff_id = npc_quest_handoff and npc_quest_handoff_id or nil,
 	})
 end
 
@@ -2845,6 +2935,15 @@ function M.update_squad(squad, memory)
 		return true
 	end
 
+	if squad.zhopa2_task == M.TASK_QUEST then
+		local quests = npc_quests_mod()
+		if quests and type_(quests.update_squad) == "function" then
+			pcall(quests.update_squad, squad)
+		end
+		update_debug(squad)
+		return true
+	end
+
 	if night_rest_target_unsafe(squad) then
 		local replacement = select_stalker_night_rest(squad)
 		if replacement and M.interrupt_task(squad, replacement.task, replacement.target, replacement.duration or 0, replacement.reason, replacement.patrol, {
@@ -2883,7 +2982,7 @@ function M.update_squad(squad, memory)
 		return false
 	end
 
-	if squad.zhopa2_task and squad.zhopa2_task ~= M.TASK_NIGHT_REST and squad.zhopa2_task ~= M.TASK_REVENGE and not is_monster_squad(squad) then
+	if squad.zhopa2_task and squad.zhopa2_task ~= M.TASK_NIGHT_REST and squad.zhopa2_task ~= M.TASK_REVENGE and squad.zhopa2_task ~= M.TASK_QUEST and not is_monster_squad(squad) then
 		local night_rest = select_stalker_night_rest(squad)
 		if night_rest and M.interrupt_task(squad, night_rest.task, night_rest.target, night_rest.duration or 0, night_rest.reason, night_rest.patrol, {
 			snapshot = true,
@@ -3035,6 +3134,14 @@ function M.get_script_target(squad)
 	end
 	if squad.zhopa2_task == M.TASK_REST then
 		return squad.id
+	end
+	if squad.zhopa2_task == M.TASK_QUEST then
+		local quests = npc_quests_mod()
+		if quests and type(quests.get_script_target) == "function" then
+			local ok, target = pcall(quests.get_script_target, squad)
+			return ok and target or nil
+		end
+		return nil
 	end
 	if squad.zhopa2_task == M.TASK_HUNT then
 		local target = alife_object(tonumber(squad.zhopa2_target) or squad.zhopa2_target)

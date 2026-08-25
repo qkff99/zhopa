@@ -8,8 +8,6 @@ local C = {
 	TRADE_FORCE_JOB_PAD_MS = 15000,
 	TRADE_PATHPOINT_CLEAR_COUNT = 12,
 	TRADE_PATH_VERTEX_SEARCH_MAX_DIST = 90,
-	TRADE_POST_RELEASE_WATCH_MS = 20000,
-	TRADE_POST_RELEASE_WATCH_INTERVAL_MS = 2000,
 	OFFLINE_TRADE_PROFILE_CACHE_TTL_MS = 5000,
 	MED_BANDAGE_KEEP = 3,
 	MEDKIT_KEEP = 3,
@@ -28,8 +26,6 @@ local C = {
 M.TRADE_EVENT_BUFFER_MAX = 50
 M.TRADE_ROUTE_VALUE_WEIGHT_STEP = 1500
 M.TRADE_ROUTE_MAX_VALUE_BONUS = 180
-M.trade_release_watch = {}
-M.trade_release_watch_next_tg = 0
 
 local no_trade_comm = {
 	zombied = true,
@@ -51,6 +47,7 @@ local SMART_TRADE_CUSTOMER_CACHE = {}
 local SMART_TRADE_QUEUE = {}
 local SMART_TRADE_PRIORITY_BOOSTS = {}
 local trade_path = {}
+trade_path.live_trade_provider_cache = {}
 trade_path.session_banned_npcs = {}
 trade_path.offline_profile_cache = {}
 trade_path.offline_profile_cleanup_at = 0
@@ -166,15 +163,25 @@ local function debug_print_enabled()
 end
 
 function M.enabled()
-	return cfg_bool("enabled", true) == true and cfg_bool("trade_enabled", true) == true
+	if cfg_bool("enabled", true) ~= true then
+		return false
+	end
+	local cfg = cfg_mod()
+	if cfg and type(cfg.faction_task_settings_enabled) == "function" and cfg.faction_task_settings_enabled() == true then
+		return true
+	end
+	return cfg_bool("trade_enabled", true) == true
 end
 
 function M.squad_trade_allowed(squad)
 	if not squad then
 		return false
 	end
-	local faction = squad.player_id
 	local cfg = cfg_mod()
+	if cfg and type(cfg.squad_task_enabled) == "function" and cfg.squad_task_enabled(squad, "trade_enabled", true) ~= true then
+		return false
+	end
+	local faction = squad.player_id
 	if cfg and type(cfg.get_faction_alias) == "function" then
 		local ok, alias = pcall(cfg.get_faction_alias, faction)
 		faction = ok and alias or faction
@@ -373,6 +380,19 @@ local function object_name(obj)
 		end
 	end
 	return tostring(object_id(obj) or "-")
+end
+
+function trade_path.object_server_name(obj)
+	if not obj then
+		return nil
+	end
+	if type(obj.name) == "function" then
+		local ok, value = pcall(obj.name, obj)
+		if ok and value and value ~= "" then
+			return tostring(value)
+		end
+	end
+	return nil
 end
 
 function M.is_squad_object(squad)
@@ -1108,8 +1128,11 @@ local function npc_is_trade_provider(npc, smart)
 	if role then
 		return trade_path.role_is_auto_trade_provider(role)
 	end
-	if type(section) == "string" then
-		local s = string.lower(section)
+	local function has_provider_marker(value)
+		if type(value) ~= "string" then
+			return false
+		end
+		local s = string.lower(value)
 		if string.find(s, "_medic", 1, true)
 			or string.find(s, "medic", 1, true)
 			or string.find(s, "_mechanic", 1, true)
@@ -1119,11 +1142,9 @@ local function npc_is_trade_provider(npc, smart)
 		then
 			return false
 		end
-		if string.find(s, "_trader", 1, true) or string.find(s, "_barman", 1, true) then
-			return true
-		end
+		return string.find(s, "_trader", 1, true) ~= nil or string.find(s, "_barman", 1, true) ~= nil
 	end
-	return false
+	return has_provider_marker(section) or has_provider_marker(trade_path.object_server_name(npc))
 end
 
 function M.build_online_sell_plan(npc, params)
@@ -1382,10 +1403,10 @@ end
 
 local function spawn_trade_item_to_npc(npc, section)
 	if not (npc and section and type(alife_create_item) == "function") then
-		return false
+		return nil
 	end
 	local ok, item = pcall(alife_create_item, section, npc)
-	return ok and item ~= nil
+	return ok and item or nil
 end
 
 local function dynamic_news_nearby_activity_enabled()
@@ -1424,10 +1445,15 @@ local function buy_missing_section(npc, trader, section, target_count, counts, p
 		if npc_money(payer) < price then
 			break
 		end
-		if not transfer_trade_money(payer, trader, price) then
+		local item = spawn_trade_item_to_npc(npc, section)
+		if not item then
 			break
 		end
-		if not spawn_trade_item_to_npc(npc, section) then
+		if not transfer_trade_money(payer, trader, price) then
+			local item_id = object_id(item)
+			if item_id and type(alife_release_id) == "function" then
+				pcall(alife_release_id, item_id)
+			end
 			break
 		end
 		have = have + 1
@@ -2215,7 +2241,7 @@ local function execute_offline_buy_needs(squad, members, needs)
 end
 
 function M.offline_squad_has_trade_work(squad, smart)
-	if M.enabled() ~= true then
+	if M.enabled() ~= true or M.squad_trade_allowed(squad) ~= true then
 		return false, "disabled"
 	end
 	local profile = trade_path.offline_trade_profile_for_squad(squad)
@@ -2231,7 +2257,7 @@ end
 
 function M.execute_offline_squad_trade(squad, smart, reason)
 	local tostr = tostring
-	if M.enabled() ~= true then
+	if M.enabled() ~= true or M.squad_trade_allowed(squad) ~= true then
 		return false, "disabled"
 	end
 	local profile = trade_path.offline_trade_profile_for_squad(squad)
@@ -2294,6 +2320,10 @@ function trade_path.clear_trade_storage(st)
 	st.zhopa2_trade_priority_boosted = nil
 	st.zhopa2_trade_reason = nil
 	st.zhopa2_trade_member_ids = nil
+	st.zhopa2_quest_service_token = nil
+	st.zhopa2_quest_service_phase = nil
+	st.zhopa2_quest_service_squad_id = nil
+	st.zhopa2_quest_service_smart_id = nil
 	if st.trade_items then
 		clear_table(st.trade_items)
 	end
@@ -2766,6 +2796,25 @@ function M.squad_trade_route_profile(squad)
 	return M._offline_trade_profile(squad)
 end
 
+local function trader_is_busy(smart, trader_id, ignore_ids)
+	if not (smart and trader_id and type(smart.npc_info) == "table") then
+		return false
+	end
+	for customer_id, info in pairs(smart.npc_info) do
+		local candidate_id = tonumber(customer_id) or customer_id
+		if candidate_id ~= trader_id and not (ignore_ids and (ignore_ids[candidate_id] or ignore_ids[tostring(candidate_id)])) then
+			local job = info and info.job or nil
+			local st = db and db.storage and db.storage[candidate_id] or nil
+			if (job and tonumber(job.seller_id) == trader_id)
+				or (trade_context_active(st) and tonumber(st.zhopa2_trade_trader_id) == trader_id)
+			then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function find_online_trader_at_smart(smart, ignore_ids)
 	if not smart or trade_path.trade_smart_blacklisted(smart) then
 		return nil
@@ -2777,7 +2826,7 @@ local function find_online_trader_at_smart(smart, ignore_ids)
 		end
 		checked[npc_id] = true
 		local obj = online_object_by_id(npc_id)
-		if obj and npc_is_trade_provider(obj, smart) then
+		if obj and npc_is_trade_provider(obj, smart) and not trader_is_busy(smart, tonumber(npc_id) or npc_id, ignore_ids) then
 			return obj
 		end
 		return nil
@@ -3693,15 +3742,18 @@ function trade_path.prepare_active(npc, smart, st, trader, force_override)
 end
 
 function trade_path.clear(npc, st)
-	if not (st and st.zhopa2_trade_path_override == true) then
+	if not st then
 		return false
 	end
-	local count = tonumber(st.zhopa2_trade_path_points) or 8
-	for i = 1, count do
-		trade_path.save_point(npc, i, nil)
-	end
-	if st.zhopa2_trade_path_had_patrol_mode ~= true then
-		trade_path.set_patrol_mode(npc, false)
+	local had_override = st.zhopa2_trade_path_override == true
+	if had_override then
+		local count = tonumber(st.zhopa2_trade_path_points) or 8
+		for i = 1, count do
+			trade_path.save_point(npc, i, nil)
+		end
+		if st.zhopa2_trade_path_had_patrol_mode ~= true then
+			trade_path.set_patrol_mode(npc, false)
+		end
 	end
 	if type(st.beh) == "table" then
 		st.beh.desired_target = nil
@@ -3717,7 +3769,7 @@ function trade_path.clear(npc, st)
 	st.zhopa2_trade_path_points = nil
 	st.zhopa2_trade_path_had_patrol_mode = nil
 	st.zhopa2_trade_path_reason = nil
-	return true
+	return had_override
 end
 
 function M.clear_prepared_trade_job(smart, npc_id, reason)
@@ -3905,16 +3957,150 @@ local function server_object_alive(obj)
 	return object_id(obj) ~= nil
 end
 
-local function find_live_trader_at_smart(smart, ignore_ids)
+function trade_path.same_object_id(first, second)
+	local first_id = tonumber(first) or first
+	local second_id = tonumber(second) or second
+	return first_id ~= nil and second_id ~= nil and first_id == second_id
+end
+
+function trade_path.npc_smart_id(npc)
+	if not npc then
+		return nil
+	end
+	local value = npc.m_smart_terrain_id
+	if type(value) == "function" then
+		local ok, result = pcall(value, npc)
+		value = ok and result or nil
+	end
+	value = tonumber(value) or value
+	return value ~= 65535 and value or nil
+end
+
+function trade_path.service_provider_at_smart(npc, smart)
+	local group_id = tonumber(npc and npc.group_id)
+	if not (group_id and group_id > 0 and group_id ~= 65535) then
+		return false
+	end
+	local squad = server_object_by_id(group_id)
+	if not M.is_squad_object(squad) then
+		return false
+	end
+	local smart_id = object_id(smart)
+	if not trade_path.same_object_id(squad.zhopa2_service_smart_id, smart_id) then
+		return false
+	end
+	local role = tostring(squad.zhopa2_service_role or "")
+	if role == "trader" or role == "barman" then
+		return true
+	end
+	local section = string.lower(tostring(squad.zhopa2_section_name or object_section(squad) or ""))
+	return string.find(section, "_sim_squad_service_trader", 1, true) ~= nil
+		or string.find(section, "_sim_squad_service_barman", 1, true) ~= nil
+end
+
+function trade_path.live_trade_provider_at_smart(npc, smart)
+	return server_object_alive(npc)
+		and trade_path.same_object_id(trade_path.npc_smart_id(npc), object_id(smart))
+		and (npc_is_trade_provider(npc, smart) or trade_path.service_provider_at_smart(npc, smart))
+end
+
+function trade_path.cached_live_trade_provider_at_smart(smart)
+	local smart_id = object_id(smart)
+	local cached = smart_id and trade_path.live_trade_provider_cache[smart_id] or nil
+	if cached == nil then
+		return nil, false
+	end
+	if cached == false then
+		return nil, true
+	end
+	local npc_id = cached
+	local npc = server_object_by_id(npc_id)
+	if trade_path.live_trade_provider_at_smart(npc, smart) then
+		return live_object(online_object_by_id(npc_id)) or npc, true
+	end
+	trade_path.live_trade_provider_cache[smart_id] = nil
+	return nil, false
+end
+
+function trade_path.cache_live_trade_provider_at_smart(smart, npc)
+	local smart_id = object_id(smart)
+	local npc_id = object_id(npc)
+	if smart_id then
+		trade_path.live_trade_provider_cache[smart_id] = npc_id or false
+	end
+	return npc
+end
+
+function M.invalidate_live_trade_provider_at_smart(smart_or_id)
+	local smart_id = object_id(smart_or_id)
+	if smart_id then
+		trade_path.live_trade_provider_cache[smart_id] = nil
+	end
+end
+
+function M.clear_missing_live_trade_provider_cache()
+	for smart_id, cached in pairs(trade_path.live_trade_provider_cache) do
+		if cached == false then
+			trade_path.live_trade_provider_cache[smart_id] = nil
+		end
+	end
+end
+
+function trade_path.find_offline_trader_at_smart(smart, ignore_ids)
+	local smart_id = object_id(smart)
+	if not smart_id then
+		return nil
+	end
+	local ids, seen = {}, {}
+	local function add_id(id)
+		id = tonumber(id) or id
+		if id and not seen[id] and not (ignore_ids and ignore_ids[id]) then
+			seen[id] = true
+			ids[#ids + 1] = id
+		end
+	end
+	for id in pairs(smart.npc_info or {}) do
+		add_id(id)
+	end
+	local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] or nil
+	for squad_id in pairs(node and node.squads or {}) do
+		local squad = server_object_by_id(squad_id)
+		if M.is_squad_object(squad) then
+			pcall(function()
+				for member in squad:squad_members() do
+					add_id(member and member.id)
+				end
+			end)
+		end
+	end
+	table.sort(ids, function(first, second)
+		return tostring(first) < tostring(second)
+	end)
+	for i = 1, #ids do
+		local npc = server_object_by_id(ids[i])
+		if trade_path.live_trade_provider_at_smart(npc, smart) then
+			return npc
+		end
+	end
+	return nil
+end
+
+function M.find_live_trade_provider_at_smart(smart, ignore_ids)
 	if trade_path.trade_smart_blacklisted(smart) then
 		return nil
 	end
-	local trader = live_object(find_online_trader_at_smart(smart, ignore_ids))
-	if trader then
-		return trader
-	end
 	if not smart then
 		return nil
+	end
+	if ignore_ids == nil then
+		local cached, known = trade_path.cached_live_trade_provider_at_smart(smart)
+		if known then
+			return cached
+		end
+	end
+	local trader = live_object(find_online_trader_at_smart(smart, ignore_ids))
+	if trader then
+		return ignore_ids and trader or trade_path.cache_live_trade_provider_at_smart(smart, trader)
 	end
 	local checked = {}
 	local function check_id(npc_id, job)
@@ -3943,7 +4129,7 @@ local function find_live_trader_at_smart(smart, ignore_ids)
 		for job_sec, npc_id in pairs(smart.npc_by_job_section) do
 			local trader_obj = check_id(npc_id, find_smart_job_by_section(smart, job_sec) or job_sec)
 			if trader_obj then
-				return trader_obj
+				return ignore_ids and trader_obj or trade_path.cache_live_trade_provider_at_smart(smart, trader_obj)
 			end
 		end
 	end
@@ -3951,11 +4137,16 @@ local function find_live_trader_at_smart(smart, ignore_ids)
 		for npc_id, info in pairs(smart.npc_info) do
 			local trader_obj = check_id(npc_id, info and info.job or nil)
 			if trader_obj then
-				return trader_obj
+				return ignore_ids and trader_obj or trade_path.cache_live_trade_provider_at_smart(smart, trader_obj)
 			end
 		end
 	end
-	return nil
+	local trader_obj = trade_path.find_offline_trader_at_smart(smart, ignore_ids)
+	return ignore_ids and trader_obj or trade_path.cache_live_trade_provider_at_smart(smart, trader_obj)
+end
+
+local function find_live_trader_at_smart(smart, ignore_ids)
+	return M.find_live_trade_provider_at_smart(smart, ignore_ids)
 end
 
 local function can_try_auto_trade_now(squad, now)
@@ -3975,7 +4166,7 @@ local function smart_for_squad_trade(squad)
 end
 
 function M.squad_has_trade_smart(squad)
-	if M.enabled() ~= true or not squad then
+	if M.enabled() ~= true or not squad or M.squad_trade_allowed(squad) ~= true then
 		return false
 	end
 	local smart = squad_current_trade_smart(squad)
@@ -3983,7 +4174,7 @@ function M.squad_has_trade_smart(squad)
 end
 
 function M.squad_has_trade_work(squad)
-	if M.enabled() ~= true or not squad then
+	if M.enabled() ~= true or not squad or M.squad_trade_allowed(squad) ~= true then
 		return false, "disabled"
 	end
 	local smart = squad_current_trade_smart(squad)
@@ -4434,7 +4625,7 @@ local function resolve_explicit_pair(npc, trader)
 end
 
 function M.can_auto_trade_now(squad)
-	return M.enabled() == true and not surge_active() and squad ~= nil and can_try_auto_trade_now(squad, tg()) == true
+	return M.enabled() == true and M.squad_trade_allowed(squad) == true and not surge_active() and can_try_auto_trade_now(squad, tg()) == true
 end
 
 function M.debug_resolve_auto_trade_pair(squad, reason)
@@ -4461,6 +4652,9 @@ function M.try_auto_trade_npc(npc, trader, reason, opts)
 	local smart = trade_smart_for_npc(npc, nil)
 	if not M.is_squad_object(squad) then
 		return false, "missing_squad"
+	end
+	if M.squad_trade_allowed(squad) ~= true then
+		return false, "squad_trade_blocked"
 	end
 	if not smart then
 		return false, "no_smart"
@@ -4496,6 +4690,9 @@ function M.try_auto_trade(squad, reason, opts)
 	end
 	if not squad then
 		return false, "missing_squad"
+	end
+	if M.squad_trade_allowed(squad) ~= true then
+		return false, "squad_trade_blocked"
 	end
 	local now = tg()
 	local recovered, recover_result = recover_stale_prepared_trade(squad, now)
@@ -4623,6 +4820,115 @@ function M.complete_axr_online_trade(npc, smart, result, reason)
 	return true
 end
 
+function M.prepare_online_quest_service(squad, smart, token, phase)
+	if not (M.enabled() == true and M.is_squad_object(squad) and smart and token) then
+		return false, "invalid_service_request"
+	end
+	local smart_id = object_id(smart)
+	local squad_id = object_id(squad)
+	if not (smart_id and squad_id and object_id(squad_current_trade_smart(squad)) == smart_id) then
+		return false, "service_not_at_smart"
+	end
+	if not smart_has_vanilla_trade_route(smart) then
+		return false, "service_no_trade_route"
+	end
+	local acquired, queue_reason = acquire_smart_trade_slot(squad, smart, "npc_quest_service", tg())
+	if acquired ~= true then
+		return false, queue_reason or "service_queued"
+	end
+	local npc = find_online_squad_trade_npc(squad, smart)
+	local trader = find_online_trader_at_smart(smart, squad_member_id_set(squad))
+	if not (npc and trader) then
+		release_smart_trade_slot(smart_id, squad_id)
+		return false, npc and "service_no_trader" or "service_no_online_member"
+	end
+	local npc_id = object_id(npc)
+	local prepared, prepare_reason = prepare_online_trade_job(
+		npc,
+		squad,
+		{ npc },
+		smart,
+		trader,
+		"npc_quest_service",
+		{ member_ids = { npc_id } }
+	)
+	if prepared ~= true then
+		M.clear_prepared_trade_job(smart, npc_id, prepare_reason or "npc_quest_service_prepare_failed")
+		release_smart_trade_slot(smart_id, squad_id)
+		return false, prepare_reason or "service_prepare_failed"
+	end
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	if not st then
+		M.clear_prepared_trade_job(smart, npc_id, "npc_quest_service_no_storage")
+		release_smart_trade_slot(smart_id, squad_id)
+		return false, "service_no_storage"
+	end
+	st.zhopa2_quest_service_token = tostring(token)
+	st.zhopa2_quest_service_phase = tostring(phase or "service")
+	st.zhopa2_quest_service_squad_id = squad_id
+	st.zhopa2_quest_service_smart_id = smart_id
+	return true, npc_id
+end
+
+function M.abort_online_quest_service(npc_or_id, smart, token, reason)
+	local npc_id = object_id(npc_or_id)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	if not (st and token and st.zhopa2_quest_service_token == tostring(token)) then
+		return false
+	end
+	local smart_id = object_id(smart) or tonumber(st.zhopa2_quest_service_smart_id) or tonumber(st.zhopa2_trade_smart_id)
+	local squad_id = tonumber(st.zhopa2_quest_service_squad_id) or tonumber(st.zhopa2_trade_squad_id)
+	local service_smart = smart or smart_by_id(smart_id)
+	M.clear_prepared_trade_job(service_smart, npc_id, reason or "npc_quest_service_cancelled")
+	release_smart_trade_slot(smart_id, squad_id)
+	local info = service_smart and service_smart.npc_info and service_smart.npc_info[npc_id] or nil
+	if info and type(service_smart.select_npc_job) == "function" then
+		if type(info.job) == "table" then
+			info.job.seller_id = nil
+			info.job.idle = nil
+		end
+		info.begin_job = false
+		pcall(service_smart.select_npc_job, service_smart, info, true)
+	end
+	return true
+end
+
+function M.complete_axr_online_quest_service(npc, smart)
+	local npc_id = object_id(npc)
+	local st = npc_id and db and db.storage and db.storage[npc_id] or nil
+	local token = st and st.zhopa2_quest_service_token or nil
+	if not token then
+		return false
+	end
+	local smart_id = object_id(smart) or tonumber(st.zhopa2_quest_service_smart_id) or tonumber(st.zhopa2_trade_smart_id)
+	local squad_id = tonumber(st.zhopa2_quest_service_squad_id) or tonumber(st.zhopa2_trade_squad_id)
+	local service_smart = smart or smart_by_id(smart_id)
+	local quests = rawget(_G, "zhopa2_npc_quests")
+	if not quests and require then
+		pcall(require, "zhopa2_npc_quests")
+		quests = rawget(_G, "zhopa2_npc_quests")
+	end
+	if quests and type(quests.complete_online_service) == "function" then
+		pcall(quests.complete_online_service, npc, service_smart, token)
+	end
+	M.clear_prepared_trade_job(service_smart, npc_id, "npc_quest_service_completed")
+	release_smart_trade_slot(smart_id, squad_id)
+	local info = service_smart and service_smart.npc_info and service_smart.npc_info[npc_id] or nil
+	if info and type(service_smart.select_npc_job) == "function" then
+		if type(info.job) == "table" then
+			info.job.seller_id = nil
+			info.job.idle = nil
+		end
+		info.begin_job = false
+		pcall(service_smart.select_npc_job, service_smart, info, true)
+	end
+	local doctor = rawget(_G, "zhopa2_smart_service_slot_doctor")
+	if doctor and type(doctor.on_axr_service_result) == "function" then
+		pcall(doctor.on_axr_service_result, npc, service_smart, "trade", "completed", "npc_quest_service_completed")
+	end
+	return true
+end
+
 function M.patch_trade_condition()
 	patched_condition = xr_conditions and type(xr_conditions.npc_has_items_to_sell) == "function"
 	return patched_condition == true
@@ -4633,60 +4939,6 @@ function M.patch_trade_effect()
 		and type(xr_effects.trade_job_sell_items) == "function"
 		and type(xr_effects.trade_job_give_id) == "function"
 	return patched_effect == true
-end
-
-function M.watch_recent_trade_release()
-	if surge_active() then
-		return
-	end
-	local watch = M.trade_release_watch
-	if type(watch) ~= "table" or next(watch) == nil then
-		return
-	end
-	if M.enabled() ~= true then
-		return
-	end
-	local now = tg()
-	if tonumber(M.trade_release_watch_next_tg or 0) > now then
-		return
-	end
-	M.trade_release_watch_next_tg = now + C.TRADE_POST_RELEASE_WATCH_INTERVAL_MS
-	for npc_id, stored_smart_id in pairs(watch) do
-		local st = db and db.storage and db.storage[npc_id] or nil
-		local deadline = tonumber(st and st.zhopa2_trade_release_watch_until or 0) or 0
-		if deadline <= now then
-			watch[npc_id] = nil
-			if st then
-				st.zhopa2_trade_release_watch_until = nil
-				st.zhopa2_trade_release_reason = nil
-			end
-		else
-			local npc = st and st.object or online_object_by_id(npc_id)
-			local smart = type(stored_smart_id) == "number" and smart_by_id(stored_smart_id) or trade_smart_for_npc(npc, nil)
-			if not npc then
-				watch[npc_id] = nil
-			elseif smart then
-				local info = smart.npc_info and smart.npc_info[npc_id] or nil
-				local active_l = st and slower(st.section_logic or st.active_section) or ""
-				if (info and info.job and job_is_trade_customer(info.job, smart))
-					or contains_plain(active_l, "beh_trade_job")
-					or contains_plain(active_l, "trade_slot")
-				then
-					M.clear_prepared_trade_job(smart, npc_id, "post_trade_watch")
-				else
-					watch[npc_id] = nil
-					if st then
-						st.zhopa2_trade_release_watch_until = nil
-						st.zhopa2_trade_release_reason = nil
-					end
-				end
-			end
-		end
-	end
-end
-
-function M.actor_on_update()
-	M.watch_recent_trade_release()
 end
 
 local function npc_on_net_spawn(npc, se_obj)
@@ -4702,6 +4954,7 @@ local function on_game_load()
 	trade_path.session_banned_npcs = {}
 	SMART_TRADE_QUEUE = {}
 	SMART_TRADE_PRIORITY_BOOSTS = {}
+	trade_path.live_trade_provider_cache = {}
 	M.flush_trade_events()
 end
 
@@ -4734,13 +4987,11 @@ local function register_trade_callbacks(force)
 		return false
 	end
 	if UnregisterScriptCallback then
-		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
 		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 		pcall(UnregisterScriptCallback, "npc_on_net_spawn", npc_on_net_spawn)
 		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
 	end
 	local ok = true
-	ok = pcall(RegisterScriptCallback, "actor_on_update", M.actor_on_update) and ok
 	ok = pcall(RegisterScriptCallback, "actor_on_first_update", actor_on_first_update) and ok
 	ok = pcall(RegisterScriptCallback, "npc_on_net_spawn", npc_on_net_spawn) and ok
 	ok = pcall(RegisterScriptCallback, "on_game_load", on_game_load) and ok
@@ -4768,7 +5019,6 @@ end
 
 function M.on_master_disable()
 	if UnregisterScriptCallback then
-		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
 		pcall(UnregisterScriptCallback, "actor_on_first_update", actor_on_first_update)
 		pcall(UnregisterScriptCallback, "npc_on_net_spawn", npc_on_net_spawn)
 		pcall(UnregisterScriptCallback, "on_game_load", on_game_load)
@@ -4798,12 +5048,11 @@ function M.on_master_disable()
 	SMART_TRADE_PRIORITY_BOOSTS = {}
 	SMART_TRADE_PROVIDER_CACHE = {}
 	SMART_TRADE_CUSTOMER_CACHE = {}
+	trade_path.live_trade_provider_cache = {}
 	JOB_ROLE_CACHE = {}
 	trade_path.session_banned_npcs = {}
 	trade_path.offline_profile_cache = {}
 	trade_path.offline_profile_cleanup_at = 0
-	M.trade_release_watch = {}
-	M.trade_release_watch_next_tg = 0
 	M.trade_event_buffer = {}
 	patched_condition = false
 	patched_effect = false

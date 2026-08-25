@@ -1,3 +1,18 @@
+# 2.2
+
+### General
+- Added NPC quests for managed stalker squads. They take jobs from traders, search for documents, clear or occupy a base, hunt a specific squad, or make deliveries and receive a reward.
+- Added location images to the "Info/Travel" dialogue branch.
+- Added an optional MCM feature that makes squad travel cost money. The price depends on the distance to the destination, and the price multiplier can be adjusted.
+- Added the ability to configure tasks and their weights separately for each faction in MCM. Disabled by default.
+
+### Fixes
+- Added several trade fixes, including NPC state resets and a fix for a bug that prevented talking to an NPC after they had traded.
+- Fixed Service Filler; it now works not only on the active level.
+- Fixed squad teleportation; the player could previously appear beneath the map.
+- Added several fixes to prevent NPCs from getting stuck when switching campfire jobs.
+
+
 # 2.1
 
 ### General

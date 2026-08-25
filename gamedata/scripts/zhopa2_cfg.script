@@ -13,6 +13,10 @@ local defaults = {
 	debug_hud_enabled = false,
 	squad_dialogue_enabled = true,
 	squad_travel_minutes_per_100m = 10,
+	squad_travel_paid_enabled = true,
+	squad_travel_price_multiplier = 1,
+	faction_task_settings_enabled = false,
+	npc_quests_enabled = true,
 	explore_enabled = true,
 	populate_enabled = true,
 	base_camping_enabled = true,
@@ -36,6 +40,7 @@ local defaults = {
 	stalker_hunt_weight = 15,
 	stalker_artefact_weight = 10,
 	stalker_trade_weight = 10,
+	stalker_quest_weight = 10,
 	mutant_hunt_weight = 35,
 	mutant_patrol_weight = 30,
 	mutant_explore_weight = 35,
@@ -84,6 +89,26 @@ local aliases = {
 	monster_zombied_day = "monster",
 	monster_zombied_night = "monster",
 	zombied = "monster",
+}
+
+local faction_task_ids = {
+	stalker = true,
+	csky = true,
+	dolg = true,
+	freedom = true,
+	bandit = true,
+	killer = true,
+	renegade = true,
+	ecolog = true,
+	army = true,
+	monolith = true,
+	isg = true,
+	greh = true,
+}
+
+local faction_task_aliases = {
+	duty = "dolg",
+	merc = "killer",
 }
 
 local function section_faction(section)
@@ -226,6 +251,41 @@ function get_faction_alias(faction)
 	end
 	local key = tostring(faction)
 	return aliases[key] or key
+end
+
+local function faction_task_key(squad, key)
+	if get_bool("faction_task_settings_enabled", false) ~= true or is_monster_or_zombied(squad) then
+		return nil
+	end
+	local faction = squad_faction(squad)
+	if faction == nil then
+		return nil
+	end
+	faction = faction_task_aliases[tostring(faction)] or tostring(faction)
+	if faction_task_ids[faction] ~= true then
+		return nil
+	end
+	return "faction_" .. faction .. "_" .. tostring(key)
+end
+
+function squad_task_enabled(squad, key, default)
+	local faction_key = faction_task_key(squad, key)
+	if faction_key then
+		return get_bool(faction_key, default) == true
+	end
+	return get_bool(key, default) == true
+end
+
+function squad_task_weight(squad, key, default)
+	local faction_key = faction_task_key(squad, key)
+	if faction_key then
+		return get_num(faction_key, default)
+	end
+	return get_num(key, default)
+end
+
+function faction_task_settings_enabled()
+	return get_bool("faction_task_settings_enabled", false) == true
 end
 
 local function reset_blacklist_cache()
@@ -411,6 +471,9 @@ _G.zhopa2_cfg = {
 	get_num = get_num,
 	get_string = get_string,
 	get_faction_alias = get_faction_alias,
+	squad_task_enabled = squad_task_enabled,
+	squad_task_weight = squad_task_weight,
+	faction_task_settings_enabled = faction_task_settings_enabled,
 	is_global_level_blacklisted = is_global_level_blacklisted,
 	is_level_blacklisted_for_squad = is_level_blacklisted_for_squad,
 	is_smart_blacklisted_for_squad = is_smart_blacklisted_for_squad,
