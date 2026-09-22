@@ -4046,15 +4046,17 @@ function M.clear_missing_live_trade_provider_cache()
 	end
 end
 
-function trade_path.find_offline_trader_at_smart(smart, ignore_ids)
+function M.service_npc_ids_at_smart(smart)
 	local smart_id = object_id(smart)
 	if not smart_id then
-		return nil
+		return {}, false
 	end
 	local ids, seen = {}, {}
+	local complete = true
 	local function add_id(id)
-		id = tonumber(id) or id
-		if id and not seen[id] and not (ignore_ids and ignore_ids[id]) then
+		id = tonumber(id)
+		if not id or id <= 0 or id >= 65535 then complete = false; return end
+		if not seen[id] then
 			seen[id] = true
 			ids[#ids + 1] = id
 		end
@@ -4062,24 +4064,43 @@ function trade_path.find_offline_trader_at_smart(smart, ignore_ids)
 	for id in pairs(smart.npc_info or {}) do
 		add_id(id)
 	end
+	for id in pairs(smart.load_info or {}) do
+		add_id(id)
+	end
+	for id in pairs(smart.arriving_npc or {}) do
+		add_id(id)
+	end
 	local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] or nil
+	if not (node and type(node.squads) == "table") then
+		complete = false
+	end
 	for squad_id in pairs(node and node.squads or {}) do
 		local squad = server_object_by_id(squad_id)
 		if M.is_squad_object(squad) then
-			pcall(function()
+			local ok = pcall(function()
 				for member in squad:squad_members() do
 					add_id(member and member.id)
 				end
 			end)
+			complete = ok and complete
+		else
+			complete = false
 		end
 	end
 	table.sort(ids, function(first, second)
 		return tostring(first) < tostring(second)
 	end)
+	return ids, complete
+end
+
+function trade_path.find_offline_trader_at_smart(smart, ignore_ids)
+	local ids = M.service_npc_ids_at_smart(smart)
 	for i = 1, #ids do
-		local npc = server_object_by_id(ids[i])
-		if trade_path.live_trade_provider_at_smart(npc, smart) then
-			return npc
+		if not (ignore_ids and ignore_ids[ids[i]]) then
+			local npc = server_object_by_id(ids[i])
+			if trade_path.live_trade_provider_at_smart(npc, smart) then
+				return npc
+			end
 		end
 	end
 	return nil

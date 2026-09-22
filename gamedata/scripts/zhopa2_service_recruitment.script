@@ -1,0 +1,1273 @@
+-- Shared recruitment engine; manual probe and vacancy queue use the same transaction.
+local M = {}
+local KEY = "zhopa2_recruit_trader_probe"
+local STATE_VERSION = 1
+local automatic = false
+local hooks = {}
+local record
+local extra_records = {}
+local pending_binder_refresh = {}
+local batch
+local MAX_RECORDS = 2048
+local busy = false
+local allow_release = false
+local log_sequence = 0
+local trade_session_npc
+local TRADE_BALANCE = 1000000
+local upgrade_ini
+
+local function log(event, detail)
+    if automatic and event ~= "complete" and event ~= "rollback_failed" then return end
+    log_sequence = log_sequence + 1
+    if printf then printf("~ ZHOPA_RECRUIT_PROBE | seq=%s time=%s | %s | %s", log_sequence,
+        tostring(time_global and time_global() or 0), event, tostring(detail or "")) end
+end
+
+local function assert_host()
+    if type(IIsHost) == "function" then assert(IIsHost(), "Together: run on host only")
+    elseif rawget(_G, "GameManager") then error("Together host status unavailable") end
+end
+
+local function object(id)
+    id = tonumber(id)
+    return id and id ~= 65535 and alife_object and alife_object(id) or nil
+end
+
+local function id_of(obj)
+    if not obj then return nil end
+    return tonumber(type(obj.id) == "function" and obj:id() or obj.id)
+end
+
+local function read(obj, key, ...)
+    local args = {...}
+    local ok, value = pcall(function() return obj[key](obj, unpack(args)) end)
+    if not ok then log("read_error", key .. ": " .. tostring(value)); return nil end
+    return value
+end
+
+local function persist()
+    local state = assert(alife_storage_manager and alife_storage_manager.get_state(), "storage unavailable")
+    state[KEY] = record
+    state[KEY .. "_others"] = next(extra_records) and extra_records or nil
+end
+
+local function online(id)
+    return db and db.storage and db.storage[id] and db.storage[id].object
+        or (level and level.object_by_id and level.object_by_id(id))
+end
+
+local function member(group, id)
+    if not group then return false end
+    for entry in group:squad_members() do if entry.id == id then return true end end
+    return false
+end
+
+local function record_for(npc)
+    local id = id_of(npc)
+    local r = id and ((record and record.npc_id == id and record) or extra_records[id])
+    if not r or r.phase ~= "active" then return nil end
+    local se = id and object(id)
+    return se and se.group_id == r.new_squad_id and se:name() == r.npc_name and r or nil
+end
+
+local function role_npc(npc) local r=record_for(npc); return r ~= nil and r.role ~= "guard" end
+
+local function all_records()
+    local out = {}
+    if record then out[#out+1] = record end
+    for _, r in pairs(extra_records) do out[#out+1] = r end
+    return out
+end
+
+local function find_record(field, id)
+    if record and record[field] == id then return record end
+    for _, r in pairs(extra_records) do if r[field] == id then return r end end
+end
+
+local function forget(r)
+    if r.role == "guard" and zhopa2_guard_refill then zhopa2_guard_refill.release(r) end
+    extra_records[r.npc_id] = nil
+    if record == r then record = nil end
+end
+
+local function archive_current()
+    if not record then return end
+    assert(record.phase == "active", "unfinished recruitment needs recovery first")
+    extra_records[record.npc_id], record = record, nil
+    persist()
+end
+
+local function select_record(id)
+    if not id and not record then id = next(extra_records) end
+    if not id then return end
+    id = tonumber(id)
+    if record and record.npc_id == id then return end
+    local r = assert(extra_records[id], "unknown recruited NPC")
+    archive_current()
+    extra_records[id], record = nil, r
+    persist()
+end
+
+function M.is_service_dialog(a, b)
+    return role_npc(dialogs.who_is_npc(a, b)) == true
+end
+
+function M.is_role(a, b, role)
+    local r = record_for(dialogs.who_is_npc(a,b))
+    return r ~= nil and r.role == role
+end
+
+function M.dialog_character(a, b)
+    local r = record_for(dialogs.who_is_npc(a,b))
+    return r and r.service_character
+end
+
+local function replenish_money(npc)
+    local balance = npc:money()
+    if balance < TRADE_BALANCE then
+        npc:give_money(TRADE_BALANCE - balance)
+        log("trade_balance", "npc=" .. npc:id() .. " before=" .. balance .. " after=" .. npc:money())
+    end
+end
+
+function M.open_trade(a, b)
+    local npc = dialogs.who_is_npc(a, b)
+    local r = record_for(npc)
+    if not r or r.role=="guard" then return end
+    trade_manager.trade_init(npc, r.trade)
+    trade_manager.update(npc)
+    replenish_money(npc)
+    trade_session_npc = npc:id()
+    log("trade_dialog", "open NPC=" .. r.npc_id)
+    dialogs.npc_is_trader(a, b)
+end
+
+local function prepare_service_dialogs(npc)
+    local record = assert(record_for(npc), "service record missing")
+    local st = db.storage[npc:id()]
+    if not record.service_character or not record.service_task_section then
+        local smart = object(record.smart_id)
+        local info = smart and smart.npc_info and smart.npc_info[npc:id()]
+        local svc = zhopa2_service_fillers
+        if not record.service_character and svc.service_job_character then
+            record.service_character = svc.service_job_character(smart, info and info.job or record.job_section)
+        end
+        if not record.service_task_section and svc.service_job_task_section then
+            record.service_task_section = svc.service_job_task_section(smart, info and info.job or record.job_section)
+        end
+        log("dialog_character", record.service_character or "unknown; generic service branches only")
+        log("task_section", record.service_task_section or "no named task source; default service offers")
+    end
+    replenish_money(npc)
+    -- Drop an ordinary stalker's cached refusal once, without bypassing quest prerequisites.
+    if st and not record.service_dialogs_initialized then
+        if st.dyn_quest_rand == "nil" then st.dyn_quest_rand = nil end
+        record.service_dialogs_initialized = true
+    end
+    zhopa2_service_quests.install()
+end
+
+local function hook(owner, key, factory)
+    if not owner or type(owner[key]) ~= "function" then error("missing hook " .. key) end
+    local slot
+    for _, h in ipairs(hooks) do
+        if h.owner == owner and h.key == key then
+            slot = h
+            if owner[key] == h.wrapper then return end
+            local rt = rawget(_G, "zhopa2_runtime_patches")
+            if rt and rt.function_chain_contains and rt.function_chain_contains(owner[key], h.wrapper) then return end
+            break
+        end
+    end
+    local original = owner[key]
+    local wrapper = factory(original)
+    if slot then slot.original, slot.wrapper = original, wrapper
+    else hooks[#hooks + 1] = {owner = owner, key = key, original = original, wrapper = wrapper} end
+    owner[key] = wrapper
+end
+
+local function mechanic_profile(context)
+    upgrade_ini = upgrade_ini or ini_file("misc\\stalkers_upgrade_info.ltx")
+    local data = context or record
+    local name = data and (data.service_character or data.character)
+    if name and upgrade_ini:section_exist(name) then return name end
+    name = data and ("sim_default_" .. (data.service_faction or data.faction or data.owner) .. "_mechanic")
+    return name and upgrade_ini:section_exist(name) and name or nil
+end
+
+local function mechanic_precondition(npc, section)
+    if not (db and db.actor) then return 2 end
+    if type(section) ~= "string" then return 2 end
+    local name = mechanic_profile(record_for(npc))
+    if not name then return 2 end
+    local custom = upgrade_ini:r_string_ex(name .. "_upgr", section)
+    if custom == "false" then return 1 end
+    if custom == "true" then return 0 end
+    if custom and custom ~= "" then
+        local cond = xr_logic.parse_condlist(npc, name .. "_upgr", section, custom)
+        local result = xr_logic.pick_section_from_condlist(db.actor, npc, cond)
+        return result and result ~= "false" and 0 or 2
+    end
+    local tiers = {a=1,b=1,c=2,d=2,e=3,f=3}
+    local tier = tiers[section:sub(14,14)] or 1
+    local rule = upgrade_ini:r_float_ex(name, "def_upgr_tier_" .. tier)
+    if rule == 1 then return 1 end
+    if rule == 2 then return 0 end
+    if rule == 0 and has_alife_info(name .. "_upgrade_tier_" .. tier) then return 0 end
+    return 2
+end
+
+function M.service_task_section(npc)
+    local r = record_for(npc)
+    if not r or r.role == "guard" then return nil end
+    return r.service_task_section or r.service_character
+        or (r.role == "tech" and mechanic_profile(r) or nil)
+end
+
+function M.open_upgrade(a, b)
+    if not (db and db.actor) then return false end
+    if not M.is_role(a, b, "tech") then return false end
+    local bridge = rawget(_G, "modxml_zhopa2_service_recruitment")
+    if not (bridge and type(bridge.upgrade_menu_enabled) == "function" and bridge.upgrade_menu_enabled()) then
+        log("upgrade_refused", "native mechanic dialogue does not open the upgrade menu")
+        return false
+    end
+    local npc = dialogs.who_is_npc(a, b)
+    local name = mechanic_profile(record_for(npc))
+    if not name then log("upgrade_refused", "no upgrade profile for this service job"); return false end
+    hook(inventory_upgrades, "get_global_precondition_functor", function(original)
+        return function(victim, section, ...)
+            local r = record_for(victim)
+            if r and r.role == "tech" then return mechanic_precondition(victim, section) end
+            return original(victim, section, ...)
+        end
+    end)
+    hook(inventory_upgrades, "can_upgrade_item", function(original)
+        return function(item_name, mechanic, ...)
+            local result = original(item_name, mechanic, ...)
+            local victim = get_speaker and get_speaker()
+            local r = record_for(victim)
+            if r and r.role == "tech" then
+                local profile = mechanic_profile(r)
+                local cond = profile and upgrade_ini:r_string_to_condlist(profile, "discount_condlist")
+                if cond and db and db.actor then xr_logic.pick_section_from_condlist(db.actor, victim, cond) end
+            end
+            return result
+        end
+    end)
+    log("upgrade_dialog", "npc=" .. npc:id() .. " profile=" .. name)
+    dialogs.npc_is_tech(a, b)
+    return true
+end
+
+function M.heal(a, b, kind)
+    if not M.is_role(a, b, "medic") then return false end
+    local checks = {injury="is_actor_injured", radiation="is_actor_irradiated", both="is_actor_injured_irradiated"}
+    local actions = {injury="heal_actor_injury", radiation="heal_actor_radiation", both="heal_actor_injury_radiation"}
+    if not checks[kind] or not dialogs[checks[kind]](a, b) then return false end
+    dialogs[actions[kind]](a, b)
+    log("healing", "npc=" .. dialogs.who_is_npc(a,b):id() .. " treatment=" .. kind)
+    local effects = medic_effects
+    local animation = effects and effects[kind == "radiation" and "medic_rad_anim" or "medic_anim"]
+    if type(animation) == "function" then animation(a, b) end
+    return true
+end
+
+local function install_hooks()
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    if guards then
+        for _,name in ipairs({"dialogs_axr_companion","dialogs_axr_companion2"}) do
+            local companion=rawget(_G,name)
+            for _,key in ipairs({"is_non_story","become_actor_companion"}) do
+                if companion and type(companion[key])=="function" then
+                    hook(companion,key,function(original)
+                        return function(a,b,...)
+                            local r=record_for(dialogs.who_is_npc(a,b))
+                            if r and r.role=="guard" then return false end
+                            return original(a,b,...)
+                        end
+                    end)
+                end
+            end
+        end
+        hook(gulag_general, "get_job_precondition", function(original)
+            return function(job)
+                local native=original(job)
+                return function(se, smart, candidate, info)
+                    local r=record_for(se)
+                    if r and r.role=="guard" then
+                        if zhopa2_tasks.surge_active() then
+                            if candidate.job_type_id~=2 and candidate.job_type_id~=8 and candidate.job_type_id~=14 then return false end
+                            return not native or native(se,smart,candidate,info)
+                        end
+                        return smart.id==r.smart_id and candidate.section==r.job_section
+                    end
+                    if guards.blocks(candidate,smart,id_of(se)) then return false end
+                    return not native or native(se,smart,candidate,info)
+                end
+            end
+        end)
+        hook(smart_terrain.se_smart_terrain, "select_npc_job", function(original)
+            return function(smart, info, ...)
+                local r=info and record_for(info.se_obj)
+                if r and r.role=="guard" and not zhopa2_tasks.surge_active() then
+                    guards.bind(smart,info,r,true)
+                    return true
+                end
+                return original(smart,info,...)
+            end
+        end)
+        hook(smart_terrain.se_smart_terrain, "setup_logic", function(original)
+            return function(smart,npc,...)
+                local r=record_for(npc)
+                if r and r.role=="guard" and not zhopa2_tasks.surge_active() then
+                    if not guards.bind(smart,smart.npc_info and smart.npc_info[npc:id()],r,false) then return end
+                end
+                return original(smart,npc,...)
+            end
+        end)
+    end
+    hook(xr_motivator and xr_motivator.motivator_binder, "update", function(original)
+        return function(self, ...)
+            local npc = self.object
+            local id = npc and npc:id()
+            if id and pending_binder_refresh[id] then
+                -- Never dereference the cached squad: the old container may already be released.
+                self.squad = get_object_squad(npc)
+                pending_binder_refresh[id] = nil
+                log("binder_squad_refreshed", "npc=" .. id)
+            end
+            return original(self, ...)
+        end
+    end)
+    hook(SIMBOARD, "remove_squad", function(original)
+        return function(board, group, ...)
+            local r = find_record("new_squad_id", id_of(group))
+            if r and not allow_release then
+                local npc = object(r.npc_id)
+                if npc and npc.group_id == r.new_squad_id and read(npc, "alive") then
+                    log("cleanup_blocked", "recruited NPC=" .. r.npc_id .. "; use probe.undo(npc_id)")
+                    return false
+                end
+            end
+            return original(board, group, ...)
+        end
+    end)
+    for role, condition in pairs({trader="trader", barman="barman", tech="mechanic", medic="medic"}) do
+        local expected = role
+        hook(xr_conditions, "check_npc_" .. condition, function(original)
+            return function(actor, npc, params)
+                local r = record_for(npc)
+                if r then return r.role == expected end
+                return original(actor, npc, params)
+            end
+        end)
+    end
+    hook(dialogs, "is_trade_accept", function(original)
+        return function(a, b)
+            local npc = dialogs.who_is_npc(a, b)
+            if role_npc(npc) then log("trade_dialog", "accept NPC=" .. npc:id()); return true end
+            return original(a, b)
+        end
+    end)
+    hook(dialogs, "is_not_trade_accept", function(original)
+        return function(a, b)
+            if role_npc(dialogs.who_is_npc(a, b)) then return false end
+            return original(a, b)
+        end
+    end)
+    -- The probe has its own native trader branches; hide only this NPC's sim duplicates.
+    for _, key in ipairs({"is_trade_init_accept", "drx_sl_dont_has_npc_task",
+        "actor_sim_has_finished_ordered_task", "sim_actor_has_ongoing_task"}) do
+        hook(dialogs, key, function(original)
+            return function(a, b, ...)
+                if role_npc(dialogs.who_is_npc(a, b)) then return false end
+                return original(a, b, ...)
+            end
+        end)
+    end
+    hook(trade_manager, "trade_init", function(original)
+        return function(npc, cfg, ...)
+            local r = record_for(npc)
+            if r and r.role ~= "guard" then cfg = r.trade end
+            return original(npc, cfg, ...)
+        end
+    end)
+end
+
+local function snapshot(npc, label)
+    local items, count = {}, 0
+    npc:inventory_for_each(function(item)
+        count = count + 1
+        assert(count <= 512, "inventory exceeds probe limit")
+        items[item:id()] = item:section()
+        log("inventory_" .. label, "id=" .. item:id() .. " section=" .. item:section())
+    end)
+    log("snapshot_" .. label, string.format("id=%s name=%s section=%s health=%s money=%s items=%s client=%s",
+        npc:id(), npc:character_name(), npc:section(), tostring(npc.health), tostring(read(npc, "money")), count, tostring(npc)))
+    return items
+end
+
+local function assert_inventory(before, after)
+    for id, section in pairs(before) do assert(after[id] == section, "original inventory item disappeared: " .. tostring(id)) end
+end
+
+local function protected_quest(npc_id, squad_id)
+    local tm = task_manager and task_manager.get_task_manager and task_manager.get_task_manager()
+    for task_id, task in pairs(tm and tm.task_info or {}) do
+        if task and task.status ~= "completed" and task.status ~= "fail" then
+            local giver = tonumber(task.task_giver_id)
+            if giver == npc_id or giver == squad_id then return "actor_task_giver:" .. tostring(task_id) end
+        end
+    end
+end
+
+local function choose_smart(smart_id)
+    if smart_id then return object(smart_id) end
+    local target = level and level.get_target_obj and level.get_target_obj()
+    local server = target and object(target:id())
+    if server and server.m_smart_terrain_id and object(server.m_smart_terrain_id) then return object(server.m_smart_terrain_id) end
+    local found = zhopa2_index.actor_service_base and zhopa2_index.actor_service_base()
+    return found and object(found.smart_id)
+end
+
+local function donor_squads(smart, owner)
+    local bases = rawget(_G, "zhopa2_bases")
+    local parts = bases and bases.members(smart) or {smart}
+    local ids, seen, priority, allowed, found = {}, {}, {}, {}, {}
+    local function add(id, part_id, origin)
+        id = tonumber(id)
+        if not id or id <= 0 or id >= 65535 then return end
+        if not seen[id] then ids[#ids+1], seen[id], found[id] = id, true, {} end
+        priority[id] = math.min(priority[id] or 1, part_id == smart.id and 0 or 1)
+        found[id][origin] = true
+    end
+    for _, part in ipairs(parts) do
+        allowed[part.id] = true
+        local node = SIMBOARD.smarts[part.id]
+        for id in pairs(node and node.squads or {}) do add(id, part.id, "board") end
+        -- Member registrations can already be current while the squad bucket is still elsewhere.
+        for _, info in pairs(part.npc_info or {}) do
+            local se = info and info.se_obj
+            if se then add(se.group_id, part.id, "registered") end
+        end
+    end
+    local index, p = zhopa2_index, zhopa2_perception
+    local level_name = p.obj_level(smart)
+    if level_name and type(index.squads_on_levels) == "function" then
+        for _, group in ipairs(index.squads_on_levels({level_name}) or {}) do
+            if group.position then
+                for _, part in ipairs(parts) do
+                    local ok, inside = pcall(function()
+                        return group.position:distance_to_sqr(part.position) <= (tonumber(part.arrive_dist) or 50)^2
+                    end)
+                    if ok and inside then add(group.id, part.id, "nearby"); break end
+                end
+            end
+        end
+    end
+    table.sort(ids, function(a,b)
+        if owner then
+            local own_a = (object(a) and p.squad_relation_faction(object(a)) == owner) == true
+            local own_b = (object(b) and p.squad_relation_faction(object(b)) == owner) == true
+            if own_a ~= own_b then return own_a == true end
+        end
+        if priority[a] ~= priority[b] then return priority[a] < priority[b] end
+        return a < b
+    end)
+    return ids, allowed, found, parts
+end
+
+local function peaceful_factions(a, b)
+    if type(a) ~= "string" or a == "" or type(b) ~= "string" or b == "" then return false, "faction_unknown" end
+    if a == b then return true end
+    local relations = rawget(_G, "game_relations")
+    if not (relations and type(relations.is_factions_enemies) == "function") then return false, "faction_relation_unknown" end
+    local ok_a, enemy_a = pcall(relations.is_factions_enemies, a, b)
+    local ok_b, enemy_b = pcall(relations.is_factions_enemies, b, a)
+    if not ok_a or not ok_b or type(enemy_a) ~= "boolean" or type(enemy_b) ~= "boolean" then return false, "faction_relation_unknown" end
+    return not enemy_a and not enemy_b, "hostile_faction"
+end
+
+local function donor_block_reason(group, owner, services)
+    if not group then return "missing" end
+    if type(group.npc_count) ~= "function" then return "not_squad" end
+    if group.zhopa2_service_filler or group.zhopa2_service_recruited or group.zhopa2_guard_filler then return "already_service" end
+    if group.disabled then return "disabled_squad" end
+    if group:npc_count() < 1 then return "empty_donor" end
+    local faction = zhopa2_perception.squad_relation_faction(group)
+    if owner then
+        local peaceful, reason = peaceful_factions(faction, owner)
+        if not peaceful then return reason end
+    end
+    for other in pairs(services or {}) do
+        local peaceful, reason = peaceful_factions(faction, other)
+        if not peaceful then return reason == "hostile_faction" and "hostile_to_service:" .. other or reason end
+    end
+    if group.zhopa2_npc_quest_id or group.zhopa2_task == "QUEST" then return "NPC_quest" end
+    if group.zhopa2_task == "TRADE" or group.zhopa2_task == "ARTEFACT"
+        or group.zhopa2_task == "HUNT" or group.zhopa2_task == "REVENGE" then return "active_special_task" end
+    if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[group.id] then return "companion_squad" end
+    if get_object_story_id(group.id) then return "story_squad" end
+    if zhopa2_perception.quest_protected_squad(group) then return "quest_or_story_protected" end
+    if group.player_id == "actor" then return "actor_squad" end
+    if group.random_targets or group.action_condlist then return "scripted_squad" end
+    if group.scripted_target and not (group.zhopa2_task and group.zhopa2_target
+        and tostring(group.scripted_target) == tostring(group.zhopa2_target)) then return "external_scripted_target" end
+    -- managed records the current assignment; can_manage is the runtime's eligibility contract.
+    if type(group.zhopa2_can_manage) == "function" then
+        local ok, allowed = pcall(group.zhopa2_can_manage, group)
+        if not ok then return "manage_check_failed" end
+        if allowed ~= true then return "not_ZHOPA_manageable" end
+    elseif group.zhopa2_managed ~= true then return "not_ZHOPA_manageable" end
+end
+
+local function preflight(smart_id, role, quiet, job_section)
+    local trace = quiet and function() end or log
+    local rejections = {}
+    assert(db and db.actor and db.actor:alive(), "actor not ready")
+    assert_host()
+    assert(not db.actor:is_talking(), "close the conversation before running the probe")
+    assert(zhopa2_service_fillers and type(zhopa2_service_fillers.recruitment_context) == "function",
+        "update ZHOPA service_fillers: recruitment_context API missing")
+    assert(zhopa2_service_quests and zhopa2_service_quests.install, "ZHOPA service quest fix missing")
+    assert(zhopa2_perception and zhopa2_index, "ZHOPA perception/index missing")
+    assert(getFS():exist("$game_scripts$", "modxml_zhopa2_service_recruitment.script"),
+        "install modxml_zhopa2_service_recruitment.script and restart for service dialogs")
+    local smart = assert(choose_smart(smart_id), "aim at an NPC in the base or pass smart ID")
+    local context, reason, detail
+    if role == "guard" then context, reason = zhopa2_guard_refill.context(smart,job_section)
+    else context, reason, detail = zhopa2_service_fillers.recruitment_context(smart, role) end
+    trace("vacancy", "smart=" .. smart.id .. " name=" .. tostring(read(smart, "name"))
+        .. " role=" .. tostring(role or "auto") .. " result=" .. tostring(reason))
+    for key, value in pairs(type(detail) == "table" and detail or {}) do
+        trace("vacancy_detail", key .. "=" .. tostring(value))
+    end
+    local own = zhopa2_index.base_ownership(smart)
+    trace("ownership", string.format("state=%s owner=%s count=%s total=%s", tostring(own and own.state),
+        tostring(own and own.owner), tostring(own and own.count), tostring(own and own.total)))
+    assert(context, reason)
+    trace("context", string.format("owner=%s role=%s job=%s trade=%s squad_section=%s",
+        context.owner, context.role, context.job.section, tostring(context.trade), tostring(context.squad_section)))
+    local services = {}
+    if zhopa2_service_fillers.recruitment_service_factions then
+        local reason
+        services, reason = zhopa2_service_fillers.recruitment_service_factions(smart)
+        assert(services, reason)
+    end
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    if guards then
+        local factions,reason=guards.factions(smart)
+        assert(factions,reason)
+        for faction in pairs(factions) do services[faction]=true end
+    end
+    local ids, _, _, parts = donor_squads(smart, context.owner)
+    for _, id in ipairs(ids) do
+        local group = object(id)
+        local why = batch and batch.smart_id == smart.id and not batch.donors[id] and "not_batch_donor"
+            or donor_block_reason(group, context.owner, services)
+        local donor_context
+        if not why then
+            donor_context = {}
+            for key, value in pairs(context) do donor_context[key] = value end
+            donor_context.faction = zhopa2_perception.squad_relation_faction(group)
+            if context.role == "guard" then
+                donor_context.squad_section = zhopa2_guard_refill.section(donor_context.faction)
+            elseif zhopa2_service_fillers.recruitment_section then
+                donor_context.squad_section = zhopa2_service_fillers.recruitment_section(donor_context.faction, context.role)
+            elseif donor_context.faction ~= context.owner then donor_context.squad_section = nil end
+            if not donor_context.squad_section then why = "donor_service_section_missing"
+            elseif context.role == "tech" and not mechanic_profile(donor_context) then why = "mechanic_upgrade_profile_missing" end
+        end
+        trace("donor", "squad=" .. id .. " task=" .. tostring(group and group.zhopa2_task)
+            .. " target=" .. tostring(group and group.zhopa2_target) .. " result=" .. (why or "eligible"))
+        if why then rejections[why] = (rejections[why] or 0) + 1 end
+        if not why then
+            local members = {}
+            for entry in group:squad_members() do members[#members + 1] = entry.id end
+            table.sort(members)
+            for _, npc_id in ipairs(members) do
+                local se, npc = object(npc_id), online(npc_id)
+                local source = se and object(se.m_smart_terrain_id)
+                local info = source and source.npc_info and source.npc_info[npc_id]
+                local physically_here = false
+                if npc and se and zhopa2_perception.obj_level(se) == zhopa2_perception.obj_level(smart) then
+                    for _, part in ipairs(parts) do
+                        if part.position and npc:position():distance_to_sqr(part.position) <= (tonumber(part.arrive_dist) or 50)^2 then
+                            physically_here = true; break
+                        end
+                    end
+                end
+                local reject
+                if context.role~="guard" and #members > 1 and npc_id == group:commander_id() then reject = "commander"
+                elseif not se or not npc or not npc:alive() or not se:alive() or se.online ~= true then reject = "not_alive_online"
+                elseif not IsStalker or not IsStalker(nil, se:clsid()) then reject = "not_stalker"
+                elseif se.group_id ~= group.id then reject = "membership_changed"
+                elseif axr_companions and axr_companions.non_task_companions and axr_companions.non_task_companions[npc_id] then reject = "companion_NPC"
+                elseif get_object_story_id(npc_id) then reject = "story_NPC"
+                elseif not (source and source.online and info) then reject = "donor_registration_pending"
+                elseif source.disabled or source.respawn_only_smart then reject = "source_smart_unavailable"
+                elseif not physically_here then reject = "outside_base"
+                elseif npc:is_talking() or npc:best_enemy() then reject = "talking_or_fighting"
+                elseif (db.storage[npc_id] and db.storage[npc_id].zhopa2_quest_service_token)
+                    or (info.job and (info.job.seller_id or info.job.mechanic_id)) then reject = "busy_service"
+                elseif context.role=="guard" and not zhopa2_guard_refill.accepts(se,donor_context,smart) then reject="guard_job_unsuitable"
+                else reject = protected_quest(npc_id, id) end
+                trace("candidate", "npc=" .. npc_id .. " result=" .. (reject or "selected"))
+                if not reject then return smart, donor_context, group, se, npc, source end
+                rejections[reject] = (rejections[reject] or 0) + 1
+            end
+        end
+    end
+    local summary = {}
+    for reason, count in pairs(rejections) do summary[#summary+1] = reason .. "=" .. count end
+    table.sort(summary)
+    error("no_safe_donor_NPC [squads=" .. #ids .. "; " .. table.concat(summary, "; ") .. "]")
+end
+
+local function refresh(group)
+    if not group then return end
+    group.zhopa2_cached_npc_count = group:npc_count()
+    if group.zhopa2_cached_npc_count > 0 then group:refresh()
+    elseif type(group.hide) == "function" then group:hide() end
+    if SIMBOARD.zhopa2_update_squad_level then SIMBOARD:zhopa2_update_squad_level(group) end
+    if zhopa2_perception.invalidate_roam_cache then zhopa2_perception.invalidate_roam_cache(group) end
+end
+
+local function release_empty(group)
+    if not group then return end
+    assert(group:npc_count() == 0, "refusing to release a non-empty squad")
+    allow_release = true
+    local ok, result = pcall(SIMBOARD.remove_squad, SIMBOARD, group)
+    allow_release = false
+    assert(ok and result ~= false, "empty squad cleanup failed: " .. tostring(result))
+end
+
+local function bind_service(smart, group, npc, context)
+    if context.role=="guard" then
+        record.phase="active"
+        zhopa2_guard_refill.reserve(record)
+        assert(zhopa2_guard_refill.adopt(group,smart,context.faction or context.owner))
+        SIMBOARD:setup_squad_and_group(object(npc:id()))
+        assert(zhopa2_guard_refill.bind(smart,smart.npc_info[npc:id()],record,true),"guard job not selected")
+        log("guard_bound","npc="..npc:id().." smart="..smart.id.." post="..record.guard_post)
+        return
+    end
+    assert(zhopa2_service_fillers.adopt_service_squad(group, smart, context.faction or context.owner, context.squad_section), "service adoption failed")
+    assert(group.zhopa2_service_filler == true and group.zhopa2_managed ~= true
+        and group.zhopa2_task == nil and group.zhopa2_target == nil, "service squad still has roaming task ownership")
+    SIMBOARD:setup_squad_and_group(object(npc:id()))
+    record.phase = "active"
+    zhopa2_service_fillers.invalidate_presence(smart)
+    smart:select_npc_job(assert(smart.npc_info[npc:id()]), true)
+    local info = smart.npc_info[npc:id()]
+    assert(info.job and info.job.section == context.job.section, "service job not selected: " .. tostring(info.job and info.job.section))
+    if db.storage[npc:id()].section_logic ~= info.job.section then smart:setup_logic(npc) end
+    assert(db.storage[npc:id()].section_logic == info.job.section, "service logic not active")
+    trade_manager.trade_init(npc, context.trade)
+    prepare_service_dialogs(npc)
+    npc:enable_trade()
+    assert(trade_manager.get_trade_profile(npc:id(), "cfg_ltx") == context.trade, "trade profile not applied")
+    log("service_bound", "job=" .. info.job.section .. " trade=" .. context.trade)
+end
+
+local function undo_record(allow_offline)
+    assert_host()
+    assert(record, "no active experiment")
+    local r = record
+    local se = object(r.npc_id)
+    if not se or not se:alive() then
+        log("experiment_closed", "recruited NPC missing/dead; no resurrection or re-registration")
+        record = nil
+        persist()
+        return
+    end
+    assert(se:name() == r.npc_name, "saved NPC identity mismatch")
+    local npc = online(r.npc_id)
+    assert(npc or allow_offline, "bring the recruited NPC online before undo")
+    local current = object(se.group_id)
+    assert((current and (current.id == r.new_squad_id or current.id == r.return_squad_id
+        or (not r.donor_retired and current.id == r.donor_id))) or se.group_id == 65535,
+        "NPC moved to an unrelated squad")
+    -- Released IDs may already belong to unrelated squads after save/load.
+    local destination = r.return_squad_id and object(r.return_squad_id)
+        or (not r.donor_retired and object(r.donor_id)) or nil
+    if not destination or zhopa2_perception.squad_relation_faction(destination) ~= (r.service_faction or r.owner)
+        or zhopa2_perception.obj_level(destination) ~= zhopa2_perception.obj_level(se)
+        or destination.position:distance_to_sqr(se.position) > 2500 then
+        destination = assert(alife_create(r.donor_section, se.position, se.m_level_vertex_id, se.m_game_vertex_id), "return container creation failed")
+        assert(destination:npc_count() == 0, "return container was not empty")
+        destination.player_id = r.donor_faction
+        log("return_container", "new roaming squad=" .. destination.id)
+    end
+    r.return_squad_id = destination.id
+    persist()
+    if not current or current.id ~= destination.id then
+        assert((not current or member(current, se.id)) and not member(destination, se.id), "invalid rollback membership")
+        pending_binder_refresh[se.id] = true
+        if current then current:unregister_member(se.id) end
+        destination:register_member(se.id)
+        pending_binder_refresh[se.id] = true
+    end
+    assert(se.group_id == destination.id and member(destination, se.id), "rollback membership failed")
+    record.phase = "returned"
+    if r.role=="guard" then zhopa2_guard_refill.release(r) end
+    trade_session_npc = nil
+    local smart = object(destination.smart_id) or object(r.donor_smart_id or r.smart_id) or object(r.smart_id)
+    local current_smart = object(se.m_smart_terrain_id)
+    if smart then
+        if current_smart and current_smart.id ~= smart.id then
+            current_smart:unregister_npc(se)
+            if current_smart.load_info then current_smart.load_info[se.id] = nil end
+            zhopa2_service_fillers.invalidate_presence(current_smart)
+        end
+        if not destination.smart_id or destination.smart_id == 65535 then
+            SIMBOARD:assign_squad_to_smart(destination, smart.id)
+        elseif not (smart.npc_info and smart.npc_info[se.id]) and not (smart.arriving_npc and smart.arriving_npc[se.id]) then
+            smart:register_npc(se)
+        end
+        if smart.clear_job then smart:clear_job(se.id, false) end
+        if smart.load_info then smart.load_info[se.id] = nil end
+        if npc and smart.online and smart.npc_info and smart.npc_info[se.id] then smart:select_npc_job(smart.npc_info[se.id], true) end
+        zhopa2_service_fillers.invalidate_presence(smart)
+    end
+    SIMBOARD:setup_squad_and_group(se)
+    if npc then trade_manager.trade_init(npc, r.old_trade) end
+    refresh(destination)
+    release_empty(object(r.new_squad_id))
+    local logged, detail = true, nil
+    if npc then logged, detail = pcall(snapshot, npc, "after_undo") end
+    if not logged then log("snapshot_error", detail) end
+    log("undo_complete", "NPC=" .. se.id .. " squad=" .. destination.id .. "; current inventory/money retained")
+    record = nil
+    persist()
+end
+
+function M.inspect(smart_id, role)
+    local ok, smart, context, donor, se = pcall(preflight, smart_id, role)
+    if not ok then log("inspect_refused", smart); return false, smart end
+    log("inspect_ready", "smart=" .. smart.id .. " donor=" .. donor.id .. " npc=" .. se.id .. " role=" .. context.role)
+    return true, se.id
+end
+
+function M.run(smart_id, role, job_section)
+    if batch and not batch.assigning then log("run_refused", "batch test is running"); return false, "manual_test_running" end
+    if busy or record then log("run_refused", "experiment already active; status/undo first"); return false, "active_transaction" end
+    if #all_records() >= MAX_RECORDS then log("run_refused", "service record limit reached"); return false, "service_record_limit" end
+    busy = true
+    local ok, err = pcall(function()
+        assert(getFS():exist("$game_scripts$", "zhopa2_service_recruitment.script"), "install probe in gamedata/scripts before running: required for recovery after reload")
+        local smart, context, donor, se, npc, source = preflight(smart_id, role, false, job_section)
+        install_hooks()
+        zhopa2_service_quests.install()
+        local before = snapshot(npc, "before")
+        record = {version = STATE_VERSION, phase = "prepared", npc_id = se.id, npc_name = se:name(), npc_section = npc:section(), display_name = npc:character_name(),
+            donor_id = donor.id, donor_section = donor:section_name(), donor_faction = donor.player_id,
+            donor_count_before = donor:npc_count(), smart_id = smart.id, donor_smart_id = source.id,
+            role = context.role, owner = context.owner, service_faction = context.faction or context.owner, squad_section = context.squad_section,
+            job_section = context.job.section, trade = context.trade, guard_post = context.guard_post,
+            service_character = context.character,
+            service_task_section = context.task_section,
+            old_trade = trade_manager.get_trade_profile(se.id, "cfg_ltx") or "items\\trade\\trade_generic.ltx"}
+        persist()
+        local group = assert(alife_create(context.squad_section, se.position, se.m_level_vertex_id, se.m_game_vertex_id), "empty container creation failed")
+        record.new_squad_id = group.id
+        group.zhopa2_service_recruited = context.role ~= "guard"
+        group.zhopa2_guard_filler = context.role == "guard"
+        assert(group:npc_count() == 0, "service container unexpectedly has members")
+        assert(se.group_id == donor.id and member(donor, se.id) and donor:npc_count() >= 1
+            and donor:npc_count() == record.donor_count_before, "donor changed")
+        assert(context.role=="guard" or record.donor_count_before == 1 or donor:commander_id() ~= se.id, "donor commander changed")
+        log("detach", "npc=" .. se.id .. " old_squad=" .. donor.id .. " new_squad=" .. group.id)
+        pending_binder_refresh[se.id] = true
+        if source.id ~= smart.id then
+            source:unregister_npc(se)
+            if source.load_info then source.load_info[se.id] = nil end
+            zhopa2_service_fillers.invalidate_presence(source)
+            log("smart_transfer", "npc=" .. se.id .. " from=" .. source.id .. " to=" .. smart.id)
+        end
+        donor:unregister_member(se.id)
+        group:register_member(se.id)
+        pending_binder_refresh[se.id] = true
+        assert(se.group_id == group.id and member(group, se.id) and not member(donor, se.id), "transfer invariant failed")
+        assert(group:npc_count() == 1 and donor:npc_count() + group:npc_count() == record.donor_count_before, "member count changed")
+        log("membership", "donor_before=" .. record.donor_count_before .. " donor_after=" .. donor:npc_count() .. " service=" .. group:npc_count())
+        assert(object(record.npc_id) == se and online(record.npc_id) == npc, "NPC object was replaced")
+        assert_inventory(before, snapshot(npc, "after_transfer"))
+        refresh(donor)
+        bind_service(smart, group, npc, context)
+        refresh(group)
+        assert(npc:section() == record.npc_section and npc:character_name() == record.display_name, "NPC identity changed")
+        assert_inventory(before, snapshot(npc, "after_role"))
+        if donor:npc_count() == 0 then
+            record.donor_retired = true
+            persist() -- Never reattach to a container whose removal has begun.
+            if type(donor.zhopa2_clear_task) == "function" then donor:zhopa2_clear_task("service_recruitment_empty_donor") end
+            donor.zhopa2_managed, donor.zhopa2_task, donor.zhopa2_target = false, nil, nil
+            if batch then batch.donors[donor.id] = nil end
+            release_empty(donor)
+            log("empty_donor_removed", "squad=" .. record.donor_id .. " npc=" .. record.npc_id .. " service=" .. group.id)
+        end
+        persist()
+        log("complete", "same NPC=" .. se.id .. " promoted to " .. context.role .. "; use status(), stock(), undo()")
+    end)
+    if not ok then
+        log("run_error", err)
+        if record and record.new_squad_id then
+            local restored, reason = pcall(undo_record)
+            log(restored and "rollback_ok" or "rollback_failed", reason)
+        elseif record then record = nil; persist() end
+    end
+    busy = false
+    return ok, err
+end
+
+function M.status(npc_id)
+    select_record(npc_id)
+    if not record then log("status", "no active experiment"); return false end
+    for key, value in pairs(record) do log("record", key .. "=" .. tostring(value)) end
+    local se, npc = object(record.npc_id), online(record.npc_id)
+    log("status", "server=" .. tostring(se ~= nil) .. " online=" .. tostring(npc ~= nil) .. " group=" .. tostring(se and se.group_id))
+    if npc then
+        snapshot(npc, "status")
+        local smart = object(record.smart_id)
+        local info = smart and smart.npc_info and smart.npc_info[record.npc_id]
+        log("status_job", tostring(info and info.job and info.job.section))
+        log("status_trade", tostring(trade_manager.get_trade_profile(record.npc_id, "cfg_ltx")))
+        local st = db.storage[record.npc_id]
+        log("status_quest_choice", tostring(st and st.dyn_quest_rand))
+        if type(npc.character_dialogs) == "function" then
+            for _, dialog in ipairs(npc:character_dialogs()) do log("status_dialog", dialog) end
+        end
+        for _, id in ipairs(axr_task_manager.available_tasks and axr_task_manager.available_tasks[record.npc_id] or {}) do
+            log("quest_available", id)
+        end
+        local dynamic = axr_task_manager.get_first_finished_task(npc)
+        local simulation = axr_task_manager.get_first_finished_task(npc, true)
+        log("quest_dynamic", tostring(dynamic))
+        log("quest_simulation", tostring(simulation))
+    end
+    return true
+end
+
+function M.stock(npc_id)
+    local ok, err = pcall(function()
+        select_record(npc_id)
+        assert_host()
+        assert(record and record.phase == "active" and record.role~="guard", "no active trader")
+        local npc = assert(online(record.npc_id), "NPC offline")
+        trade_manager.update(npc, true)
+        local money = npc:money()
+        if money < 50000 then npc:give_money(50000 - money) end
+        log("stock", "forced native restock; wallet raised to at least 50000")
+        snapshot(npc, "stock")
+    end)
+    if not ok then log("stock_error", err) end
+    return ok, err
+end
+
+function M.undo(npc_id)
+    if busy or batch then log("undo_refused", "another operation is running"); return false end
+    busy = true
+    local ok, err = pcall(function() select_record(npc_id); undo_record() end)
+    busy = false
+    if not ok then log("undo_error", err) end
+    return ok, err
+end
+
+local function finish_batch(reason)
+    local b = batch
+    if not b then return true end
+    b.reason = reason
+    for _, role in ipairs(b.roles) do log("batch_role", role .. "=" .. tostring(b.results[role] or b.errors[role] or "not_assigned")) end
+    log("batch_end", "smart=" .. b.smart_id .. " reason=" .. reason .. " killed=" .. b.killed .. " spawned_squads=" .. #b.squads)
+    M.last_batch_result = b
+    batch = nil
+    persist()
+    return true
+end
+
+local function batch_step()
+    if not batch then return true end
+    local b = batch
+    local now = time_global()
+    if now < b.next_tick then return false end
+    b.next_tick = now + 1000
+    b.started = b.started or now
+    local ok, done = pcall(function()
+        assert_host()
+        if level.name() ~= b.level then return finish_batch("level_changed") end
+        if now - b.started > 30000 then return finish_batch("timeout") end
+        local smart = assert(object(b.smart_id), "test smart disappeared")
+        if zhopa2_tasks.surge_active() then return finish_batch("surge_started") end
+        local blocked, deaths = {}, 0
+        for _, entry in ipairs(b.targets) do
+            local npc = object(entry.id)
+            if npc and npc:name() == entry.name and read(npc, "alive") ~= false then
+                if now - b.started < 3000 then return false end
+                blocked[entry.role] = true
+                local reason = "original_still_present npc=" .. entry.id .. " name=" .. entry.name
+                if b.errors[entry.role] ~= reason then log("batch_blocked", reason) end
+                b.errors[entry.role] = reason
+            else
+                deaths = deaths + 1
+            end
+        end
+        b.killed = deaths
+        if not b.spawned then
+            b.spawned = true -- no repeated spawning after partial failure
+            for _, role in ipairs(b.roles) do
+                if not blocked[role] then
+                    local q = assert(SIMBOARD:create_squad(smart, b.squad_section), "native squad creation failed")
+                    b.donors[q.id], b.squads[#b.squads+1] = true, q.id
+                    log("batch_spawn", "smart=" .. smart.id .. " squad=" .. q.id .. " section=" .. b.squad_section)
+                end
+            end
+            return false -- allow native NPC registration/switch-online callbacks to finish
+        end
+        for _, id in ipairs(b.squads) do
+            local q = object(id)
+            if b.donors[id] and q and q:npc_count() > 0 and not q.zhopa2_service_filler then
+                assert(type(q.zhopa2_assign_task) == "function", "ZHOPA squad methods unavailable")
+                if not zhopa2_perception.quest_protected_squad(q) then
+                    if tonumber(q.smart_id) ~= tonumber(smart.id) then
+                        log("batch_reassign_donor", "squad=" .. id .. " from=" .. tostring(q.smart_id) .. " to=" .. smart.id)
+                        SIMBOARD:assign_squad_to_smart(q, smart.id)
+                    end
+                    if not b.prepared[id] or q.zhopa2_task ~= "BASE_CAMPING" or tonumber(q.zhopa2_target) ~= tonumber(smart.id) then
+                        if q.zhopa2_task and q.zhopa2_clear_task then q:zhopa2_clear_task("service_batch_donor") end
+                        b.prepared[id] = q:zhopa2_assign_task("BASE_CAMPING", smart.id, 3600, "service_batch_donor") == true
+                        refresh(q)
+                    end
+                end
+            end
+        end
+        for offset = 1, #b.roles do
+            local index = ((b.cursor or 0) + offset - 1) % #b.roles + 1
+            local role = b.roles[index]
+            if not b.results[role] and not blocked[role] then
+                b.cursor = index
+                archive_current()
+                b.assigning = true
+                local assigned, detail = M.run(smart.id, role)
+                b.assigning = nil
+                if assigned then
+                    b.results[role] = record.npc_id
+                    log("batch_assigned", "role=" .. role .. " npc=" .. record.npc_id)
+                    M.stock()
+                else
+                    b.errors[role] = tostring(detail)
+                end
+                return false -- at most one recruitment attempt per timer tick
+            end
+        end
+        return finish_batch(next(blocked) and "partial_original_present" or "complete")
+    end)
+    if not ok then log("batch_error", done); return finish_batch("error:" .. tostring(done)) end
+    return done == true
+end
+
+function M.test_smart(smart_id)
+    if busy or batch then log("batch_refused", "another operation is running"); return false end
+    local ok, err = pcall(function()
+        assert_host()
+        assert(db and db.actor and db.actor:alive() and not db.actor:is_talking(), "close dialogue and enter the game")
+        assert(type(CreateTimeEvent) == "function", "time events unavailable")
+        assert(not zhopa2_tasks.surge_active(), "wait until the surge ends")
+        local found = not smart_id and zhopa2_index.actor_service_base()
+        local smart = assert(object(smart_id or (found and found.smart_id)), "stand inside a service base or pass its smart ID")
+        assert(zhopa2_perception.obj_level(smart) == level.name(), "test is limited to the player's level")
+        local svc = zhopa2_service_fillers
+        assert(type(svc.recruitment_snapshot) == "function", "update service_fillers: recruitment_snapshot missing")
+        local snapshot, reason = svc.recruitment_snapshot(smart)
+        assert(snapshot, reason)
+        local supported = {trader=true,barman=true,tech=true,medic=true}
+        local roles = {}
+        for _, role in ipairs(snapshot.roles) do
+            if supported[role] then roles[#roles+1] = role else log("batch_skip_role", role) end
+        end
+        assert(#roles > 0 and #roles <= 4, "no supported service roles at this smart")
+        assert(#all_records() + #roles <= MAX_RECORDS, "service record limit reached")
+        for _, r in ipairs(all_records()) do assert(r.phase == "active", "unfinished recruitment needs recovery") end
+        local own = zhopa2_index.update_base_ownership(smart)
+        local faction = own and own.owner or get_actor_true_community()
+        faction = tostring(faction):gsub("^actor_", "")
+        faction = ({duty="dolg",merc="killer"})[faction] or faction
+        local prefix = ({dolg="duty",killer="merc"})[faction] or faction
+        local section
+        for _, rank in ipairs({"novice","advanced","veteran"}) do
+            local candidate = prefix .. "_sim_squad_" .. rank
+            if ini_sys:section_exist(candidate) then section=candidate; break end
+        end
+        assert(section, "no native simulation squad for faction " .. faction)
+        local targets = {}
+        for _, entry in ipairs(snapshot.npcs) do
+            local npc = object(entry.id)
+            local belongs = npc and ((smart.npc_info and smart.npc_info[entry.id])
+                or tonumber(npc.m_smart_terrain_id) == tonumber(smart.id))
+            if supported[entry.role] and belongs and zhopa2_perception.obj_level(npc) == level.name() then
+                local client = online(entry.id)
+                assert((client and type(client.kill) == "function") or type(npc.kill) == "function", "NPC kill API unavailable")
+                targets[#targets+1] = entry
+            end
+        end
+        assert(#targets <= 64, "too many service NPCs for one bounded test")
+        install_hooks()
+        batch = {smart_id=smart.id, level=level.name(), squad_section=section, roles=roles, targets=targets,
+            donors={}, squads={}, prepared={}, results={}, errors={}, killed=0, next_tick=0}
+        log("batch_begin", "smart=" .. smart.id .. " name=" .. smart:name() .. " faction=" .. faction .. " services=" .. #targets)
+        for _, entry in ipairs(targets) do
+            local npc, client = object(entry.id), online(entry.id)
+            assert(npc and npc:name()==entry.name, "service NPC identity changed")
+            log("batch_kill", "npc=" .. entry.id .. " role=" .. entry.role .. " name=" .. entry.name)
+            if client and type(client.kill) == "function" then client:kill(client) else npc:kill() end
+            batch.kill_requests = (batch.kill_requests or 0) + 1
+        end
+        svc.invalidate_presence(smart)
+        persist()
+        if RemoveTimeEvent then RemoveTimeEvent(KEY, "batch") end
+        CreateTimeEvent(KEY, "batch", 0.5, batch_step)
+        log("batch_wait", "close F7; waiting for death/registration callbacks, at most 30 seconds")
+    end)
+    if not ok then log("batch_error", err); if batch then finish_batch("error:" .. tostring(err)) end end
+    return ok, err
+end
+
+function M.batch_status()
+    local b = batch or M.last_batch_result
+    if b then
+        log("batch_status", "smart=" .. b.smart_id .. " state=" .. tostring(b.reason or "running"))
+        for _, role in ipairs(b.roles) do log("batch_role", role .. "=" .. tostring(b.results[role] or b.errors[role] or "waiting")) end
+    end
+    for _, r in ipairs(all_records()) do
+        log("active_service", "npc=" .. r.npc_id .. " role=" .. r.role .. " smart=" .. r.smart_id)
+    end
+    return b ~= nil
+end
+
+function M.audit_level()
+    local ok, err = pcall(function()
+        assert(db and db.actor and SIMBOARD, "enter the game first")
+        local svc, ids = zhopa2_service_fillers, {}
+        local bases, seen_bases = rawget(_G, "zhopa2_bases"), {}
+        for id, node in pairs(SIMBOARD.smarts or {}) do
+            local smart = node.smrt
+            if smart and zhopa2_perception.obj_level(smart) == level.name() and svc.is_service_base(smart) then
+                ids[#ids+1] = id
+            end
+        end
+        table.sort(ids)
+        log("audit_begin", "level=" .. tostring(level.name()) .. " service_smarts=" .. #ids)
+        for i = 1, math.min(#ids, 256) do
+            local smart = SIMBOARD.smarts[ids[i]].smrt
+            if bases and not seen_bases[bases.key(smart)] then
+                local parts = {}
+                for _, part in ipairs(bases.members(smart)) do parts[#parts+1] = part:name() .. ":" .. part.id end
+                log("audit_base", "base=" .. bases.key(smart) .. " members=" .. table.concat(parts, ","))
+                local own = zhopa2_index.update_base_ownership and zhopa2_index.update_base_ownership(smart)
+                    or zhopa2_index.base_ownership(smart)
+                log("audit_ownership", "base=" .. bases.key(smart) .. " state=" .. tostring(own and own.state)
+                    .. " owner=" .. tostring(own and own.owner) .. " total=" .. tostring(own and own.total))
+                local squads, _, origins = donor_squads(smart, own and own.owner)
+                for n = 1, math.min(#squads, 128) do
+                    local group = object(squads[n])
+                    local origin, labels = origins[squads[n]], {}
+                    for _, key in ipairs({"board", "registered", "nearby"}) do if origin[key] then labels[#labels+1] = key end end
+                    log("audit_squad", "id=" .. squads[n] .. " section=" .. tostring(group and read(group, "section_name"))
+                        .. " faction=" .. tostring(group and zhopa2_perception.squad_relation_faction(group))
+                        .. " task=" .. tostring(group and group.zhopa2_task) .. " managed=" .. tostring(group and group.zhopa2_managed)
+                        .. " smart=" .. tostring(group and group.smart_id) .. " found=" .. table.concat(labels, "+")
+                        .. " result=" .. tostring(donor_block_reason(group, own and own.owner) or "eligible_squad"))
+                end
+                if #squads > 128 then log("audit_squads_truncated", #squads) end
+                seen_bases[bases.key(smart)] = true
+            end
+            local snap, reason = svc.recruitment_snapshot(smart)
+            log("audit_smart", "id=" .. smart.id .. " name=" .. smart:name() .. " online=" .. tostring(smart.online)
+                .. " result=" .. tostring(reason or "ready") .. " roles=" .. (snap and table.concat(snap.roles, ",") or "unknown"))
+            local sim = rawget(_G, "simulation_objects")
+            log("audit_flags", "smart=" .. smart.id .. " disabled=" .. tostring(smart.disabled)
+                .. " respawn_only=" .. tostring(smart.respawn_only_smart)
+                .. " sim_available=" .. tostring(sim and sim.available_by_id and sim.available_by_id[smart.id])
+                .. " (routing flag; does not block service recruitment)")
+            local queued = svc.marked_smarts and svc.marked_smarts[smart.id]
+            if queued then
+                log("audit_queue", "smart=" .. smart.id .. " confirmed=" .. tostring(queued.confirmed)
+                    .. " reason=" .. tostring(queued.reason) .. " next_check=" .. tostring(queued.next_check))
+            end
+            if snap then
+                for _, key in ipairs({"npcs", "external_npcs"}) do
+                    for _, entry in ipairs(snap[key] or {}) do
+                        log("audit_" .. key, "id=" .. entry.id .. " role=" .. entry.role .. " name=" .. entry.name
+                            .. " registered_smart=" .. tostring(entry.smart_id))
+                    end
+                end
+                for _, role in ipairs(snap.roles) do
+                    local context, why, detail = svc.recruitment_context(smart, role)
+                    log("audit_role", "smart=" .. smart.id .. " role=" .. role .. " result=" .. tostring(why)
+                        .. " job=" .. tostring(context and context.job.section or detail and detail.job)
+                        .. " original=" .. tostring(context and context.character or detail and detail.npc_name))
+                    if context then
+                        local ready, destination, selected_context, donor, se, _, source = pcall(preflight, smart.id, role, true)
+                        log("audit_donor", "smart=" .. smart.id .. " role=" .. role
+                            .. " result=" .. (ready and "eligible" or tostring(destination))
+                            .. " squad=" .. tostring(ready and donor.id or nil)
+                            .. " npc=" .. tostring(ready and se.id or nil)
+                            .. " source_smart=" .. tostring(ready and source.id or nil)
+                            .. " faction=" .. tostring(ready and selected_context.faction or nil))
+                    end
+                end
+            end
+        end
+        log("audit_end", #ids > 256 and "truncated" or "no NPCs killed or spawned")
+    end)
+    if not ok then log("audit_error", err) end
+    return ok, err
+end
+
+function M.restore()
+    local state = alife_storage_manager and alife_storage_manager.get_state()
+    record = state and state[KEY] or record
+    extra_records = state and state[KEY .. "_others"] or extra_records
+    for _, record in ipairs(all_records()) do
+    local ok, err = pcall(function()
+        assert_host()
+        assert(record.version == STATE_VERSION, "unsupported probe state version")
+        install_hooks()
+        local se = assert(object(record.npc_id), "saved NPC missing")
+        if not se:alive() then forget(record); persist(); return end
+        assert(se:name() == record.npc_name, "saved NPC identity mismatch")
+        if se.group_id ~= record.new_squad_id then error("saved membership mismatch; manual status/undo required") end
+        local group, smart, npc = object(record.new_squad_id), object(record.smart_id), online(record.npc_id)
+        assert(group and smart, "saved squad/smart missing")
+        if record.role=="guard" then
+            zhopa2_guard_refill.reserve(record)
+            assert(zhopa2_guard_refill.adopt(group,smart,record.service_faction or record.owner))
+        else
+            assert(zhopa2_service_fillers.adopt_service_squad(group, smart, record.service_faction or record.owner, record.squad_section))
+            group.zhopa2_service_recruited = true
+        end
+        pending_binder_refresh[record.npc_id] = true
+        record.phase = "active"
+        if npc and smart.online and smart.npc_info[npc:id()] then
+            smart:select_npc_job(smart.npc_info[npc:id()], true)
+            if record.role~="guard" then
+                trade_manager.trade_init(npc, record.trade)
+                prepare_service_dialogs(npc)
+            end
+        end
+        persist()
+        log("restored", "npc=" .. record.npc_id)
+    end)
+    if not ok then log("restore_error", err) end
+    end
+end
+
+local function save_state(data) data[KEY], data[KEY .. "_others"] = record, next(extra_records) and extra_records or nil end
+local function load_state(data)
+    record, extra_records = data[KEY], data[KEY .. "_others"] or {}
+    M.guard_revision=(M.guard_revision or 0)+1
+    batch, trade_session_npc, pending_binder_refresh = nil, nil, {} -- never replay destructive test steps on load
+end
+local function trade_closed() trade_session_npc = nil end
+local function traded()
+    local npc = trade_session_npc and online(trade_session_npc)
+    if npc and role_npc(npc) then replenish_money(npc) end
+end
+local function npc_online(npc)
+    local r = record_for(npc)
+    if r and r.role=="guard" then
+        pending_binder_refresh[r.npc_id]=true
+        zhopa2_guard_refill.reserve(r)
+    elseif r then
+        trade_manager.trade_init(npc, r.trade)
+        prepare_service_dialogs(npc)
+    end
+end
+local function npc_gone(npc)
+    local id = id_of(npc)
+    if id then pending_binder_refresh[id] = nil end
+    local r = (record and id == record.npc_id and record) or extra_records[id]
+    if r then
+        log("experiment_closed", "recruited NPC died/unregistered")
+        forget(r)
+        persist()
+    end
+end
+
+function M.owns_squad(group)
+    local r = find_record("new_squad_id", id_of(group))
+    local npc = r and object(r.npc_id)
+    return r ~= nil and npc ~= nil and npc.group_id == r.new_squad_id and npc:name() == r.npc_name
+end
+
+function M.is_reserved(smart)
+    if not batch then return false end
+    if batch.smart_id == id_of(smart) then return true end
+    local bases = rawget(_G, "zhopa2_bases")
+    return bases ~= nil and bases.same(object(batch.smart_id), smart)
+end
+
+function M.recruit(smart_id, role, job_section)
+    if busy or batch then return false, "recruitment_busy" end
+    if record and record.phase ~= "active" then return false, "recovery_pending" end
+    automatic = true
+    local ran, ok, detail = pcall(function()
+        archive_current()
+        local success, reason = M.run(smart_id, role, job_section)
+        if success and role~="guard" then M.stock() end
+        return success, reason
+    end)
+    automatic = false
+    if not ran then log("recruit_error", ok); return false, tostring(ok) end
+    return ok, detail
+end
+
+function M.guard_record(npc)
+    local r=record_for(npc)
+    return r and r.role=="guard" and r or nil
+end
+function M.guard_records()
+    local out={}
+    for _,r in ipairs(all_records()) do if r.role=="guard" and r.phase=="active" then out[#out+1]=r end end
+    return out
+end
+M.guard_donor_reason=donor_block_reason
+
+function M.on_master_disable()
+    if busy then return false, "recruitment_busy" end
+    if batch then finish_batch("master_disabled") end
+    local failures = {}
+    for _, r in ipairs(all_records()) do
+        local ok, err = pcall(function() select_record(r.npc_id); undo_record(true) end)
+        if not ok then failures[#failures+1] = tostring(r.npc_id) .. ":" .. tostring(err) end
+    end
+    return #failures == 0, table.concat(failures, ";")
+end
+
+function M.on_game_start()
+    if UnregisterScriptCallback then
+        UnregisterScriptCallback("actor_on_first_update", M.restore)
+        UnregisterScriptCallback("save_state", save_state)
+        UnregisterScriptCallback("load_state", load_state)
+        UnregisterScriptCallback("npc_on_net_spawn", npc_online)
+        UnregisterScriptCallback("actor_on_trade", traded)
+        UnregisterScriptCallback("ActorMenu_on_trade_closed", trade_closed)
+        UnregisterScriptCallback("npc_on_death_callback", npc_gone)
+        UnregisterScriptCallback("server_entity_on_unregister", npc_gone)
+    end
+    RegisterScriptCallback("actor_on_first_update", M.restore)
+    RegisterScriptCallback("save_state", save_state)
+    RegisterScriptCallback("load_state", load_state)
+    RegisterScriptCallback("npc_on_net_spawn", npc_online)
+    RegisterScriptCallback("actor_on_trade", traded)
+    RegisterScriptCallback("ActorMenu_on_trade_closed", trade_closed)
+    RegisterScriptCallback("npc_on_death_callback", npc_gone)
+    RegisterScriptCallback("server_entity_on_unregister", npc_gone)
+    log("loaded", "shared recruitment engine; legacy save keys retained")
+end
+
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_service_recruitment = M
+_G.zhopa2_recruit_trader_probe = M -- old console commands/save compatibility
+return M

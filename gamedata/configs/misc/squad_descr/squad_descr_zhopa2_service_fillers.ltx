@@ -1,4 +1,6 @@
-; ZHOPA ALIFE 2 service filler squads for roles missing in vanilla squad_descr.
+; ZHOPA ALIFE 2 service containers, created empty by alife_create for existing NPCs.
+; Legacy sections (including guides) remain for old-save deserialization and migration.
+; Production recruitment never calls SIMBOARD:create_squad for these sections.
 
 [stalker_sim_squad_service_guide]:online_offline_group
 faction = stalker
@@ -72,290 +74,218 @@ npc_random = sim_default_isg_2
 npc_in_squad = 1,1
 always_arrived = true
 
-[stalker_sim_squad_service_trader]:online_offline_group
+[stalker_sim_squad_service_trader]:stalker_sim_squad_trader
+always_arrived = true
+
+[stalker_sim_squad_service_barman]:stalker_sim_squad_barman
+always_arrived = true
+
+[stalker_sim_squad_service_tech]:stalker_sim_squad_mechanic
+always_arrived = true
+
+[stalker_sim_squad_service_medic]:stalker_sim_squad_medic
+always_arrived = true
+
+[bandit_sim_squad_service_trader]:bandit_sim_squad_trader
+always_arrived = true
+
+[bandit_sim_squad_service_barman]:bandit_sim_squad_barman
+always_arrived = true
+
+[bandit_sim_squad_service_tech]:bandit_sim_squad_mechanic
+always_arrived = true
+
+[bandit_sim_squad_service_medic]:bandit_sim_squad_medic
+always_arrived = true
+
+[duty_sim_squad_service_trader]:dolg_sim_squad_trader
+always_arrived = true
+
+[duty_sim_squad_service_barman]:dolg_sim_squad_barman
+always_arrived = true
+
+[duty_sim_squad_service_tech]:dolg_sim_squad_mechanic
+always_arrived = true
+
+[duty_sim_squad_service_medic]:dolg_sim_squad_medic
+always_arrived = true
+
+[freedom_sim_squad_service_trader]:freedom_sim_squad_trader
+always_arrived = true
+
+[freedom_sim_squad_service_barman]:freedom_sim_squad_barman
+always_arrived = true
+
+[freedom_sim_squad_service_tech]:freedom_sim_squad_mechanic
+always_arrived = true
+
+[freedom_sim_squad_service_medic]:freedom_sim_squad_medic
+always_arrived = true
+
+[merc_sim_squad_service_trader]:merc_sim_squad_trader
+always_arrived = true
+
+[merc_sim_squad_service_barman]:merc_sim_squad_barman
+always_arrived = true
+
+[merc_sim_squad_service_tech]:merc_sim_squad_mechanic
+always_arrived = true
+
+[merc_sim_squad_service_medic]:merc_sim_squad_medic
+always_arrived = true
+
+[army_sim_squad_service_trader]:army_sim_squad_trader
+always_arrived = true
+
+[army_sim_squad_service_barman]:army_sim_squad_barman
+always_arrived = true
+
+[army_sim_squad_service_tech]:army_sim_squad_mechanic
+always_arrived = true
+
+[army_sim_squad_service_medic]:army_sim_squad_medic
+always_arrived = true
+
+[ecolog_sim_squad_service_trader]:ecolog_sim_squad_trader
+always_arrived = true
+
+[ecolog_sim_squad_service_barman]:ecolog_sim_squad_barman
+always_arrived = true
+
+[ecolog_sim_squad_service_tech]:ecolog_sim_squad_mechanic
+always_arrived = true
+
+[ecolog_sim_squad_service_medic]:ecolog_sim_squad_medic
+always_arrived = true
+
+[monolith_sim_squad_service_trader]:monolith_sim_squad_trader
+always_arrived = true
+
+[monolith_sim_squad_service_barman]:monolith_sim_squad_barman
+always_arrived = true
+
+[monolith_sim_squad_service_tech]:monolith_sim_squad_mechanic
+always_arrived = true
+
+[monolith_sim_squad_service_medic]:monolith_sim_squad_medic
+always_arrived = true
+
+[csky_sim_squad_service_trader]:csky_sim_squad_trader
+always_arrived = true
+
+[csky_sim_squad_service_barman]:csky_sim_squad_barman
+always_arrived = true
+
+[csky_sim_squad_service_tech]:csky_sim_squad_mechanic
+always_arrived = true
+
+[csky_sim_squad_service_medic]:csky_sim_squad_medic
+always_arrived = true
+
+[renegade_sim_squad_service_trader]:renegade_sim_squad_trader
+always_arrived = true
+
+[renegade_sim_squad_service_barman]:renegade_sim_squad_barman
+always_arrived = true
+
+[renegade_sim_squad_service_tech]:renegade_sim_squad_mechanic
+always_arrived = true
+
+[renegade_sim_squad_service_medic]:renegade_sim_squad_medic
+always_arrived = true
+
+[greh_sim_squad_service_trader]:greh_sim_squad_trader
+always_arrived = true
+
+[greh_sim_squad_service_barman]:greh_sim_squad_barman
+always_arrived = true
+
+[greh_sim_squad_service_tech]:greh_sim_squad_mechanic
+always_arrived = true
+
+[greh_sim_squad_service_medic]:greh_sim_squad_medic
+always_arrived = true
+
+[isg_sim_squad_service_trader]:isg_sim_squad_trader
+always_arrived = true
+
+[isg_sim_squad_service_barman]:isg_sim_squad_barman
+always_arrived = true
+
+[isg_sim_squad_service_tech]:isg_sim_squad_mechanic
+always_arrived = true
+
+[isg_sim_squad_service_medic]:isg_sim_squad_medic
+always_arrived = true
+
+; Empty permanent guard container; no NPC spawning by the filler.
+[stalker_sim_squad_guard]:online_offline_group
 faction = stalker
-npc_random = sim_default_stalker_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[stalker_sim_squad_service_barman]:online_offline_group
-faction = stalker
-npc_random = sim_default_stalker_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[stalker_sim_squad_service_tech]:online_offline_group
-faction = stalker
-npc_random = sim_default_stalker_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[stalker_sim_squad_service_medic]:online_offline_group
-faction = stalker
-npc_random = sim_default_stalker_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[bandit_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[bandit_sim_squad_guard]:online_offline_group
 faction = bandit
-npc_random = sim_default_bandit_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[bandit_sim_squad_service_barman]:online_offline_group
-faction = bandit
-npc_random = sim_default_bandit_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[bandit_sim_squad_service_tech]:online_offline_group
-faction = bandit
-npc_random = sim_default_bandit_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[bandit_sim_squad_service_medic]:online_offline_group
-faction = bandit
-npc_random = sim_default_bandit_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[duty_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[duty_sim_squad_guard]:online_offline_group
 faction = dolg
-npc_random = sim_default_dolg_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[duty_sim_squad_service_barman]:online_offline_group
-faction = dolg
-npc_random = sim_default_dolg_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[duty_sim_squad_service_tech]:online_offline_group
-faction = dolg
-npc_random = sim_default_dolg_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[duty_sim_squad_service_medic]:online_offline_group
-faction = dolg
-npc_random = sim_default_dolg_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[freedom_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[freedom_sim_squad_guard]:online_offline_group
 faction = freedom
-npc_random = sim_default_freedom_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[freedom_sim_squad_service_barman]:online_offline_group
-faction = freedom
-npc_random = sim_default_freedom_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[freedom_sim_squad_service_tech]:online_offline_group
-faction = freedom
-npc_random = sim_default_freedom_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[freedom_sim_squad_service_medic]:online_offline_group
-faction = freedom
-npc_random = sim_default_freedom_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[merc_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[merc_sim_squad_guard]:online_offline_group
 faction = killer
-npc_random = sim_default_killer_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[merc_sim_squad_service_barman]:online_offline_group
-faction = killer
-npc_random = sim_default_killer_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[merc_sim_squad_service_tech]:online_offline_group
-faction = killer
-npc_random = sim_default_killer_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[merc_sim_squad_service_medic]:online_offline_group
-faction = killer
-npc_random = sim_default_killer_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[army_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[army_sim_squad_guard]:online_offline_group
 faction = army
-npc_random = sim_default_army_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[army_sim_squad_service_barman]:online_offline_group
-faction = army
-npc_random = sim_default_army_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[army_sim_squad_service_tech]:online_offline_group
-faction = army
-npc_random = sim_default_army_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[army_sim_squad_service_medic]:online_offline_group
-faction = army
-npc_random = sim_default_army_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[ecolog_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[ecolog_sim_squad_guard]:online_offline_group
 faction = ecolog
-npc_random = sim_default_ecolog_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[ecolog_sim_squad_service_barman]:online_offline_group
-faction = ecolog
-npc_random = sim_default_ecolog_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[ecolog_sim_squad_service_tech]:online_offline_group
-faction = ecolog
-npc_random = sim_default_ecolog_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[ecolog_sim_squad_service_medic]:online_offline_group
-faction = ecolog
-npc_random = sim_default_ecolog_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[monolith_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[monolith_sim_squad_guard]:online_offline_group
 faction = monolith
-npc_random = sim_default_monolith_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[monolith_sim_squad_service_barman]:online_offline_group
-faction = monolith
-npc_random = sim_default_monolith_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[monolith_sim_squad_service_tech]:online_offline_group
-faction = monolith
-npc_random = sim_default_monolith_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[monolith_sim_squad_service_medic]:online_offline_group
-faction = monolith
-npc_random = sim_default_monolith_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[csky_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[csky_sim_squad_guard]:online_offline_group
 faction = csky
-npc_random = sim_default_csky_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[csky_sim_squad_service_barman]:online_offline_group
-faction = csky
-npc_random = sim_default_csky_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[csky_sim_squad_service_tech]:online_offline_group
-faction = csky
-npc_random = sim_default_csky_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[csky_sim_squad_service_medic]:online_offline_group
-faction = csky
-npc_random = sim_default_csky_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[renegade_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[renegade_sim_squad_guard]:online_offline_group
 faction = renegade
-npc_random = sim_default_renegade_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[renegade_sim_squad_service_barman]:online_offline_group
-faction = renegade
-npc_random = sim_default_renegade_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[renegade_sim_squad_service_tech]:online_offline_group
-faction = renegade
-npc_random = sim_default_renegade_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[renegade_sim_squad_service_medic]:online_offline_group
-faction = renegade
-npc_random = sim_default_renegade_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[greh_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[greh_sim_squad_guard]:online_offline_group
 faction = greh
-npc_random = sim_default_greh_trader
 npc_in_squad = 1,1
 always_arrived = true
 
-[greh_sim_squad_service_barman]:online_offline_group
-faction = greh
-npc_random = sim_default_greh_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[greh_sim_squad_service_tech]:online_offline_group
-faction = greh
-npc_random = sim_default_greh_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[greh_sim_squad_service_medic]:online_offline_group
-faction = greh
-npc_random = sim_default_greh_medic
-npc_in_squad = 1,1
-always_arrived = true
-
-[isg_sim_squad_service_trader]:online_offline_group
+; Empty permanent guard container; no NPC spawning by the filler.
+[isg_sim_squad_guard]:online_offline_group
 faction = isg
-npc_random = sim_default_isg_trader
-npc_in_squad = 1,1
-always_arrived = true
-
-[isg_sim_squad_service_barman]:online_offline_group
-faction = isg
-npc_random = sim_default_isg_barman
-npc_in_squad = 1,1
-always_arrived = true
-
-[isg_sim_squad_service_tech]:online_offline_group
-faction = isg
-npc_random = sim_default_isg_mechanic
-npc_in_squad = 1,1
-always_arrived = true
-
-[isg_sim_squad_service_medic]:online_offline_group
-faction = isg
-npc_random = sim_default_isg_medic
 npc_in_squad = 1,1
 always_arrived = true

@@ -244,6 +244,7 @@ local function plain_sim_stalker_squad(squad)
 	return type(section) == "string"
 		and string.find(section, "_sim_squad_", 1, true) ~= nil
 		and string.find(section, "_sim_squad_service_", 1, true) == nil
+		and not section:match("_sim_squad_guard$")
 		and string.find(section, "_sim_squad_dead", 1, true) == nil
 end
 
@@ -457,6 +458,8 @@ local function has_prey_squad(squad, smart)
 end
 
 local function smart_is_base(smart)
+	local bases = rawget(_G, "zhopa2_bases")
+	if bases then return bases.is_base(smart) end
 	if not smart then
 		return false
 	end
@@ -687,6 +690,7 @@ end
 
 local function levels_for_options(options)
 	options = options or {}
+	if type(options.candidate_levels) == "table" then return options.candidate_levels end
 	local current_level = options.current_level or nil
 	local mode = options.level_mode or "current_or_nearby"
 	local neighbors = options.neighbors or (mode_needs_neighbors(mode) and M.nearby_levels(current_level) or nil)
@@ -727,6 +731,7 @@ local function smart_options_signature(squad, options, levels)
 		bool_key(options.skip_prior),
 		bool_key(options.exclude_current),
 		bool_key(options.base_populate_level_priority),
+		bool_key(options.service_roam),
 	}, "|")
 end
 
@@ -783,14 +788,100 @@ local function squad_member_id_set(squad)
 	return out
 end
 
+function M.active_actor_task_targets()
+	return cached_frame_value("active_actor_task_targets", function()
+		local manager = rawget(_G, "task_manager")
+		local actor = db and db.actor
+		if not (actor and manager and type(manager.get_task_manager) == "function") then return nil end
+		local ok, tm = pcall(manager.get_task_manager)
+		if not (ok and tm and type(tm.task_info) == "table") then return nil end
+		local targets = { ids = {}, areas = {} }
+		local function mark(id)
+			id = tonumber(id)
+			if not id or id <= 0 or id >= 65535 then return end
+			targets.ids[id] = true
+		end
+		local axr = rawget(_G, "axr_task_manager")
+		for id, task in pairs(tm.task_info) do
+			if task and (task.status == "normal" or task.status == "selected")
+				and task.forced_status ~= "fail" and task.forced_status ~= "complete" and not task.cancelled_by_actor
+			then
+				mark(task.current_target)
+				mark(axr and axr.bounties_by_id and axr.bounties_by_id[id])
+				local read, data = false, nil
+				if type(load_var) == "function" then read, data = pcall(load_var, actor, id) end
+				if read and type(data) == "table" then
+					mark(data.squad_id)
+					mark(data.target_squad_id)
+					mark(data.target_id)
+					mark(data.spy_id)
+					if task.target_functor == "top_10_task_target_functor" then
+						for i = 1, 10 do mark(data[i]) end
+					end
+				end
+				local area = { smarts = {}, enemies = true }
+				if task.target_functor == "assault_task_target_functor" or task.target_functor == "smart_control_task_target_functor" then
+					local smart_id = tonumber(task.current_target)
+					if SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] then area.smarts[smart_id] = true end
+					area.enemies = type(data) == "table" and data.is_enemy == true
+				end
+				if task.target_functor == "smart_control_task_target_functor" and type(parse_list) == "function" then
+					local parsed, names = pcall(parse_list, manager.task_ini, id, "status_functor_smarts")
+					if parsed and type(names) == "table" then
+						for _, name in ipairs(names) do
+							local smart = SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts_by_names[name]
+							if smart then area.smarts[smart.id] = true end
+						end
+					end
+				elseif task.target_functor == "dominance_task_target_functor" and manager.task_ini then
+					local read_level, name = pcall(function() return manager.task_ini:r_string_ex(id, "status_functor_level") end)
+					if read_level and name then area.level = name end
+				end
+				if (area.level or next(area.smarts)) and type(parse_list) == "function" then
+					local parsed, factions = pcall(parse_list, manager.task_ini, id, "status_functor_params")
+					if parsed and type(factions) == "table" and #factions > 0 then
+						area.factions = factions
+						targets.areas[#targets.areas + 1] = area
+					end
+				end
+			end
+		end
+		return targets
+	end)
+end
+
 function M.quest_protected_squad(squad)
 	if not (squad and squad.id) then
 		return false
 	end
 
 	local combat = rawget(_G, "sim_offline_combat")
-	if combat and type(combat.task_squads) == "table" and combat.task_squads[squad.id] then
-		return true, "task_squad"
+	local reserved = combat and type(combat.task_squads) == "table" and combat.task_squads[squad.id]
+	local targets = M.active_actor_task_targets()
+	if targets then
+		if targets.ids[squad.id] then return true, "active_actor_task" end
+		if reserved then
+			for _, area in ipairs(targets.areas) do
+				if area.smarts[squad.current_target_id] or (area.level and area.level == M.obj_level(squad)) then
+					local common_enemy = not area.enemies
+					for _, faction in ipairs(area.factions) do
+						if area.enemies and faction == squad.player_id then return true, "active_actor_task" end
+						if not area.enemies then
+							local relations = rawget(_G, "game_relations")
+							local ok, hostile = false, false
+							if relations and type(relations.is_factions_enemies) == "function" then
+								ok, hostile = pcall(relations.is_factions_enemies, squad.player_id, faction)
+							end
+							common_enemy = common_enemy and ok and hostile == true
+						end
+					end
+					if common_enemy then return true, "active_actor_task" end
+				end
+			end
+		end
+	elseif reserved then
+		-- Do not release a saved quest target while the task manager is still loading.
+		return true, "actor_tasks_pending"
 	end
 	return cached_frame_pair("quest_protected|" .. obj_cache_key(squad), function()
 		if get_object_story_id and get_object_story_id(squad.id) then
@@ -803,6 +894,7 @@ function M.quest_protected_squad(squad)
 		local member_ids = squad_member_id_set(squad)
 		local hostages = axr_task_manager and axr_task_manager.hostages_by_id or nil
 		for member_id in pairs(member_ids) do
+			if targets and targets.ids[member_id] then return true, "active_actor_task" end
 			if get_object_story_id and get_object_story_id(member_id) then
 				return true, "member_story"
 			end
@@ -811,7 +903,7 @@ function M.quest_protected_squad(squad)
 			end
 		end
 
-		local bounties = axr_task_manager and axr_task_manager.bounties_by_id or nil
+		local bounties = not targets and axr_task_manager and axr_task_manager.bounties_by_id or nil
 		for _, member_id in pairs(bounties or {}) do
 			local bounty_id = tonumber(member_id) or member_id
 			if member_ids[bounty_id] then
@@ -1408,6 +1500,106 @@ function M.smart_stalker_free_job_slots(squad, smart)
 	end)
 end
 
+function M.smart_settlement_capacity(squad, smart, shared_seen)
+	if not (squad and smart and smart.id) then return nil end
+	local capacity = tonumber(smart.max_population)
+	if not capacity then return nil end
+	capacity = math.max(0, math.floor(capacity))
+	local seen, used = shared_seen or {}, 0
+	local function count(other)
+		if not other or not other.id or other.id == squad.id or seen[other.id] then return end
+		if M.is_monster_squad(other) or squad_npc_count(other) <= 0 or other.zhopa2_service_filler == true or other.zhopa2_guard_filler == true then return end
+		-- Scripted residents have their own jobs, outside the roaming squad quota.
+		if other.action_condlist or other.random_targets or (get_object_story_id and get_object_story_id(other.id)) then return end
+		if other.scripted_target and not (other.zhopa2_task and other.zhopa2_target
+			and tostring(other.scripted_target) == tostring(other.zhopa2_target)) then return end
+		local section = squad_section_name(other) or ""
+		local service_role = section:match("_sim_squad_([%a]+)$")
+		if section:find("_sim_squad_service_", 1, true) or service_role == "guard" or service_role == "trader"
+			or service_role == "barman" or service_role == "mechanic" or service_role == "medic" then return end
+		local resident = squad_near_smart(other, smart)
+		if resident or (squad_targets_smart(other, smart) and not M.squad_relation_hostile(squad, other)) then seen[other.id] = true; used = used + 1 end
+	end
+	local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id]
+	for id in pairs(node and node.squads or {}) do count(alife_object and alife_object(id)) end
+	local levels = {M.obj_level(smart)}
+	local source_level = M.obj_level(squad)
+	if source_level and source_level ~= levels[1] then levels[#levels + 1] = source_level end
+	local targets = targeted_stalker_squads_on_levels(levels)
+	for _, other in ipairs(targets[tonumber(smart.id) or smart.id] or {}) do count(other) end
+	return capacity, math.max(0, capacity - used), squad_near_smart(squad, smart)
+end
+
+function M.service_base_roam_weight(squad, smart)
+	if not (squad and smart and smart.id) or M.is_monster_squad(squad) then return nil end
+	local svc = rawget(_G, "zhopa2_service_fillers")
+	if not (svc and type(svc.is_service_base) == "function" and svc.is_service_base(smart)) then return nil end
+	local sim_objects = rawget(_G, "simulation_objects")
+	if smart.disabled or smart.respawn_only_smart
+		or (sim_objects and sim_objects.available_by_id and sim_objects.available_by_id[smart.id] == false) then return 0 end
+	return cached_frame_value("service_roam|" .. tostring(squad.id) .. "|" .. tostring(smart.id), function()
+		if squad_npc_count(squad) <= 0 then return 0 end
+		local capacity, free = M.smart_settlement_capacity(squad, smart)
+		if not capacity then return nil end
+		if capacity <= 0 or free < 1 then return 0 end
+		local idx = index_mod()
+		local own = idx and idx.base_ownership and idx.base_ownership(smart)
+		if idx and idx.update_base_ownership and (not own or now_ms() - (tonumber(own.updated) or 0) >= 1000) then
+			own = idx.update_base_ownership(smart)
+		end
+		if not own or own.state == "unstable" then return 0 end
+		if own.state == "owned" and not faction_relation_rank(M.squad_relation_faction(squad),
+			relation_faction_aliases[tostring(own.owner)] or own.owner) then return 0 end
+        local bases = rawget(_G, "zhopa2_bases")
+        if bases then
+            local totals = cached_frame_value("base_capacity|" .. tostring(squad.id) .. "|" .. bases.key(smart), function()
+                local total_capacity, total_used, seen = 0, 0, {}
+                for _, part in ipairs(bases.members(smart)) do
+                    if not part.disabled and not part.respawn_only_smart
+                        and not (sim_objects and sim_objects.available_by_id and sim_objects.available_by_id[part.id] == false) then
+                        local cap, spare = M.smart_settlement_capacity(squad, part, seen)
+                        if cap then total_capacity = total_capacity + cap; total_used = total_used + cap - spare end
+                    end
+                end
+                return {capacity=total_capacity, free=math.max(0,total_capacity-total_used)}
+            end)
+            capacity, free = totals.capacity, totals.free
+            if capacity <= 0 then return 0 end
+        end
+		-- Empty = x4; quarter occupied = x2.5; half occupied or more = ordinary weight.
+		return 1 + 3 * math.max(0, math.min(1, 2 * free / capacity - 1))
+	end)
+end
+
+function M.pick_roam_smart(squad, candidates)
+	local selected, total = nil, 0
+	local bases = not M.is_monster_squad(squad) and rawget(_G, "zhopa2_bases")
+	local weighted, counts = {}, {}
+	for i = 1, #candidates do
+		local entry = candidates[i]
+		local smart = entry.smart or entry
+		local weight = M.service_base_roam_weight(squad, smart) or 1
+		local scoring = rawget(_G, "zhopa2_task_scoring")
+		if scoring and type(scoring.roam_population_modifier) == "function" then
+			weight = weight * scoring.roam_population_modifier(squad, M.obj_level(smart))
+		end
+		if scoring and type(scoring.roam_distance_modifier) == "function" then
+			weight = weight * scoring.roam_distance_modifier(entry.hops)
+		end
+        if weight > 0 then
+            local key = bases and bases.key(smart) or smart.id
+            counts[key] = (counts[key] or 0) + 1
+            weighted[#weighted+1] = {smart=smart, key=key, weight=weight}
+        end
+	end
+    for _, entry in ipairs(weighted) do
+        local weight = entry.weight / counts[entry.key]
+        total = total + weight
+        if math.random() * total < weight then selected = entry.smart end
+    end
+	return selected
+end
+
 local function base_camping_populate_score(squad, smart)
 	if not (squad and smart and smart.id) then
 		return nil
@@ -1417,9 +1609,8 @@ local function base_camping_populate_score(squad, smart)
 		if not relation_rank then
 			return nil
 		end
-		local free_slots = M.smart_stalker_free_job_slots(squad, smart)
-		local squad_size = squad_npc_count(squad)
-		if not free_slots or squad_size <= 0 or free_slots < squad_size then
+		local capacity, free_slots = M.smart_settlement_capacity(squad, smart)
+		if not capacity or not free_slots or squad_npc_count(squad) <= 0 or free_slots < 1 then
 			return nil
 		end
 		return relation_rank, free_slots
@@ -1970,6 +2161,13 @@ function M.valid_smart(squad, smart, opts)
 	if opts.exclude_current and smart.id == squad.smart_id then
 		return false
 	end
+	local bases = opts.service_roam and not M.is_monster_squad(squad) and rawget(_G, "zhopa2_bases")
+	if opts.exclude_current and bases and alife_object then
+		local current_id = tonumber(squad.smart_id)
+		-- Travelling/unregistered squads have no current smart; 65535 is the engine sentinel.
+		if current_id and current_id >= 0 and current_id < 65535
+			and bases.same(alife_object(current_id), smart) then return false end
+	end
 
 	local current_level = opts.current_level or M.obj_level(squad)
 	local target_level = M.obj_level(smart)
@@ -1991,14 +2189,17 @@ function M.valid_smart(squad, smart, opts)
 	if opts.safe_rest and not safe_rest_smart(squad, smart) then
 		return false
 	end
-	if opts.populate and smart_population(smart.id) >= (smart.max_population or 1) then
+	local service_weight = opts.service_roam and M.service_base_roam_weight(squad, smart) or nil
+	if service_weight == 0 then return false end
+	if not service_weight and opts.populate and smart_population(smart.id) >= (smart.max_population or 1) then
 		return false
 	end
 	if opts.has_prey and not has_prey_squad(squad, smart) then
 		return false
 	end
 
-	if not opts.skip_target_precondition and smart.target_precondition and not smart:target_precondition(squad, opts.ignore_population == true, opts.skip_props == true) then
+	-- Service settlement uses live ownership and job capacity, not the base's old faction props.
+	if not service_weight and not opts.skip_target_precondition and smart.target_precondition and not smart:target_precondition(squad, opts.ignore_population == true, opts.skip_props == true) then
 		return false
 	end
 	if not opts.skip_prior and smart.evaluate_prior and smart:evaluate_prior(squad) <= 0 then
@@ -2048,15 +2249,36 @@ function M.collect_smarts(squad, opts)
 	local signature = smart_options_signature(squad, options, levels) .. "|limit|" .. tostring(limit)
 
 	local cached = cached_frame_value("collect_smarts|" .. signature, function()
-		local out = {}
+		local out, seen_bases = {}, {}
+		local bases = options.service_roam and not M.is_monster_squad(squad) and rawget(_G, "zhopa2_bases")
 		local indexed = M.index_smarts_for_options(options, levels)
+		if bases then
+			-- Sample physical bases before the limit; extra members must not increase inclusion probability.
+			local buckets, keys = {}, {}
+			for _, smart in ipairs(indexed) do
+				local key = bases.key(smart)
+				if not buckets[key] then buckets[key] = {}; keys[#keys+1] = key end
+				buckets[key][#buckets[key]+1] = smart
+			end
+			while #keys > 0 and (limit == 0 or #out < limit) do
+				local members = buckets[table.remove(keys, math.random(#keys))]
+				local start = math.random(#members)
+				for offset = 0, #members - 1 do
+					local smart = members[((start + offset - 1) % #members) + 1]
+					if valid_smart_cached(squad, smart, options, signature) then out[#out+1] = smart; break end
+				end
+			end
+			return out
+		end
 		local count = #indexed
 		if limit > 0 and count > 0 then
 			local start = math.random(count)
 			for offset = 0, count - 1 do
 				local i = ((start + offset - 1) % count) + 1
 				local smart = indexed[i]
-				if valid_smart_cached(squad, smart, options, signature) then
+				local key = bases and bases.key(smart) or (smart and smart.id) or i
+                if not seen_bases[key] and valid_smart_cached(squad, smart, options, signature) then
+                    seen_bases[key] = true
 					out[#out + 1] = smart
 					if #out >= limit then
 						break
@@ -2066,7 +2288,9 @@ function M.collect_smarts(squad, opts)
 		else
 			for i = 1, count do
 				local smart = indexed[i]
-				if valid_smart_cached(squad, smart, options, signature) then
+				local key = bases and bases.key(smart) or (smart and smart.id) or i
+                if not seen_bases[key] and valid_smart_cached(squad, smart, options, signature) then
+                    seen_bases[key] = true
 					out[#out + 1] = smart
 				end
 			end
@@ -2079,8 +2303,70 @@ function M.collect_smarts(squad, opts)
 	return candidates
 end
 
+function M.roam_level_hops(squad)
+	local current = M.obj_level(squad)
+	if not current then return {} end
+	return cached_frame_value("roam_hops|" .. tostring(squad.id) .. "|" .. current, function()
+		local hops, queue = {[current] = 0}, {current}
+		local head = 1
+		local c = cfg()
+		-- The Zone graph is small; cap discovery to keep addon maps from making a decision unbounded.
+		while head <= #queue and head <= 64 do
+			local source = queue[head]
+			local neighbors = M.nearby_levels(source).direct_list or {}
+			for i = 1, #neighbors do
+				local target = neighbors[i]
+				local blocked = c and c.is_level_blacklisted_for_squad and c.is_level_blacklisted_for_squad(squad, target)
+				if not blocked and hops[target] == nil and #queue < 64 then
+					hops[target] = hops[source] + 1
+					queue[#queue + 1] = target
+				end
+			end
+			head = head + 1
+		end
+		return hops
+	end)
+end
+
+function M.collect_roam_smarts(squad, opts, limit)
+	local groups = {{}, {}, {}}
+	for name, hops in pairs(M.roam_level_hops(squad)) do
+		if hops > 0 or (opts.level_mode ~= "neighbor" and opts.level_mode ~= "nearby") then
+			local group = hops == 0 and 1 or hops == 1 and 2 or 3
+			groups[group][#groups[group] + 1] = {level = name, hops = hops}
+		end
+	end
+	local out = {}
+	local probes = 0
+	limit = math.max(1, math.min(8, tonumber(limit) or 3))
+	for round = 1, limit do
+		for group = 1, 3 do
+			local levels = groups[group]
+			while #levels > 0 and #out < limit and probes < 12 do
+				probes = probes + 1
+				local entry = table.remove(levels, math.random(#levels))
+				local options = {}
+				for key, value in pairs(opts) do options[key] = value end
+				options.level_mode, options.fallback_level_mode = "any", nil
+				options.current_level = M.obj_level(squad)
+				options.candidate_levels, options.limit = {entry.level}, 3
+				local smarts = M.collect_smarts(squad, options)
+				if #smarts > 0 then
+					out[#out + 1] = {smart = smarts[math.random(#smarts)], hops = entry.hops}
+					break
+				end
+			end
+		end
+		if #out >= limit then break end
+	end
+	return out
+end
+
 local function pick_smart_from_options(squad, opts)
 	local options = opts or {}
+	if options.service_roam and not M.is_monster_squad(squad) then
+		return M.pick_roam_smart(squad, M.collect_roam_smarts(squad, options, 3))
+	end
 	options.current_level = options.current_level or M.obj_level(squad)
 	ensure_option_neighbors(options)
 	local levels = levels_for_options(options)
@@ -2198,6 +2484,8 @@ function M.pick_balanced_rest_smart(squad, opts)
 		local smart = candidates[i]
 		local load = M.smart_rest_load(squad, smart)
 		local dist = squad_distance(squad, smart) or 100000000
+		local service_weight = M.service_base_roam_weight(squad, smart)
+		if service_weight and service_weight > 1 then dist = dist / service_weight end
 		if not best
 			or load < best_load
 			or (load == best_load and dist < best_dist)
@@ -2276,7 +2564,9 @@ function M.base_camping_populate_target_valid(squad, smart)
 	end
 	local targets = base_camping_target_map(squad, { smart })
 	local smart_id = tonumber(smart.id) or smart.id
-	return targets[smart_id] == true and base_camping_populate_score(squad, smart) ~= nil
+	local service_weight = M.service_base_roam_weight(squad, smart)
+	return (targets[smart_id] == true or (service_weight and service_weight > 0))
+		and base_camping_populate_score(squad, smart) ~= nil
 end
 
 function M.pick_final_prior_smart(squad, smart_or_list, opts)
@@ -2372,23 +2662,36 @@ function M.make_patrol(squad, kind, opts)
 		ignore_population = true,
 		exclude_current = true,
 		skip_prior = true,
+		service_roam = true,
 	})
 	if #candidates == 0 then
 		return nil
 	end
 
-	shuffle_table(candidates)
 	local ids = {}
-	for i = 1, #candidates do
-		ids[#ids + 1] = candidates[i].id
-		if #ids >= MAX_PATROL_POINTS then
-			break
+	while #candidates > 0 and #ids < MAX_PATROL_POINTS do
+		local smart = M.pick_roam_smart(squad, candidates)
+		if not smart then break end
+		ids[#ids + 1] = smart.id
+		for i = #candidates, 1, -1 do
+			if candidates[i].id == smart.id then table.remove(candidates, i); break end
 		end
 	end
 	if #ids == 0 then
 		return nil
 	end
 	return ids
+end
+
+function M.invalidate_roam_cache(squad)
+	-- Called on assignment/clear/patrol advance, so later decisions see incoming squads this frame.
+	frame_cache_key = nil
+	frame_cache = {}
+	M.base_populate_pick_cache = {}
+	local scoring = rawget(_G, "zhopa2_task_scoring")
+	if squad and scoring and type(scoring.on_squad_population_changed) == "function" then
+		scoring.on_squad_population_changed(squad)
+	end
 end
 
 function M.on_master_disable()

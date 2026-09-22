@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Z.H.O.P.A. ALIFE 2.2 function reference from Lua scripts."""
+"""Generate the Z.H.O.P.A. ALIFE 2.3 function reference from Lua scripts."""
 
 from __future__ import annotations
 
@@ -28,6 +28,13 @@ SCRIPT_HOOKS = {
 SCRIPT_ROLES = {
     "axr_trade_manager.script": "SISKI-derived vanilla trade-manager override that executes online squad trade and technician service through real smart customer jobs",
     "modxml_zhopa2_squad_dialogue.script": "DXML injection that registers the managed-squad information and travel dialogue without replacing the vanilla dialogue XML",
+    "zhopa2_bases.script": "configured compound-base membership and shared base identity",
+    "zhopa2_guard_refill.script": "defensive-post catalog, vacancy queue, permanent reservations, and native job pinning",
+    "zhopa2_service_recruitment.script": "shared existing-NPC transfer, service and guard records, rollback, save/load restoration, and release diagnostics",
+    "zhopa2_service_quests.script": "original workplace task identity, simulation task fallback, turn-in and cancellation",
+    "modxml_zhopa2_service_recruitment.script": "DXML dialogue adaptation for recruited service NPCs",
+    "modxml_zhopa2_service_quests.script": "DXML integration for service task dialogue branches",
+    "zhopa2_recruit_trader_probe.script": "compatibility facade for the production service recruitment module",
     "zhopa2_artifacts.script": "artifact target selection, real/virtual artifact handling, and online/offline pickup flow",
     "zhopa2_bootstrap.script": "master enable/disable lifecycle, cleanup coordination, and startup bridge into the runtime patch orchestrator",
     "zhopa2_cfg.script": "configuration, MCM defaults, faction aliases, and blacklist access",
@@ -42,7 +49,7 @@ SCRIPT_ROLES = {
     "zhopa2_perception.script": "target discovery, weighted candidate selection, path levels, and faction/blacklist checks",
     "zhopa2_revenge.script": "revenge event detection, responder selection, and actor hostility scope coordinated through server ids",
     "zhopa2_runtime_patches.script": "chain-friendly runtime patching of vanilla/pack scripts",
-    "zhopa2_service_fillers.script": "base service NPC detection, adoption, and filler spawning",
+    "zhopa2_service_fillers.script": "bounded vacancy queue, service presence detection, recruitment scheduling, and legacy filler migration",
     "zhopa2_smart_service_slot_doctor.script": "bounded observation and vanilla smart-job reselection for stalled trade/technician customer jobs",
     "zhopa2_story_north_migration.script": "story-gated northern migration task selection and recovery",
     "zhopa2_story_psy_watchdog.script": "story-gated psi-level squad conversion into zombied squads",
@@ -265,11 +272,11 @@ def generate(project_root: Path) -> str:
     debug_count = sum(len(parse_functions(path)) for path in debug_files)
 
     lines: list[str] = [
-        "# Z.H.O.P.A. ALIFE 2.2 Function Reference",
+        "# Z.H.O.P.A. ALIFE 2.3 Function Reference",
         "",
         "[README](../README_EN.md) | [Architecture document](zhopa_alife_2_design_document_en.md) | [Russian README](../README.md)",
         "",
-        "This document is generated from the current ZHOPA ALIFE 2.2 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
+        "This document is generated from the current ZHOPA ALIFE 2.3 Lua sources. It lists named function declarations and named function assignments found in runtime scripts under `gamedata/scripts` and diagnostic scripts under `debugscripts`. Anonymous inline closures, for example `pcall(function() ... end)`, are intentionally excluded because they have no standalone callable contract.",
         "",
         "Regenerate it with:",
         "",

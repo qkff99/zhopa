@@ -1,0 +1,98 @@
+-- Physical base membership. Definitions are immutable between game loads; ALife objects are not cached.
+local M = {}
+local definitions, by_name
+local CONFIG = "zhopa2_base_clusters.ltx"
+
+local function name_of(smart)
+    if not smart then return nil end
+    if type(smart.name) == "string" then return smart.name end
+    if type(smart.name) == "function" then
+        local ok, name = pcall(smart.name, smart)
+        if ok then return name end
+    end
+end
+
+local function load_config()
+    if definitions then return end
+    definitions, by_name = {}, {}
+    if not ini_file then return end
+    if getFS and not getFS():exist("$game_config$", CONFIG) then return end
+    local ok, ini = pcall(ini_file, CONFIG)
+    if not ok or not ini or not ini:section_exist("base_clusters") then return end
+    for i = 0, ini:line_count("base_clusters") - 1 do
+        local valid, key, value = ini:r_line("base_clusters", i, "", "")
+        if valid and type(key) == "string" and type(value) == "string" then
+            local members, seen = {}, {}
+            for name in value:gmatch("[%w_]+") do
+                if not seen[name] then members[#members+1], seen[name] = name, true end
+            end
+            local conflict = #members > 16
+            for _, name in ipairs(members) do if by_name[name] then conflict = true end end
+            if not conflict and #members > 0 then
+                definitions[key] = members
+                for _, name in ipairs(members) do by_name[name] = key end
+            elseif printf then printf("! ZHOPA2 bases | rejected invalid/overlapping group=%s", key) end
+        end
+    end
+end
+
+function M.group(smart)
+    load_config()
+    return by_name[name_of(smart)]
+end
+
+function M.key(smart)
+    return M.group(smart) or "smart:" .. tostring(smart and smart.id)
+end
+
+function M.is_base(smart)
+    if not smart or not smart.id then return false end
+    if M.group(smart) or (tonumber(smart.props and smart.props.base) or 0) > 0 then return true end
+    local objects = rawget(_G, "simulation_objects")
+    return objects ~= nil and objects.base_smarts ~= nil and objects.base_smarts[name_of(smart)] == true
+end
+
+function M.members(smart)
+    if not smart then return {} end
+    local group = M.group(smart)
+    local names = group and definitions[group]
+    local index = SIMBOARD and SIMBOARD.smarts_by_names
+    if not names or not index then return {smart} end
+    local out, seen = {}, {}
+    local p = rawget(_G, "zhopa2_perception")
+    local own_level = p and p.obj_level and p.obj_level(smart)
+    for _, name in ipairs(names) do
+        local member = index[name]
+        if member and member.id and not seen[member.id]
+            and (member.id == smart.id or (own_level and p.obj_level(member) == own_level)) then
+            out[#out+1], seen[member.id] = member, true
+        end
+    end
+    if not seen[smart.id] then out[#out+1] = smart end
+    return out
+end
+
+function M.same(a, b)
+    if not a or not b then return false end
+    if a.id == b.id then return true end
+    for _, member in ipairs(M.members(a)) do if member.id == b.id then return true end end
+    return false
+end
+
+function M.reset() definitions, by_name = nil, nil end
+
+function M.on_game_start()
+    if not RegisterScriptCallback then return end
+    if UnregisterScriptCallback then UnregisterScriptCallback("on_game_load", M.reset) end
+    RegisterScriptCallback("on_game_load", M.reset)
+end
+
+function M.on_master_disable()
+    if UnregisterScriptCallback then UnregisterScriptCallback("on_game_load", M.reset) end
+    M.reset()
+    return true
+end
+
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_bases = M
+return M

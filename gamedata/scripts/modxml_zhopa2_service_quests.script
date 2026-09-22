@@ -1,0 +1,20 @@
+local registered = false
+
+local function inject_dialog(path, xml)
+    if path ~= [[gameplay\dialogs.xml]] or not xml then return end
+    local existing = xml:query("dialog[id=zhopa2_service_task_cancel]")
+    if (type(is_not_empty) == "function" and is_not_empty(existing))
+        or (type(existing) == "table" and next(existing) ~= nil) then return end
+    xml:insertFromXMLString([[
+        <dialog id="zhopa2_service_task_cancel">
+            <precondition>zhopa2_service_quests.can_cancel</precondition>
+            <init_func>dialog_manager.dm_init_dynamic_task_cancel_dialog</init_func>
+        </dialog>
+    ]])
+end
+
+function on_xml_read()
+    if registered or not RegisterScriptCallback then return end
+    RegisterScriptCallback("on_xml_read", inject_dialog)
+    registered = true
+end

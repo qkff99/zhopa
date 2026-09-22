@@ -1213,6 +1213,12 @@ local function target_still_available(quest)
 	return false
 end
 
+function M.can_take_kind(squad, kind)
+	if kind ~= "occupy" then return true end
+	local t = tasks()
+	return t and type(t.task_enabled) == "function" and t.task_enabled(squad, "BASE_CAMPING") == true
+end
+
 local function quest_valid_for_executor(quest, squad)
 	local giver_ok, _, provider = giver_live(quest)
 	if not (giver_ok and compatible_with_provider(squad, provider)) then
@@ -1440,10 +1446,10 @@ local function objective_complete(quest, squad, reason)
 	if quest.kind == "occupy" then
 		local smart = alife_object(quest.objective_smart_id)
 		local t = tasks()
-		if not (smart and t and type(t.assign_base_camping_permanent) == "function") then
+		if not (smart and t and type(t.assign_base_camping) == "function") then
 			return terminal(quest, STATUS_FAILED, "occupation_target_invalid", true)
 		end
-		local ok, assigned = pcall(t.assign_base_camping_permanent, squad, smart, "npc_quest_occupation", {
+		local ok, assigned = pcall(t.assign_base_camping, squad, smart, "npc_quest_occupation", {
 			npc_quest_handoff_id = quest.id,
 		})
 		if not (ok and assigned == true) then
@@ -1646,7 +1652,7 @@ local function accept_available_at_giver(squad, giver_smart)
 	end
 	local key = rebind_available_giver_quests(giver_smart, provider) or giver_key(giver_smart, provider)
 	for _, quest in pairs(qstate.quests) do
-		if quest and quest.status == STATUS_AVAILABLE and quest.giver_key == key then
+		if quest and quest.status == STATUS_AVAILABLE and quest.giver_key == key and M.can_take_kind(squad, quest.kind) then
 			if quest_valid_for_executor(quest, squad) then
 				quest.status = STATUS_RESERVED
 				quest.phase = "GIVER_WAIT"
@@ -1998,6 +2004,8 @@ function M.build_choices(squad)
 						local allowed = quest_giver_allowed(squad, smart, level_name)
 						if not allowed then
 							stats.blacklisted = stats.blacklisted + 1
+						elseif not M.can_take_kind(squad, quest.kind) then
+							stats.invalid = stats.invalid + 1
 						elseif not quest_valid_for_executor(quest, squad) then
 							stats.invalid = stats.invalid + 1
 						else

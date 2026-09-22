@@ -1,0 +1,141 @@
+; ZHOPA compound-base membership. Membership approved by the user; used by ownership, settlement and recruitment.
+; Keys identify physical bases, values are exact smart names (never save-specific numeric IDs).
+; First member is only a display anchor, not an owner or a hardcoded service target.
+; Ungrouped smarts stay independent. Missing optional map members are skipped by the reader.
+; Membership does NOT enable a disabled smart, invent a service job or bypass story conditions.
+; New Levels: promzona, grimwood, poselok_ug. Story interiors are not grouped with surface bases.
+; Rostok perimeter and Barrier extent were approved with this membership.
+
+[base_clusters]
+
+; Кордон — Деревня новичков / Сидорович
+cordon_rookie_village = esc_smart_terrain_2_12
+
+; Кордон — Старая ферма, северная база
+cordon_north_farm = esc_smart_terrain_5_7
+
+; Кордон — Южный военный блокпост
+cordon_military_checkpoint = esc_smart_terrain_3_16
+
+; Болота — База Чистого Неба
+marsh_clear_sky = mar_smart_terrain_base
+
+; Болота — Лодочная станция
+marsh_boat_station = mar_smart_terrain_3_3
+
+; Болота — Руины деревни, место техника
+marsh_ruined_village = mar_smart_terrain_4_5
+
+; Болота — Землянка Доктора
+marsh_doctor = mar_smart_terrain_doc
+
+; Свалка — Депо / ангар
+garbage_depot = gar_smart_terrain_3_5
+
+; Свалка — Барахолка
+garbage_flea_market = gar_smart_terrain_6_3
+
+; Агропром — Военная база НИИ и два входа
+agroprom_military = agr_smart_terrain_1_6, agr_smart_terrain_1_6_near_1, agr_smart_terrain_1_6_near_2
+
+; Агропром — Завод, двор и проходы
+agroprom_factory = agr_smart_terrain_4_4, agr_smart_terrain_4_4_near_1, agr_smart_terrain_4_4_near_2, agr_smart_terrain_4_4_near_3
+
+; Тёмная Долина — База бандитов: ангар, фабрика, бар
+dark_valley_bandit = val_smart_terrain_7_3, val_smart_terrain_7_4, val_smart_terrain_7_5
+
+; Тёмная Лощина — Лесопилка
+darkscape_sawmill = ds2_domik_st
+
+; Росток / Бар — Бар, база Долга, казармы и две заставы
+rostok_hub = bar_visitors, bar_dolg_general, bar_dolg_bunker, bar_zastava, bar_zastava_2
+
+; Янтарь — Лагерь учёных
+yantar_scientists = yan_smart_terrain_6_4
+
+; Армейские Склады — База Свободы: основная часть, вход, кухня и бараки
+army_warehouses_freedom = mil_smart_terrain_7_7, mil_smart_terrain_7_8, mil_smart_terrain_7_10, mil_smart_terrain_7_12
+
+; Армейские Склады — Барьер и лагерь у вагончика
+army_warehouses_barrier = mil_smart_terrain_3_8, mil_smart_terrain_4_8
+
+; Мёртвый Город — Коопторг, база наёмников
+dead_city_mercs = cit_killers
+
+; Кладбище Техники — Восточный блокпост / база бандитов
+truck_cemetery_bandits = trc_sim_20
+
+; Рыжий Лес — Казармы в шахте, сервисный узел
+red_forest_mine = red_smart_terrain_3_2
+
+; Рыжий Лес — Копёр / лагерь у Лесника
+red_forest_forester = red_smart_terrain_4_2
+
+; Рыжий Лес — Мост в Лиманск / форпост Duty Expansion
+red_forest_bridge = red_smart_terrain_bridge
+
+; Радар — Выжигатель: проход, площадка и вход в лабораторию
+radar_brain_scorcher = rad_antenna_patrol, rad_antenna_monolith, rad_antenna_camper
+
+; Припять — ДК Энергетик и кинозал
+pripyat_palace = pri_monolith, mlr_terrain
+
+; Затон — Скадовск
+zaton_skadovsk = zat_stalker_base_smart
+
+; Затон — Станция переработки отходов
+zaton_waste_station = zat_b40_smart_terrain
+
+; Затон — Домик медика у кранов
+zaton_medic_house = zat_medic_home_smart
+
+; Юпитер — Янов
+jupiter_yanov = jup_a6
+
+; Юпитер — Бункер учёных
+jupiter_scientists = jup_b41
+
+; Юпитер — Склад контейнеров
+jupiter_container_depot = jup_a12
+
+; Юпитер — Восточный тоннель, торговец
+jupiter_east_tunnel = jup_b208
+
+; Окраины Припяти — Прачечная и отдельный смарт техника у входа
+outskirts_laundry = pri_a16, pri_a16_mlr_copy
+
+; Окраины Припяти — Магазин Книги
+outskirts_bookstore = pri_a18_smart_terrain
+
+; Окраины Припяти — КБО
+outskirts_kbo = kbo_terrain
+
+; Окраины Припяти — Детский сад, сюжетное место медика
+outskirts_kindergarten = pri_a25_smart_terrain
+
+; Заброшенный Госпиталь — Сервисный узел Госпиталя
+hospital_services = katacomb_smart_terrain
+
+; Путепровод Припять-1 — Холл, сервисное место
+underpass_hall = pas_b400_hall
+
+; New Levels — Промзона — Вокзал Южный
+nl_prom_station = prom_9
+
+; New Levels — Промзона — Лагерь у вагончика
+nl_prom_trailer = prom_11
+
+; New Levels — Промзона — Заправка
+nl_prom_gas_station = prom_12
+
+; New Levels — Мрачный лес — Блокпост
+nl_grim_checkpoint = grim_2
+
+; New Levels — Мрачный лес — Лагерь на главной дороге
+nl_grim_road_camp = grim_10
+
+; New Levels — Посёлок Южный — Аптека, сервисники Свободы
+nl_south_pharmacy = posug_16
+
+; New Levels — Посёлок Южный — Восточный частный сектор, торговец бандитов
+nl_south_bandits = posug_36

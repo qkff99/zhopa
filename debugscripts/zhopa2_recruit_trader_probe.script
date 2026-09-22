@@ -1,0 +1,5 @@
+-- Compatibility entry point. All operations belong to the production engine.
+local core = zhopa2_service_recruitment
+_G.zhopa2_recruit_trader_probe = core
+getfenv(1).on_game_start = core.on_game_start
+return core

@@ -15,6 +15,10 @@ npc_quests_enabled = true
 explore_enabled = true
 populate_enabled = true
 base_camping_enabled = true
+base_camping_timed_enabled = true
+base_camping_duration_game_hours = 6
+; Per-squad cooldown after a timed stay; LTX only. Set 0 to disable this cooldown.
+base_camping_cooldown_game_hours = 12
 patrol_enabled = true
 night_rest_enabled = true
 stalker_hunt_enabled = true
@@ -52,16 +56,20 @@ faction_lore_preferences_enabled = true
 target_sync_enabled = true
 online_intent_enforce_enabled = true
 
-rest_duration_game_hours = 0.25
-mutant_rest_duration_game_hours = 0.25
+rest_duration_game_hours = 1
+mutant_rest_duration_game_hours = 1
 patrol_duration_game_hours = 1
 mutant_patrol_duration_game_hours = 1
-rest_fallback_stay_min_sec = 900
-rest_fallback_stay_max_sec = 1800
+rest_fallback_stay_min_sec = 3600
+rest_fallback_stay_max_sec = 3600
 
 ; Base ownership is a core world-state system. It is intentionally not exposed in MCM.
 base_ownership_enabled = true
+; Recruit existing local NPCs; no emission spawning. Interval is real seconds per smart.
 service_filler_enabled = true
+; Permanent guards are recruited only after core service roles are filled across the base.
+guard_refill_enabled = true
+service_filler_interval_sec = 15
 ; Experimental online ground/corpse looting. Disabled by default; artifact task pickup remains independent.
 loot_enabled = false
 loot_corpse_detect_dist_m = 80

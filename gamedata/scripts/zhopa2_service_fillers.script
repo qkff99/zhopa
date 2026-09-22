@@ -1,7 +1,14 @@
 local M = {}
 
-local PENDING_FILL_TTL_MS = 10000
-local SMART_UPDATE_RECONCILE_INTERVAL_MS = 10000
+local QUEUE_KEY = "zhopa2_service_vacancies_v1"
+local TIMER_ID = "zhopa2_service_fillers"
+local SUPPORTED = {trader=true, tech=true, medic=true, barman=true}
+local queue_cursor
+local next_work = 0
+local migration_ids = {}
+local migration_failed = false
+local seeded = false
+local PRESENCE_CACHE_MS = 1000
 local SERVICE_TOKEN = "_sim_squad_service_"
 local ROLE_NONE = false
 
@@ -14,7 +21,6 @@ local ssub = string.sub
 
 M.marked_smarts = {}
 M.offline_service_jobs = {}
-M.pending_emission_fill = nil
 M.registered = false
 M.smart_update_reconcile_next = {}
 
@@ -86,6 +92,18 @@ local ROLE_SUFFIX = {
 }
 
 local JOB_ROLE_CACHE = {}
+local provider_catalogs = {}
+local presence_cache = {}
+local retiring_squads = {}
+
+local function economy_mod()
+	local economy = rawget(_G, "zhopa2_economy")
+	if not economy and require then
+		pcall(require, "zhopa2_economy")
+		economy = rawget(_G, "zhopa2_economy")
+	end
+	return economy
+end
 
 local function cfg_mod()
 	local cfg = rawget(_G, "zhopa2_cfg")
@@ -175,91 +193,10 @@ local function tg()
 	return time_global and time_global() or 0
 end
 
-local function safe_manager(module_name, getter_name)
-	local mod = rawget(_G, module_name)
-	if mod and type(mod[getter_name]) == "function" then
-		local ok, mgr = pcall(mod[getter_name])
-		if ok then
-			return mgr
-		end
-	end
-	return nil
-end
-
-local function manager_time_due(mgr, last_field)
-	if not (mgr and mgr.started ~= true and game and type(game.get_game_time) == "function") then
-		return false
-	end
-	local delta = tonumber(mgr._delta)
-	local last_time = mgr[last_field]
-	if not (delta and last_time) then
-		return false
-	end
-	local ok_now, now = pcall(game.get_game_time)
-	if not (ok_now and now and type(now.diffSec) == "function") then
-		return false
-	end
-	local ok_diff, diff = pcall(function()
-		return now:diffSec(last_time)
-	end)
-	diff = ok_diff and tonumber(diff) or nil
-	return diff ~= nil and diff >= delta
-end
-
-local function callback_from_start()
-	if not (debug and type(debug.getinfo) == "function") then
-		return false
-	end
-	for depth = 3, 10 do
-		local info = debug.getinfo(depth, "n")
-		if info and info.name == "start" then
-			return true
-		end
-	end
-	return false
-end
-
-local function surge_event_due()
-	local mgr = safe_manager("surge_manager", "get_surge_manager")
-	return manager_time_due(mgr, "last_surge_time") or (mgr and mgr.started ~= true and callback_from_start() == true)
-end
-
-local function psi_storm_event_due()
-	local mgr = safe_manager("psi_storm_manager", "get_psi_storm_manager")
-	return manager_time_due(mgr, "last_psi_storm_time") or (mgr and mgr.started ~= true and callback_from_start() == true)
-end
-
-local function queue_emission_fill(kind, due)
-	M.pending_emission_fill = {
-		kind = kind or "emission",
-		due = due == true,
-		until_tg = tg() + PENDING_FILL_TTL_MS,
-	}
-	return false
-end
-
-local function flush_pending_emission_fill()
-	local pending = M.pending_emission_fill
-	if type(pending) ~= "table" then
-		return 0
-	end
-	if surge_active() then
-		return 0
-	end
-	if pending.due == true then
-		M.pending_emission_fill = nil
-		local marked = M.fill_marked_smarts(pending.kind)
-		local scanned = M.reconcile_all_base_smarts(pending.kind)
-		return marked + scanned
-	end
-	if tg() > (tonumber(pending.until_tg) or 0) then
-		M.pending_emission_fill = nil
-	end
-	return 0
-end
-
 local function smart_is_base(smart)
-	return smart and smart.props and tonumber(smart.props.base) and tonumber(smart.props.base) > 0
+	local bases = rawget(_G, "zhopa2_bases")
+	if bases then return bases.is_base(smart) end
+	return smart and smart.id and smart.props and tonumber(smart.props.base) and tonumber(smart.props.base) > 0
 end
 
 local function smart_name(smart)
@@ -369,6 +306,12 @@ local function open_ini(path)
 	if not (ini_path and ini_file) then
 		return nil
 	end
+	if type(getFS) == "function" then
+		local ok_fs, fs = pcall(getFS)
+		if not (ok_fs and fs) then return nil end
+		local ok_exists, exists = pcall(function() return fs:exist("$game_config$", ini_path) end)
+		if not (ok_exists and exists) then return nil end
+	end
 	local ok, ini = pcall(ini_file, ini_path)
 	return ok and ini or nil
 end
@@ -470,25 +413,26 @@ local function classify_job_role(job_or_section, smart)
 	if type_(section) ~= "string" or section == "" then
 		return nil
 	end
-	local cached = JOB_ROLE_CACHE[section]
+	local cache_key = tostring(smart and smart.id or "-") .. ":" .. section
+	local cached = JOB_ROLE_CACHE[cache_key]
 	if cached ~= nil then
 		return cached ~= ROLE_NONE and cached or nil
 	end
 
 	local sec_l = slower(section)
 	if contains(sec_l, "beh_trade_job") or contains(sec_l, "beh_tech_job") or contains(sec_l, "beh_medic_job") then
-		JOB_ROLE_CACHE[section] = ROLE_NONE
+		JOB_ROLE_CACHE[cache_key] = ROLE_NONE
 		return nil
 	end
 	if contains(sec_l, "trade_slot") or contains(sec_l, "tech_slot") then
-		JOB_ROLE_CACHE[section] = ROLE_NONE
+		JOB_ROLE_CACHE[cache_key] = ROLE_NONE
 		return nil
 	end
 
 	local suitable = read_ini_string(job_or_section, "suitable", smart)
 	local suitable_l = type_(suitable) == "string" and slower(suitable) or nil
 	if contains(suitable_l, "npc_has_items_to_sell") or contains(suitable_l, "npc_has_tech_items") then
-		JOB_ROLE_CACHE[section] = ROLE_NONE
+		JOB_ROLE_CACHE[cache_key] = ROLE_NONE
 		return nil
 	end
 
@@ -514,30 +458,22 @@ local function classify_job_role(job_or_section, smart)
 				role = "tech"
 			elseif contains(sec_l, "medic") then
 				role = "medic"
-			elseif contains(sec_l, "barman") or contains(sec_l, "bar") then
-				role = "barman"
 			elseif contains(sec_l, "trader") or contains(sec_l, "trade") then
 				role = "trader"
+			elseif contains(sec_l, "barman") or contains(sec_l, "bar") then
+				role = "barman"
 			end
 		end
 	end
 
 	if not role then
-		if contains(sec_l, "guide") or contains(sec_l, "guider") then
-			role = "guide"
-		elseif contains(sec_l, "mechanic") or contains(sec_l, "tech") then
-			role = "tech"
-		elseif contains(sec_l, "medic") then
-			role = "medic"
-		elseif contains(sec_l, "barman") then
-			role = "barman"
-		elseif contains(sec_l, "trader") then
-			role = "trader"
-		end
+		-- Without service evidence, only a role suffix is meaningful: medic_bodyguard is not a medic.
+		local suffix = smatch(sec_l, "([%a]+)$")
+		role = normalize_role(suffix) or role_from_level_spot(suffix)
 	end
 
 	role = normalize_role(role)
-	JOB_ROLE_CACHE[section] = role or ROLE_NONE
+	JOB_ROLE_CACHE[cache_key] = role or ROLE_NONE
 	return role
 end
 
@@ -624,16 +560,6 @@ local function online_object(se_obj)
 	return nil
 end
 
-local function is_stalker_se(se_obj)
-	if not (se_obj and IsStalker) then
-		return false
-	end
-	local ok, cls = pcall(function()
-		return se_obj:clsid()
-	end)
-	return ok and IsStalker(nil, cls) == true
-end
-
 local function se_object_alive(se_obj)
 	if not se_obj then
 		return false
@@ -644,7 +570,7 @@ local function se_object_alive(se_obj)
 			return alive == true
 		end
 	end
-	return se_obj.id ~= nil
+	return nil
 end
 
 local function set_online_community(se_obj, engine_owner)
@@ -740,29 +666,76 @@ local function adopt_service_squad(squad, smart, engine_owner, section)
 	return pin_service_squad(squad, smart, section or squad.zhopa2_section_name)
 end
 
-local function adopt_service_member(se_obj, smart, engine_owner, section)
-	if not (se_obj and engine_owner) then
-		return false
-	end
-	set_online_community(se_obj, engine_owner)
-	local squad = service_squad_from_member(se_obj)
-	if squad then
-		adopt_service_squad(squad, smart, engine_owner, section or squad.zhopa2_section_name)
-	end
-	return true
-end
-
 local function add_offline_service_job(jobs, work_field, work_path)
 	work_field = trim(work_field)
 	work_path = trim(work_path)
 	if not (work_field and work_path) then
-		return
+		return false
 	end
 	local job_ini = open_ini("scripts\\" .. work_path)
+	if not job_ini then return false end
 	local section = "logic@" .. work_field
-	if ini_section_exists(job_ini, section) and read_ini_string_from(job_ini, section, "active") then
+	local checked, exists = pcall(job_ini.section_exist, job_ini, section)
+	if not checked then return false end
+	if not exists then return true end
+	local values = {}
+	for _, key in ipairs({"active", "suitable", "level_spot", "trade"}) do
+		local ok, present = pcall(job_ini.line_exist, job_ini, section, key)
+		if not ok then return false end
+		if present then
+			local read, value = pcall(job_ini.r_string, job_ini, section, key)
+			if not read or type(value) ~= "string" then return false end
+			values[key] = trim(value)
+		end
+	end
+	if values.active and values.active ~= "nil" then
 		jobs[#jobs + 1] = { section = section, ltx = job_ini, exclusive = true }
 	end
+	return true
+end
+
+local function replacement_provider_suitable(npc_info, job, smart)
+	local logic = rawget(_G, "xr_logic")
+	if not (type(job) == "table" and logic and type(logic.pick_section_from_condlist) == "function") then
+		return plain_unique_provider_suitable(job, smart)
+	end
+	local source = job.precondition_params and job.precondition_params.condlist
+	if type(source) ~= "table" and type(logic.parse_condlist) == "function" then
+		local raw = strip_inline_comment(read_ini_string(job, "suitable", smart))
+		if raw and raw ~= "" then source = logic.parse_condlist(smart, job.section, "suitable", raw) end
+	end
+	if type(source) ~= "table" then return false end
+	if job.zhopa2_service_condition_source ~= source then
+		local adapted, replaced, pure = {}, false, true
+		for i, clause in ipairs(source) do
+			if clause[3] and next(clause[3]) then pure = false end -- suitability fallback must not execute effects
+			local conditions = {}
+			for _, condition in ipairs(clause[2] or {}) do
+				if clause[1] == "true" and condition[1] == "check_npc_name" and condition[2] == 3 then
+					replaced = true
+				else
+					conditions[#conditions + 1] = condition
+				end
+			end
+			adapted[i] = {clause[1], conditions}
+		end
+		job.zhopa2_service_condition_source = source
+		job.zhopa2_service_conditions = replaced and pure and adapted or false
+	end
+	local adapted = job.zhopa2_service_conditions
+	if not adapted then return false end
+	for _, clause in ipairs(adapted) do
+		for _, condition in ipairs(clause[2]) do
+			if (condition[2] == 3 or condition[2] == 4)
+				and not (xr_conditions and type(xr_conditions[condition[1]]) == "function") then return false end
+		end
+	end
+	local ok, result = pcall(logic.pick_section_from_condlist, db and db.actor, npc_info.se_obj, adapted)
+	if not ok and not job.zhopa2_service_condition_error then
+		job.zhopa2_service_condition_error = true
+		if printf then printf("! ZHOPA2 service suitable | job=%s error=%s", tostring(job.section), tostring(result)) end
+	end
+	return ok and result == "true"
 end
 
 local function offline_service_jobs(smart)
@@ -777,24 +750,32 @@ local function offline_service_jobs(smart)
 
 	local jobs = {}
 	local ini = smart_ini(smart)
-	if ini_section_exists(ini, "exclusive") and type(ini.line_count) == "function" and type(ini.r_line) == "function" then
+	if not ini then
+		return nil
+	end
+	local checked, exclusive = pcall(ini.section_exist, ini, "exclusive")
+	if not checked then return nil end
+	if exclusive then
+		if type(ini.line_count) ~= "function" or type(ini.r_line) ~= "function" then return nil end
 		local ok_count, count = pcall(ini.line_count, ini, "exclusive")
-		count = ok_count and (tonumber(count) or 0) or 0
+		count = ok_count and tonumber(count) or nil
+		if not count or count < 0 then return nil end
 		for i = 0, count - 1 do
 			local ok_line, result, key, value = pcall(ini.r_line, ini, "exclusive", i, "", "")
-			if ok_line and result and key and value then
-				add_offline_service_job(jobs, key, value)
-			end
+			if not (ok_line and result and key and value) then return nil end
+			if not add_offline_service_job(jobs, key, value) then return nil end
 		end
 	else
 		local number = 1
 		while true do
 			local work_field = "work" .. tostring(number)
+			local ok, present = pcall(function()
+				return ini:section_exist("smart_terrain") and ini:line_exist("smart_terrain", work_field)
+			end)
+			if not ok then return nil end
+			if not present then break end
 			local work_path = read_ini_string_from(ini, "smart_terrain", work_field)
-			if not work_path then
-				break
-			end
-			add_offline_service_job(jobs, work_field, work_path)
+			if not add_offline_service_job(jobs, work_field, work_path) then return nil end
 			number = number + 1
 		end
 	end
@@ -803,96 +784,193 @@ local function offline_service_jobs(smart)
 	return jobs
 end
 
-local function collect_allowed_roles(smart)
-	local out = {}
+local function provider_catalog(smart)
 	local jobs = smart and smart.stalker_jobs or nil
 	if type(jobs) ~= "table" or #jobs == 0 then
 		jobs = offline_service_jobs(smart)
 	end
+	if type(jobs) ~= "table" then
+		return nil
+	end
+	local cached = provider_catalogs[smart.id]
+	if cached and cached.source == jobs then
+		return cached
+	end
+	local catalog = { source = jobs, allowed = {}, named = {}, roles_by_section = {} }
 	for i = 1, #jobs do
+		JOB_ROLE_CACHE[tostring(smart.id) .. ":" .. tostring(jobs[i].section)] = nil
 		local role = classify_job_role(jobs[i], smart)
 		if role then
-			out[role] = true
+			catalog.allowed[role] = true
+			catalog.roles_by_section[jobs[i].section] = role
+			local suitable = strip_inline_comment(read_ini_string(jobs[i], "suitable", smart)) or ""
+			for params in suitable:gmatch("=check_npc_name%s*%(([^)]*)%)") do
+				for pattern in params:gmatch("[^:%s,]+") do
+					catalog.named[#catalog.named + 1] = { role = role, pattern = pattern }
+				end
+			end
 		end
 	end
-	return out
+	provider_catalogs[smart.id] = catalog
+	presence_cache[smart.id] = nil
+	return catalog
 end
 
-local function role_from_member_info(info, smart)
-	local se_obj = type(info) == "table" and info.se_obj or nil
-	if not (is_stalker_se(se_obj) and se_object_alive(se_obj)) then
-		return nil, nil, nil
+local function squad_section(squad)
+	if not squad then return nil end
+	return squad.zhopa2_section_name
+		or (type(squad.section) == "string" and squad.section)
+		or (type(squad.section_name) == "string" and squad.section_name)
+end
+
+function M.is_service_base(smart)
+	if not (smart and smart.id and smart_is_base(smart)) then return false end
+	local bases = rawget(_G, "zhopa2_bases")
+	for _, part in ipairs(bases and bases.members(smart) or {smart}) do
+		local catalog = provider_catalog(part)
+		if catalog and next(catalog.allowed) then return true end
 	end
-	local role = type(info.job) == "table" and classify_job_role(info.job, smart) or nil
-	local squad = service_squad_from_member(se_obj)
-	local section = squad and squad.zhopa2_section_name or nil
-	if not role and section then
-		role = role_from_section(section)
+	return false
+end
+
+local function npc_role_marker(value)
+	return type(value) == "string" and normalize_role(smatch(slower(value), "_([%a]+)$")) or nil
+end
+
+local function native_provider_role(se_obj, smart, catalog)
+	local name = object_debug_name(se_obj)
+	for i = 1, #catalog.named do
+		local entry = catalog.named[i]
+		local ok, matched = pcall(sfind, name, entry.pattern)
+		if ok and matched then return entry.role end
 	end
-	if not role then
-		role = role_from_section(safe_npc_section(se_obj))
+	local section = safe_npc_section(se_obj)
+	local role = npc_role_marker(section)
+		or npc_role_marker(read_ini_string_from(ini_sys, section, "character_profile"))
+		or role_from_section(squad_section(service_squad_from_member(se_obj)))
+	if role then return role end
+	local saved = smart.load_info and smart.load_info[se_obj.id]
+	local saved_role = saved and catalog.roles_by_section[saved.job_section]
+	if saved_role then return saved_role end
+	for section, job_role in pairs(catalog.roles_by_section) do
+		if smart.npc_by_job_section and tonumber(smart.npc_by_job_section[section]) == tonumber(se_obj.id) then
+			return job_role
+		end
 	end
-	return role, squad, section
+	local info = smart.npc_info and smart.npc_info[se_obj.id]
+	return info and info.job and classify_job_role(info.job, smart) or nil
+end
+
+function M.invalidate_presence(smart)
+	local id = tonumber(smart and smart.id)
+	if id then
+		presence_cache[id] = nil
+		local economy = economy_mod()
+		if economy and type(economy.invalidate_live_trade_provider_at_smart) == "function" then
+			economy.invalidate_live_trade_provider_at_smart(smart)
+		end
+	end
+end
+
+local function collect_presence(smart, force)
+	local catalog = provider_catalog(smart)
+	if not catalog then return nil end
+	local cached = presence_cache[smart.id]
+	local now = tg()
+	if not force and cached and now >= cached.updated and now - cached.updated < PRESENCE_CACHE_MS then
+		return cached
+	end
+	local economy = economy_mod()
+	if not (economy and type(economy.service_npc_ids_at_smart) == "function") then return nil end
+	local ok, ids, complete = pcall(economy.service_npc_ids_at_smart, smart)
+	if not (ok and type(ids) == "table") then return nil end
+	local presence = { updated = now, complete = complete == true, native = {}, fillers = {}, existing = {}, count = 0 }
+	local seen = {}
+	local function visit(id)
+		id = tonumber(id)
+		if not id or seen[id] then return end
+		seen[id] = true
+		local obj = safe_squad_by_id(id)
+		if not obj then presence.complete = false; return end
+		local alive = se_object_alive(obj)
+		if alive == nil then presence.complete = false; return end
+		if not alive then return end
+		local squad = service_squad_from_member(obj)
+		local section = squad_section(squad)
+		local filler = zhop_service_squad(squad, section)
+		if filler and retiring_squads[squad.id] then return end
+		local role
+		if filler then
+			role = normalize_role(squad.zhopa2_service_role) or role_from_section(section)
+		else
+			role = native_provider_role(obj, smart, catalog)
+		end
+		if not role then return end
+		presence.existing[role] = true
+		presence.count = presence.count + 1
+		if filler then
+			presence.fillers[role] = presence.fillers[role] or {}
+			presence.fillers[role][squad.id] = true
+		else
+			presence.native[role] = presence.native[role] or {}
+			presence.native[role][id] = true
+		end
+	end
+	for i = 1, #ids do visit(ids[i]) end
+	-- A named original can be alive before smart registration, or away on another job.
+	if type(get_story_object_id) == "function" then
+		for i = 1, #catalog.named do
+			local resolved, id = pcall(get_story_object_id, catalog.named[i].pattern)
+			if not resolved then presence.complete = false
+			elseif id then visit(id) end
+		end
+	elseif #catalog.named > 0 then
+		presence.complete = false
+	end
+	presence_cache[smart.id] = presence
+	return presence
+end
+
+function M.service_job_block_reason(npc_info, smart)
+	if cfg_bool("enabled", true) ~= true then return nil end
+	local npc = npc_info and npc_info.se_obj
+	local squad = service_squad_from_member(npc)
+	if not zhop_service_squad(squad, squad_section(squad)) then return nil end
+	if retiring_squads[squad.id] then return "duplicate_retiring" end
+	if not (smart and smart.id) then return "presence_pending" end
+	local presence = collect_presence(smart)
+	if not (presence and presence.complete) then return "presence_pending" end
+	local role = normalize_role(squad.zhopa2_service_role) or role_from_section(squad_section(squad))
+	if presence.native[role] then return "native_present" end
+	for id in pairs(presence.fillers[role] or {}) do
+		if id < squad.id then return "duplicate_filler" end
+	end
+	return nil
 end
 
 function M.job_accepts_service_npc(npc_info, job, smart)
-	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true then
+	if cfg_bool("enabled", true) ~= true then
 		return false
 	end
 	if not (npc_info and job and smart) then
 		return false
 	end
-	if not plain_unique_provider_suitable(job, smart) then
-		return false
-	end
+	if M.service_job_block_reason(npc_info, smart) then return false end
 	local job_role = classify_job_role(job, smart)
 	if not job_role then
 		return false
 	end
-	local npc_role = role_from_member_info(npc_info, smart)
-	return npc_role == job_role
+	local squad = service_squad_from_member(npc_info.se_obj)
+	local npc_role = squad and (normalize_role(squad.zhopa2_service_role) or role_from_section(squad_section(squad)))
+	return npc_role == job_role and replacement_provider_suitable(npc_info, job, smart)
 end
 
-local function collect_existing_roles(smart, engine_owner)
-	local existing = {}
+local function collect_existing_roles(smart)
+	local presence = collect_presence(smart, true)
+	if not (presence and presence.complete) then return nil end
 	local native_existing = {}
-	local service_count = 0
-	if smart and type(smart.npc_info) == "table" then
-		for _, info in pairs(smart.npc_info) do
-			local role, squad, section = role_from_member_info(info, smart)
-			if role then
-				existing[role] = true
-				service_count = service_count + 1
-				if zhop_service_squad(squad, section) then
-					if engine_owner then
-						adopt_service_member(info.se_obj, smart, engine_owner, section)
-						adopt_service_squad(squad, smart, engine_owner, section)
-					end
-				else
-					native_existing[role] = true
-				end
-			end
-		end
-	end
-
-	local node = smart and smart.id and SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] or nil
-	if node and type(node.squads) == "table" then
-		for squad_id in pairs(node.squads) do
-			local squad = safe_squad_by_id(squad_id)
-			local section = squad and squad.zhopa2_section_name or nil
-			local role = role_from_section(section)
-			if role then
-				if not existing[role] then
-					service_count = service_count + 1
-				end
-				existing[role] = true
-				if engine_owner and zhop_service_squad(squad, section) then
-					adopt_service_squad(squad, smart, engine_owner, section)
-				end
-			end
-		end
-	end
-	return existing, service_count, native_existing
+	for role in pairs(presence.native) do native_existing[role] = true end
+	return presence.existing, presence.count, native_existing, presence
 end
 
 local function roles_from_set(set)
@@ -941,10 +1019,13 @@ local function clear_smart_fields(smart)
 end
 
 local function mark_smart(smart, engine_owner, missing, reason)
-	if not (smart and smart.id and engine_owner and type(missing) == "table") then
+	if not (smart and smart.id and type(missing) == "table") then
 		return false
 	end
+	local entry = M.marked_smarts[smart.id] or {}
 	M.marked_smarts[smart.id] = {
+		next_check = entry.next_check,
+		cursor = entry.cursor,
 		smart_id = smart.id,
 		smart_name = smart_name(smart),
 		owner = engine_owner,
@@ -962,8 +1043,9 @@ local function unmark_smart(smart)
 end
 
 local function resolve_ownership(smart, ownership)
-	if ownership and ownership.state == "owned" and ownership.owner then
-		return owner_engine(ownership.owner)
+	-- A fresh empty/contested snapshot must not fall back to a previous owner.
+	if ownership then
+		return ownership.state == "owned" and owner_engine(ownership.owner) or nil
 	end
 	if smart and smart.zhopa2_ownership_state == "owned" and smart.zhopa2_ownership_owner then
 		return owner_engine(smart.zhopa2_ownership_owner)
@@ -1005,26 +1087,7 @@ local function service_section(engine_owner, role)
 	return nil
 end
 
-local function spawn_service_squad(smart, engine_owner, role)
-	local section = service_section(engine_owner, role)
-	if not section then
-		return false, "section_missing"
-	end
-	if not (SIMBOARD and type(SIMBOARD.create_squad) == "function") then
-		return false, "simboard_missing"
-	end
-	local ok, squad = pcall(function()
-		return SIMBOARD:create_squad(smart, section)
-	end)
-	if not (ok and squad) then
-		return false, ok and "create_returned_nil" or "create_failed"
-	end
-	squad.zhopa2_section_name = section
-	adopt_service_squad(squad, smart, engine_owner, section)
-	return true, "spawned"
-end
-
-function M.reconcile_smart(smart, ownership, allow_spawn, reason)
+function M.reconcile_smart(smart, ownership, _, reason)
 	if not runtime_ready("service_reconcile") then
 		return false, "runtime_not_ready"
 	end
@@ -1036,16 +1099,19 @@ function M.reconcile_smart(smart, ownership, allow_spawn, reason)
 		unmark_smart(smart)
 		return false, "not_base"
 	end
-
-	local engine_owner = resolve_ownership(smart, ownership)
-	if not engine_owner then
+	local catalog = provider_catalog(smart)
+	if not catalog then return false, "service_jobs_pending" end
+	local allowed = {}
+	for role in pairs(catalog.allowed) do if SUPPORTED[role] then allowed[role] = true end end
+	if next(allowed) == nil then
 		clear_smart_fields(smart)
 		unmark_smart(smart)
-		return false, "no_owner"
+		return false, "no_service_slots"
 	end
+	local existing, service_count, native_existing, presence = collect_existing_roles(smart)
+	if not existing then return false, "presence_pending" end
 
-	local allowed = collect_allowed_roles(smart)
-	local existing, service_count, native_existing = collect_existing_roles(smart, engine_owner)
+	local engine_owner = resolve_ownership(smart, ownership)
 	local allowed_list = roles_from_set(allowed)
 	local missing = missing_roles(allowed, existing)
 	local needs_fill = #missing > 0
@@ -1057,48 +1123,13 @@ function M.reconcile_smart(smart, ownership, allow_spawn, reason)
 	smart.zhopa2_service_missing_roles = roles_string(missing)
 	smart.zhopa2_service_native_roles = roles_string(roles_from_set(native_existing))
 	smart.zhopa2_service_needs_fill = needs_fill
-	if #allowed_list == 0 then
-		unmark_smart(smart)
-		return false, "no_service_slots"
-	end
-
 	if needs_fill then
 		mark_smart(smart, engine_owner, missing, reason)
 	else
 		unmark_smart(smart)
 	end
 
-	if not (allow_spawn and needs_fill and cfg_bool("service_filler_enabled", true) == true) then
-		return needs_fill, needs_fill and "marked" or "already_filled"
-	end
-
-	local spawned = 0
-	local failures = {}
-	for i = 1, #missing do
-		local ok, detail = spawn_service_squad(smart, engine_owner, missing[i])
-		if ok then
-			spawned = spawned + 1
-		else
-			failures[#failures + 1] = tostring(missing[i]) .. ":" .. tostring(detail or "failed")
-		end
-	end
-
-	if spawned > 0 then
-		collect_existing_roles(smart, engine_owner)
-		unmark_smart(smart)
-		smart.zhopa2_service_needs_fill = false
-		smart.zhopa2_service_missing_count = 0
-		smart.zhopa2_service_missing_roles = "-"
-		local economy = rawget(_G, "zhopa2_economy")
-		if not economy and require then
-			pcall(require, "zhopa2_economy")
-			economy = rawget(_G, "zhopa2_economy")
-		end
-		if economy and type(economy.invalidate_live_trade_provider_at_smart) == "function" then
-			pcall(economy.invalidate_live_trade_provider_at_smart, smart)
-		end
-	end
-	return spawned > 0, spawned > 0 and "spawned" or tconcat(failures, ",")
+	return needs_fill, needs_fill and "marked" or "already_filled"
 end
 
 local function smart_by_id(id)
@@ -1113,199 +1144,403 @@ local function smart_by_id(id)
 	return safe_squad_by_id(id)
 end
 
-function M.fill_marked_smarts(reason)
-	if not runtime_ready("service_fill_marked") then
-		return 0, "runtime_not_ready"
-	end
-	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true then
-		return 0
-	end
-	local total = 0
-	local ids = {}
-	for smart_id in pairs(M.marked_smarts) do
-		ids[#ids + 1] = smart_id
-	end
-	for i = 1, #ids do
-		local smart = smart_by_id(ids[i])
-		if smart then
-			if M.reconcile_smart(smart, nil, true, reason or "emission") then
-				total = total + 1
-			end
-		else
-			M.marked_smarts[ids[i]] = nil
-		end
-	end
-	return total
+-- Queued events contain only scalar IDs/observations, never engine objects.
+local function interval_ms()
+    local cfg = cfg_mod()
+    local value = cfg and cfg.get_num and cfg.get_num("service_filler_interval_sec", 15) or 15
+    return math.max(5, math.min(120, tonumber(value) or 15)) * 1000
 end
 
+local function recruitment()
+    local core = rawget(_G, "zhopa2_service_recruitment")
+    if not core and require then pcall(require, "zhopa2_service_recruitment"); core = rawget(_G, "zhopa2_service_recruitment") end
+    return core
+end
+
+local function host_ready()
+    if type(IIsHost) == "function" then return IIsHost() == true end
+    return not rawget(_G, "GameManager")
+end
+
+local function enqueue(smart, reason)
+    if not smart_is_base(smart) then return end
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    if guards then guards.on_smart_update(smart) end
+    local id, now = tonumber(smart.id), tg()
+    if not id then return end
+    if not M.marked_smarts[id] then
+        M.marked_smarts[id] = {smart_id=id, confirmed=false, next_check=now, reason=reason}
+    end
+end
+
+function M.on_smart_update(smart)
+    local id, now = tonumber(smart and smart.id), tg()
+    if not id or not smart_is_base(smart) then return false end
+    if (M.smart_update_reconcile_next[id] or 0) > now then return false, "throttled" end
+    M.smart_update_reconcile_next[id] = now + interval_ms()
+    enqueue(smart, "smart_update")
+    return true, "queued"
+end
+
+-- Compatibility entry points enqueue only; emissions have no callbacks here.
+function M.fill_marked_smarts() return 0 end
 function M.reconcile_all_base_smarts(reason)
-	if not runtime_ready("service_fill_all") then
-		return 0, "runtime_not_ready"
-	end
-	if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true or surge_active() then
-		return 0
-	end
-	local ids = {}
-	for smart_id, node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do
-		smart_id = tonumber(smart_id)
-		if smart_id and smart_is_base(node and node.smrt) then
-			ids[#ids + 1] = smart_id
-		end
-	end
-	table.sort(ids)
-	local spawned = 0
-	local index = rawget(_G, "zhopa2_index")
-	for i = 1, #ids do
-		local smart = smart_by_id(ids[i])
-		if smart then
-			local ownership = nil
-			if index and type(index.update_base_ownership) == "function" then
-				local ok, updated = pcall(index.update_base_ownership, smart)
-				if ok then
-					ownership = updated
-				end
-			end
-			local filled, detail = M.reconcile_smart(smart, ownership, true, reason or "world_reconcile")
-			if filled then
-				spawned = spawned + 1
-			elseif detail ~= "already_filled" then
-				debug_service_guard(
-					"~ ZHOPA2 service filler | stage [world_reconcile_skip] smart [%s:%s] ownership [%s:%s] reason [%s]",
-					tostring(smart_name(smart) or "-"),
-					tostring(smart.id or "-"),
-					tostring(ownership and ownership.state or "-"),
-					tostring(ownership and ownership.owner or "-"),
-					tostring(detail or "unknown")
-				)
-			end
-		end
-	end
-	debug_service_guard("~ ZHOPA2 service filler | stage [world_reconcile] reason [%s] smarts [%s] spawned [%s]", tostring(reason or "world_reconcile"), tostring(#ids), tostring(spawned))
-	return spawned
-end
-
-function M.on_smart_update(smart, ownership)
-	if not runtime_ready("service_smart_update") then
-		return false, "runtime_not_ready"
-	end
-	if surge_active() then
-		return false, "surge_active"
-	end
-	local smart_id = tonumber(smart and smart.id)
-	local now = tg()
-	if smart_id and tonumber(M.smart_update_reconcile_next[smart_id] or 0) > now then
-		return false, "throttled"
-	end
-	if smart_id then
-		M.smart_update_reconcile_next[smart_id] = now + SMART_UPDATE_RECONCILE_INTERVAL_MS
-	end
-	return M.reconcile_smart(smart, ownership, false, "smart_update")
+    for _, node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do enqueue(node.smrt, reason or "initial_scan") end
+    return 0
 end
 
 function M.on_smart_unregister(smart)
-	local smart_id = tonumber(smart and smart.id)
-	if smart_id then
-		M.smart_update_reconcile_next[smart_id] = nil
-		M.offline_service_jobs[smart_id] = nil
-	end
-	unmark_smart(smart)
-	clear_smart_fields(smart)
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    if guards then guards.on_smart_unregister(smart) end
+    local id = tonumber(smart and smart.id)
+    if not id then return end
+    M.smart_update_reconcile_next[id], M.offline_service_jobs[id] = nil, nil
+    provider_catalogs[id], presence_cache[id], M.marked_smarts[id] = nil, nil, nil
+    clear_smart_fields(smart)
 end
 
-function M.on_before_surge(flags)
-	if not runtime_ready("service_before_surge") then
-		return false, "runtime_not_ready"
-	end
-	return queue_emission_fill("surge", surge_event_due())
+local function migrate_one(core)
+    -- Snapshot IDs once; bounded removals, re-resolve every object before touching it.
+    for _ = 1, 8 do
+        local id = next(migration_ids)
+        if not id then return end
+        migration_ids[id] = nil
+        local squad = safe_squad_by_id(id)
+        local section = squad_section(squad)
+        if not section and squad and type(squad.section_name) == "function" then
+            local ok, value = pcall(squad.section_name, squad)
+            if ok then section = value end
+        end
+        local role, owner = role_from_section(section)
+        -- Runtime flags are not serialized by vanilla squads; exact ZHOPA-owned sections survive load.
+        local legacy_section = role and owner and section == service_alias(owner) .. SERVICE_TOKEN .. role
+        if squad and (squad.zhopa2_service_filler == true or legacy_section) and not squad.zhopa2_service_recruited
+            and not core.owns_squad(squad) then
+            local smart = smart_by_id(squad.zhopa2_service_smart_id or squad.smart_id)
+            local ok, result = pcall(SIMBOARD.remove_squad, SIMBOARD, squad)
+            if not ok or result == false then
+                migration_failed = true
+                if printf then printf("! ZHOPA2 service migration | squad=%s removal_failed=%s", id, tostring(result)) end
+                -- Retry on the next load/registration, never loop over a rejected removal.
+            else
+                M.invalidate_presence(smart)
+                enqueue(smart, "legacy_removed")
+                if printf then printf("~ ZHOPA2 service migration | removed old spawned squad=%s", id) end
+            end
+            return -- at most one squad removal per timer tick
+        end
+    end
 end
 
-function M.on_before_psi_storm(flags)
-	if not runtime_ready("service_before_psi_storm") then
-		return false, "runtime_not_ready"
-	end
-	return queue_emission_fill("psi_storm", psi_storm_event_due())
+function M.process_queue()
+    if rawget(_G, "zhopa2_runtime_disabled") == true then return true end
+    local now = tg()
+    if now < next_work then return false end
+    next_work = now + 500
+    if not runtime_ready("service_queue") or not host_ready() or not (db and db.actor) then return false end
+    local core = recruitment()
+    if not (core and core.recruit and core.owns_squad) then return false end
+    if not seeded then
+        M.reconcile_all_base_smarts("load")
+        for id in pairs(SIMBOARD and SIMBOARD.squads or {}) do migration_ids[id] = true end
+        seeded = true
+    end
+    -- Migration is independent of the recruitment toggle; only confirmed old filler NPCs.
+    migrate_one(core)
+    if cfg_bool("enabled", true) ~= true or cfg_bool("service_filler_enabled", true) ~= true or surge_active() then return false end
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    if guards and guards.process_queue() then return false end
+    for _ = 1, 8 do
+        if queue_cursor and not M.marked_smarts[queue_cursor] then queue_cursor = nil end
+        local id, entry = next(M.marked_smarts, queue_cursor)
+        queue_cursor = id
+        if not id then return false end
+        if now >= (entry.next_check or 0) then
+            entry.next_check = now + interval_ms()
+            local smart = smart_by_id(id)
+            if not smart or not smart_is_base(smart) then M.marked_smarts[id] = nil; return false end
+            local perception = rawget(_G, "zhopa2_perception")
+            if not smart.online or not (level and perception and perception.obj_level(smart) == level.name()) then
+                local catalog = provider_catalogs[id]
+                if catalog then entry.known_roles = roles_string(roles_from_set(catalog.allowed)) end
+                entry.confirmed, entry.reason, entry.next_check = false, "offline_unconfirmed", now + 60000
+                return false
+            end
+            if core.is_reserved(smart) then entry.reason = "manual_test"; return false end
+            local ok, needs, reason = pcall(M.reconcile_smart, smart, nil, false, "queue")
+            local current = M.marked_smarts[id]
+            if not ok then
+                entry.reason, entry.next_check = tostring(needs), now + 60000
+                if printf then printf("! ZHOPA2 service queue | smart=%s error=%s", id, tostring(needs)) end
+                return false
+            end
+            if not current then return false end
+            current.confirmed, current.reason = reason == "marked" or reason == "already_filled", reason
+            if needs then
+                local roles = {}
+                for role in tostring(current.missing_roles or ""):gmatch("[%a]+") do if SUPPORTED[role] then roles[#roles+1] = role end end
+                if #roles > 0 then
+                    current.cursor = ((current.cursor or 0) % #roles) + 1
+                    local recruited, detail = core.recruit(id, roles[current.cursor])
+                    current.reason = recruited and "recruited" or tostring(detail or "waiting_donor")
+                    if recruited then M.invalidate_presence(smart) end
+                end
+            end
+            return false -- at most one smart and one NPC transaction per half-second tick
+        end
+    end
+    return false
 end
 
-function M.actor_on_update()
-	if not runtime_ready("service_actor_update") then
-		return false, "runtime_not_ready"
-	end
-	return flush_pending_emission_fill()
+local function timer_step()
+    local ok, done = pcall(M.process_queue)
+    if ResetTimeEvent then ResetTimeEvent(TIMER_ID, "queue", 0.5) end
+    if not ok and printf then printf("! ZHOPA2 service queue | timer_error=%s", tostring(done)) end
+    return ok and done == true
+end
+
+function M.actor_on_first_update()
+    if rawget(_G, "zhopa2_runtime_disabled") == true then return end
+    if RemoveTimeEvent then RemoveTimeEvent(TIMER_ID, "queue") end
+    if CreateTimeEvent then CreateTimeEvent(TIMER_ID, "queue", 0.5, timer_step) end
 end
 
 function M.on_game_load()
-	M.marked_smarts = {}
-	M.offline_service_jobs = {}
-	M.pending_emission_fill = nil
-	M.smart_update_reconcile_next = {}
+    queue_cursor, next_work, seeded = nil, 0, false
+    migration_ids = {}
+    M.offline_service_jobs, M.smart_update_reconcile_next = {}, {}
+    provider_catalogs, presence_cache, retiring_squads, JOB_ROLE_CACHE = {}, {}, {}, {}
+    for _, entry in pairs(M.marked_smarts) do entry.confirmed, entry.next_check = false, 0 end
 end
 
-local function server_entity_on_unregister(se_obj, type_name)
-	if type_name == "se_smart_terrain" then
-		M.on_smart_unregister(se_obj)
-	end
+local function save_state(data)
+    data[QUEUE_KEY] = M.marked_smarts
+end
+local function load_state(data)
+    M.marked_smarts = {}
+    local saved = data and data[QUEUE_KEY]
+    for id, entry in pairs(type(saved) == "table" and saved or {}) do
+        id = tonumber(id)
+        if id and id >= 0 and id < 65535 and type(entry) == "table" then
+            M.marked_smarts[id] = {smart_id=id, next_check=0, confirmed=false,
+                missing_roles=type(entry.missing_roles) == "string" and entry.missing_roles or nil,
+                known_roles=type(entry.known_roles) == "string" and entry.known_roles or nil,
+                owner=type(entry.owner) == "string" and entry.owner or nil,
+                cursor=tonumber(entry.cursor), reason="loaded_unconfirmed"}
+        end
+    end
+    M.on_game_load()
 end
 
+local function service_population_changed(squad, npc_or_smart, smart)
+    smart = smart or npc_or_smart
+    if not (smart and smart.props) then smart = squad and smart_by_id(squad.zhopa2_service_smart_id or squad.smart_id) end
+    if smart then
+        local bases = rawget(_G, "zhopa2_bases")
+        for _, part in ipairs(bases and bases.members(smart) or {smart}) do
+            M.invalidate_presence(part)
+            enqueue(part, "population_changed")
+        end
+    end
+end
+local function server_entity_on_register(obj, kind)
+    if kind == "se_stalker" or kind == "se_trader" then
+        local smart = obj and smart_by_id(obj.m_smart_terrain_id)
+        if smart then M.invalidate_presence(smart); enqueue(smart, "npc_registered") end
+    elseif kind == "sim_squad_scripted" and seeded and obj then
+        migration_ids[obj.id] = true
+    end
+end
+local function server_entity_on_unregister(obj, kind)
+    if kind == "se_smart_terrain" then M.on_smart_unregister(obj)
+    elseif kind == "se_stalker" or kind == "se_trader" then
+        local smart = obj and smart_by_id(obj.m_smart_terrain_id)
+        if smart then M.invalidate_presence(smart); enqueue(smart, "npc_unregistered") end
+    end
+end
+
+local CALLBACKS = {
+    actor_on_first_update=M.actor_on_first_update, on_game_load=M.on_game_load,
+    save_state=save_state, load_state=load_state,
+    server_entity_on_register=server_entity_on_register, server_entity_on_unregister=server_entity_on_unregister,
+    squad_on_enter_smart=service_population_changed, squad_on_leave_smart=service_population_changed,
+    squad_on_npc_creation=service_population_changed,
+}
 function M.on_game_start()
-	if rawget(_G, "zhopa2_runtime_disabled") == true then
-		return M.on_master_disable()
-	end
-	if not RegisterScriptCallback then
-		return
-	end
-	if UnregisterScriptCallback then
-		pcall(UnregisterScriptCallback, "on_before_surge", M.on_before_surge)
-		pcall(UnregisterScriptCallback, "on_before_psi_storm", M.on_before_psi_storm)
-		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
-		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
-		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
-	end
-	RegisterScriptCallback("on_before_surge", M.on_before_surge)
-	RegisterScriptCallback("on_before_psi_storm", M.on_before_psi_storm)
-	RegisterScriptCallback("actor_on_update", M.actor_on_update)
-	RegisterScriptCallback("on_game_load", M.on_game_load)
-	RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
-	M.registered = true
+    if not RegisterScriptCallback or rawget(_G, "zhopa2_runtime_disabled") == true then return end
+    for name, fn in pairs(CALLBACKS) do
+        if UnregisterScriptCallback then pcall(UnregisterScriptCallback, name, fn) end
+        RegisterScriptCallback(name, fn)
+    end
+    M.registered = true
+    if db and db.actor then M.actor_on_first_update() end
+end
+function M.on_master_disable()
+    if RemoveTimeEvent then RemoveTimeEvent(TIMER_ID, "queue") end
+    if UnregisterScriptCallback then for name, fn in pairs(CALLBACKS) do pcall(UnregisterScriptCallback, name, fn) end end
+    M.registered = false
+    local core = recruitment()
+    if core and core.on_master_disable then
+        local ok, detail = core.on_master_disable()
+        if not ok then return false, detail end
+    end
+    if core and core.owns_squad then
+        migration_ids, migration_failed = {}, false
+        for id in pairs(SIMBOARD and SIMBOARD.squads or {}) do migration_ids[id] = true end
+        while next(migration_ids) do migrate_one(core) end -- explicit master cleanup, outside simulation ticks
+        if migration_failed then return false, "legacy_service_cleanup_failed" end
+    end
+    seeded = false
+    return true
 end
 
-function M.on_master_disable()
-	if UnregisterScriptCallback then
-		pcall(UnregisterScriptCallback, "on_before_surge", M.on_before_surge)
-		pcall(UnregisterScriptCallback, "on_before_psi_storm", M.on_before_psi_storm)
-		pcall(UnregisterScriptCallback, "actor_on_update", M.actor_on_update)
-		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
-		pcall(UnregisterScriptCallback, "server_entity_on_unregister", server_entity_on_unregister)
+-- Shared data access for the independent recruitment probe and a future recruitment backend.
+function M.recruitment_snapshot(smart)
+	if not runtime_ready("service_recruitment") then return nil, "runtime_not_ready" end
+	if not (smart and smart.online and type(smart.stalker_jobs) == "table" and smart_is_base(smart)) then
+		return nil, "smart_not_online_base"
 	end
-	local remove = {}
-	local squads = SIMBOARD and SIMBOARD.squads
-	if type(squads) == "table" then
-		for id, stored in pairs(squads) do
-			local kind = type(stored)
-			local squad = (kind == "table" or kind == "userdata") and stored or safe_squad_by_id(id)
-			if zhop_service_squad(squad) then
-				remove[#remove + 1] = squad
+	local catalog, presence = provider_catalog(smart), collect_presence(smart, true)
+	if not (catalog and presence and presence.complete) then return nil, "presence_pending" end
+	local result, seen = {roles=roles_from_set(catalog.allowed), npcs={}, external_npcs={}}, {}
+	local function add(id, role)
+		local npc = safe_squad_by_id(id)
+		if npc and not seen[id] and se_object_alive(npc) == true then
+			seen[id] = true
+			local here = (smart.npc_info and smart.npc_info[id]) or tonumber(npc.m_smart_terrain_id) == tonumber(smart.id)
+			local list = here and result.npcs or result.external_npcs
+			list[#list+1] = {id=id, role=role, name=object_debug_name(npc), smart_id=tonumber(npc.m_smart_terrain_id)}
+		end
+	end
+	for role, set in pairs(presence.native) do for id in pairs(set) do add(id, role) end end
+	for role, set in pairs(presence.fillers) do
+		for id in pairs(set) do
+			local squad = safe_squad_by_id(id)
+			if squad then for member in squad:squad_members() do add(member.id, role) end end
+		end
+	end
+	table.sort(result.npcs, function(a,b) return a.id < b.id end)
+	table.sort(result.external_npcs, function(a,b) return a.id < b.id end)
+	return result
+end
+
+function M.service_job_character(smart, job)
+	local suitable = read_ini_string(job, "suitable", smart)
+	local name = type(suitable) == "string" and suitable:match("check_npc_name%(([%w_]+)%)")
+	if not name then return nil end
+	return read_ini_string_from(ini_sys, name, "character_profile") or name
+end
+
+function M.service_job_task_section(smart, job)
+	local section = read_ini_string(job, "task_section", smart)
+	if section and section ~= "" and section ~= "nil" then return section end
+	local suitable = read_ini_string(job, "suitable", smart)
+	-- Quest namespaces follow spawn sections/names, not visual character profiles.
+	return type(suitable) == "string" and suitable:match("check_npc_name%(([%w_]+)%)") or nil
+end
+
+function M.recruitment_context(smart, requested_role)
+	if not runtime_ready("service_recruitment") then return nil, "runtime_not_ready" end
+	if not (smart and smart.online == true and type(smart.stalker_jobs) == "table") then return nil, "smart_not_online" end
+	-- sim_avail controls roaming target selection, not the smart's existing service jobs.
+	if smart.disabled or smart.respawn_only_smart then
+		return nil, "smart_unavailable", {disabled=smart.disabled == true, respawn_only_smart=smart.respawn_only_smart == true}
+	end
+	if surge_active() then return nil, "surge_active" end
+	if not smart_is_base(smart) then return nil, "not_base" end
+	local index = rawget(_G, "zhopa2_index")
+	if not (index and type(index.update_base_ownership) == "function") then return nil, "ownership_api_missing" end
+	local ownership = index.update_base_ownership(smart)
+	local owner = ownership and ownership.state == "owned" and owner_engine(ownership.owner)
+	if not owner then return nil, "owner_not_stable" end
+	local presence = collect_presence(smart, true)
+	if not (presence and presence.complete) then return nil, "presence_pending" end
+	if requested_role ~= nil then
+		requested_role = normalize_role(requested_role)
+		if not requested_role then return nil, "unsupported_role" end
+	end
+	local roles = requested_role and {requested_role} or {"trader", "barman", "tech", "medic"}
+	for _, role in ipairs(roles) do
+		if role ~= "trader" and role ~= "barman" and role ~= "tech" and role ~= "medic" then return nil, "unsupported_role" end
+		if requested_role and presence.existing[role] then
+			local npc_id = next(presence.native[role] or {})
+			local squad_id = next(presence.fillers[role] or {})
+			return nil, "service_present", {role=role, npc_id=npc_id,
+				npc_name=npc_id and object_debug_name(safe_squad_by_id(npc_id)), squad_id=squad_id}
+		end
+		if not presence.existing[role] then
+			local blocked_section, blocked_id, unsupported_section
+			for _, job in ipairs(smart.stalker_jobs) do
+				if classify_job_role(job, smart) == role then
+					local occupant = smart.npc_by_job_section and smart.npc_by_job_section[job.section]
+					if not occupant then
+						local section = service_section(owner, role)
+						local trade = read_ini_string(job, "trade", smart)
+						if not section then return nil, "service_section_missing" end
+						if trade and trade ~= "" and trade ~= "nil" then
+							return {smart_id = smart.id, owner = owner, role = role, squad_section = section,
+								job = job, trade = trade, character = M.service_job_character(smart, job),
+									task_section = M.service_job_task_section(smart, job)}, "vacant"
+						end
+						-- A sleep/support slot must not mask another service job of the same role.
+						unsupported_section = job.section
+					else
+						blocked_section, blocked_id = job.section, occupant
+					end
+				end
+			end
+			if requested_role then
+				local occupant = blocked_id and safe_squad_by_id(blocked_id)
+				return nil, blocked_section and "service_job_occupied" or unsupported_section and "trade_config_missing" or "service_job_not_found",
+					{role=role, job=blocked_section or unsupported_section, occupant_id=blocked_id,
+					 occupant_name=occupant and object_debug_name(occupant),
+					 occupant_alive=occupant and se_object_alive(occupant)}
 			end
 		end
 	end
-	if SIMBOARD and type(SIMBOARD.remove_squad) == "function" then
-		for i = 1, #remove do
-			pcall(SIMBOARD.remove_squad, SIMBOARD, remove[i])
+	return nil, "no_confirmed_vacancy"
+end
+
+M.adopt_service_squad = adopt_service_squad
+M.recruitment_section = service_section
+
+function M.recruitment_service_factions(smart)
+	local bases = rawget(_G, "zhopa2_bases")
+	local result = {}
+	local function pending(part, cause, id, community)
+		return nil, "service_factions_pending [smart=" .. tostring(part and part.id)
+			.. "; cause=" .. cause .. "; id=" .. tostring(id) .. "; community=" .. tostring(community) .. "]"
+	end
+	for _, part in ipairs(bases and bases.members(smart) or {smart}) do
+		local catalog = provider_catalog(part)
+		if not catalog then return pending(part, "catalog") end
+		if next(catalog.allowed) then
+			local presence = collect_presence(part)
+			if not (presence and presence.complete) then return pending(part, "presence") end
+			for _, set in pairs(presence.fillers) do
+				for id in pairs(set) do
+					local squad = safe_squad_by_id(id)
+					local faction = squad and owner_engine(squad.player_id)
+					if not faction then return pending(part, "squad_faction", id, squad and squad.player_id) end
+					result[faction] = true
+				end
+			end
+			for _, set in pairs(presence.native) do
+				for id in pairs(set) do
+					local npc = safe_squad_by_id(id)
+					local ok, faction = false, nil
+					if npc and type(npc.community) == "function" then ok, faction = pcall(npc.community, npc) end
+					local squad = service_squad_from_member(npc)
+					local community = ok and faction or (squad and squad.player_id)
+					-- Native Barman/Sidorovich use trader: valid for relations, not a recruitment container faction.
+					faction = normalize_key(community) == "trader" and "trader" or owner_engine(community)
+					if not faction then return pending(part, "npc_community", id, community) end
+					result[faction] = true
+				end
+			end
 		end
 	end
-	local smarts = SIMBOARD and SIMBOARD.smarts
-	if type(smarts) == "table" then
-		for _, entry in pairs(smarts) do
-			local smart = entry and (entry.smrt or entry) or nil
-			clear_smart_fields(smart)
-		end
-	end
-	M.marked_smarts = {}
-	M.offline_service_jobs = {}
-	M.pending_emission_fill = nil
-	M.smart_update_reconcile_next = {}
-	M.registered = false
-	JOB_ROLE_CACHE = {}
-	return true
+	return result
 end
 
 function on_game_start()

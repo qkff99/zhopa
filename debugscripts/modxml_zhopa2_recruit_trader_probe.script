@@ -1,0 +1,4 @@
+-- Legacy DXML entry point. The production helper registers once.
+local core = modxml_zhopa2_service_recruitment
+for key, value in pairs(core) do getfenv(1)[key] = value end
+return core

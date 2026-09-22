@@ -1,0 +1,208 @@
+local M = {}
+local CANCEL_DIALOG = "zhopa2_service_task_cancel"
+local patches = {}
+local active = false
+local generation = 0
+
+local function service_squad(npc)
+    if not active or rawget(_G, "zhopa2_runtime_disabled") == true
+        or not (npc and db and db.actor and get_object_squad) then
+        return nil
+    end
+    local ok, squad = pcall(get_object_squad, npc)
+    if not (ok and squad) then return nil end
+    if squad.zhopa2_service_filler == true then return squad end
+    local section = squad.zhopa2_section_name or squad.section
+        or (type(squad.section_name) == "string" and squad.section_name)
+    if type(section) ~= "string" and type(squad.section_name) == "function" then
+        ok, section = pcall(squad.section_name, squad)
+        if not ok then return nil end
+    end
+    if type(section) == "string" and section:find("_sim_squad_service_", 1, true) then
+        return squad
+    end
+end
+
+local function owned(task, npc, squad)
+    local giver = task and tonumber(task.task_giver_id)
+    return giver ~= nil and (giver == npc:id() or giver == tonumber(squad.id))
+end
+
+local function task_info()
+    local tm = task_manager and task_manager.get_task_manager and task_manager.get_task_manager()
+    return tm and tm.task_info or {}
+end
+
+local function recruitment_task_section(npc)
+    local probe = rawget(_G, "zhopa2_service_recruitment") or rawget(_G, "zhopa2_recruit_trader_probe")
+    if probe and type(probe.service_task_section) == "function" then
+        local ok, section = pcall(probe.service_task_section, npc)
+        if ok and type(section) == "string" and section ~= "" then return section end
+    end
+end
+
+local function native_prefix(npc)
+    local recruited = recruitment_task_section(npc)
+    if recruited then return recruited .. "_task_" end
+    local st = db.storage and db.storage[npc:id()]
+    local section = st and st.ini and st.section_logic and st.ini:r_string_ex(st.section_logic, "task_section")
+    section = section or (npc:section() ~= "m_trader" and npc:section() or npc:name())
+    return section .. "_task_"
+end
+
+local function matching_tasks(manager, npc, squad, finished)
+    local result = {}
+    local actor = db and db.actor
+    if not actor then return result end
+    local prefix = native_prefix(npc)
+    -- Only the actor's active quests, on dialog/PDA requests; no world scan or saved state.
+    for id, task in pairs(task_info()) do
+        if type(id) == "string" and owned(task, npc, squad)
+            and (id:sub(1, #prefix) == prefix or id:sub(1, 16) == "simulation_task_")
+            and task.status ~= "fail" and task.status ~= "completed" then
+            local cfg = manager.CFG_CACHE and manager.CFG_CACHE[id]
+            local stage = tonumber(task.stage)
+            if cfg and stage and actor:get_task(id, true) then
+                local complete = tonumber(cfg.stage_complete) or (finished and 254 or 255)
+                local can_cancel = cfg.can_cancel == nil or cfg.can_cancel == true or cfg.can_cancel == "true"
+                if (finished and stage == complete) or (not finished and stage < complete and can_cancel) then
+                    result[#result + 1] = id
+                end
+            end
+        end
+    end
+    table.sort(result)
+    return result
+end
+
+local function wrap(manager, key, factory)
+    local original = manager[key]
+    if type(original) ~= "function" then return false end
+    local wrapper = factory(original)
+    patches[#patches + 1] = {owner = manager, key = key, original = original, wrapper = wrapper}
+    manager[key] = wrapper
+    return true
+end
+
+function M.install()
+    if not active or #patches > 0 then return end
+    local manager = axr_task_manager
+    if not (manager and type(manager.generate_available_tasks) == "function"
+        and type(manager.get_first_finished_task) == "function"
+        and type(manager.generate_ongoing_tasks) == "function") then
+        if printf then printf("! ZHOPA2 service quests | task manager unavailable") end
+        return
+    end
+    generation = generation + 1
+    local installed_generation = generation
+    wrap(manager, "generate_available_tasks", function(original)
+        return function(npc, is_sim, ...)
+            if generation ~= installed_generation then return original(npc, is_sim, ...) end
+            local result = original(npc, is_sim, ...)
+            if not is_sim and service_squad(npc) then
+                local section = recruitment_task_section(npc)
+                if section then
+                    local prefix, available, info = section .. "_task_", {}, task_info()
+                    -- Native task IDs retain toolkit progression, prerequisites and completion effects.
+                    for id in pairs(manager.CFG_CACHE or {}) do
+                        if type(id) == "string" and id:sub(1, #prefix) == prefix and info[id] == nil
+                            and xr_conditions.has_completed_task_prerequisites(nil, nil, {id}) then
+                            available[#available + 1] = id
+                        end
+                    end
+                    table.sort(available)
+                    manager.available_tasks[npc:id()] = available
+                end
+                local list = manager.available_tasks and manager.available_tasks[npc:id()]
+                if not (list and #list > 0) then
+                    return original(npc, true, ...)
+                end
+            end
+            return result
+        end
+    end)
+    wrap(manager, "get_first_finished_task", function(original)
+        return function(npc, is_sim, ...)
+            if generation ~= installed_generation then return original(npc, is_sim, ...) end
+            local id = original(npc, is_sim, ...)
+            local squad = service_squad(npc)
+            if not squad then return id end
+            if id and owned(task_info()[id], npc, squad) then return id end
+            -- Native lookup cannot see simulation_task_*; also reject another trader's native quest.
+            return matching_tasks(manager, npc, squad, true)[1]
+        end
+    end)
+    wrap(manager, "generate_ongoing_tasks", function(original)
+        return function(npc, is_sim, ...)
+            if generation ~= installed_generation then return original(npc, is_sim, ...) end
+            local result = original(npc, is_sim, ...)
+            local squad = service_squad(npc)
+            if not squad then return result end
+            local info = task_info()
+            local merged, seen = {}, {}
+            for _, id in ipairs(manager.ongoing_tasks[npc:id()] or {}) do
+                if owned(info[id], npc, squad) and not seen[id] then
+                    merged[#merged + 1], seen[id] = id, true
+                end
+            end
+            for _, id in ipairs(matching_tasks(manager, npc, squad, false)) do
+                if not seen[id] then merged[#merged + 1], seen[id] = id, true end
+            end
+            manager.ongoing_tasks[npc:id()] = merged
+            return result
+        end
+    end)
+end
+
+function M.can_cancel(a, b)
+    local npc = dialogs and dialogs.who_is_npc and dialogs.who_is_npc(a, b)
+    return service_squad(npc) ~= nil and dialogs.actor_has_ongoing_task(a, b) or false
+end
+
+local function add_cancel_dialog(character_id, list)
+    if not active or type(character_id) ~= "string" or not (list and list.add and list.has) then return end
+    local role = character_id:match("^sim_default_[%w_]+_([%a]+)$")
+    if role ~= "trader" and role ~= "mechanic" and role ~= "medic" and role ~= "barman" then return end
+    if not list:has(CANCEL_DIALOG) and not list:has("dm_ordered_task_cancel_dialog")
+        and not list:has("dm_sim_ordered_task_cancel_dialog") then
+        list:add(CANCEL_DIALOG)
+    end
+end
+
+function M.on_game_start()
+    if rawget(_G, "zhopa2_runtime_disabled") == true then return M.on_master_disable() end
+    if not RegisterScriptCallback then return false end
+    active = true
+    if UnregisterScriptCallback then
+        UnregisterScriptCallback("actor_on_first_update", M.install)
+        UnregisterScriptCallback("on_specific_character_dialog_list", add_cancel_dialog)
+    end
+    RegisterScriptCallback("actor_on_first_update", M.install)
+    RegisterScriptCallback("on_specific_character_dialog_list", add_cancel_dialog)
+    if db and db.actor then M.install() end
+    return true
+end
+
+function M.on_master_disable()
+    active = false
+    generation = generation + 1
+    if UnregisterScriptCallback then
+        UnregisterScriptCallback("actor_on_first_update", M.install)
+        UnregisterScriptCallback("on_specific_character_dialog_list", add_cancel_dialog)
+    end
+    for i = #patches, 1, -1 do
+        local patch = patches[i]
+        if patch.owner[patch.key] == patch.wrapper then
+            patch.owner[patch.key] = patch.original
+        end
+    end
+    patches = {}
+    return true
+end
+
+function on_game_start()
+    return M.on_game_start()
+end
+
+_G.zhopa2_service_quests = M
+return M

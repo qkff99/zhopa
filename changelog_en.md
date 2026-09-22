@@ -1,3 +1,24 @@
+# 2.3
+
+### General
+- Service Filler now assigns existing NPCs from local squads to vacant trader, technician, medic and cook/barman jobs. Its queue runs in small batches with an adjustable interval; service NPC spawning and replenishment after emissions have been removed.
+- Added Guard Refill (MCM, enabled by default): after all service roles across a base are filled, arriving NPCs permanently leave their squads to occupy vacant defensive posts.
+- Roaming tasks compare nearby and distant reachable levels. Less populated levels gain priority based on living stalkers and incoming squads; the allied bonus diminishes as population grows.
+- Default REST duration for stalkers and mutants is now 1 in-game hour; LTX, MCM and script defaults are consistent.
+- The player contributes their real faction to ownership of the nearest service base. Empty and sparsely populated service bases are more attractive to stalker roaming tasks, accounting for ownership, capacity and incoming squads.
+- BASE_CAMPING now has an optional timer, enabled by default for 6 hours. In packs such as GAMMA, low population multipliers make permanent base camping detrimental to activity across the Zone.
+
+### Fixes
+- Service Filler no longer treats sim_avail (simulation target eligibility) as service-job availability. Fixed blocked vacancies and donors in Redone compound bases.
+- Fixed BASE_CAMPING being blocked by a full quota: native scripted squads no longer consume roaming squad slots, and a squad already present at the base can become its garrison without an extra slot. The limit on attracting new squads remains in place.
+- The player still contributes to service-base ownership but no longer counts as a BASE_CAMPING garrison or blocks automatic squad settlement by being present.
+- Hardened offline Service Filler duplicate protection: saved service jobs and job-section owners are recognized; incomplete configs defer recruitment, and disabled jobs are not treated as vacant service slots.
+- Settlement and BASE_CAMPING use the same squad capacity online and offline. Unloaded job tables no longer exclude offline bases or change their weight.
+- Service NPCs now offer simulation tasks through conversation when no native jobs are available, accept tasks already taken from the PDA, and support cancellation. Turn-in and cancellation check the quest giver.
+- Fixed false Service Filler activation that spawned service NPCs despite original traders being present at the smart, took over their jobs, and left the replacements without a dialogue branch for turning in accepted tasks.
+- Fixed camp-clearing, bounty-hunting and other quests that could not target squads controlled by ZHOPA because of their scripted target.
+- Fixed section inheritance for ZHOPA service NPCs.
+
 # 2.2
 
 ### General

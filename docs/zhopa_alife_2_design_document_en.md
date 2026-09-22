@@ -1,12 +1,12 @@
-# Z.H.O.P.A. ALIFE 2.2: Architecture Design Document
+# Z.H.O.P.A. ALIFE 2.3: Architecture Design Document
 
 [README](../README_EN.md) | [Russian version](zhopa_alife_2_design_document.md) | [Function reference](zhopa_alife_2_function_reference_en.md)
 
-Full name: **Z.H.O.P.A. ALIFE 2.2 — Zone Hostile Operations & Population AI**.
+Full name: **Z.H.O.P.A. ALIFE 2.3 — Zone Hostile Operations & Population AI**.
 
-This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.2 architecture after the migration from full-file overrides to chain-friendly runtime patches.
+This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.3 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of August 26, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of September 22, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
@@ -16,11 +16,11 @@ This document follows the old ZHOPA design document format: it is an engineering
 | Interaction | `zhopa2_npc_quests`, `zhopa2_squad_dialogue`, `modxml_zhopa2_squad_dialogue` | Trader contracts, commander dialogue, destination cards, and joint travel |
 | Economy | `zhopa2_economy`, `axr_trade_manager`, `zhopa2_smart_service_slot_doctor` | Online/offline trade, customer jobs, and post-service recovery |
 | Items | `zhopa2_loot`, `zhopa2_artifacts` | Online pickup, virtual offline cargo, and artifact flow |
-| World and story | `zhopa2_service_fillers`, `zhopa2_revenge`, `zhopa2_story_*` | Base ownership, services, revenge, and story events |
+| World and story | `zhopa2_bases`, `zhopa2_service_fillers`, `zhopa2_service_recruitment`, `zhopa2_guard_refill`, `zhopa2_service_quests`, `zhopa2_revenge`, `zhopa2_story_*` | Base ownership, services, revenge, and story events |
 
 ## 1. Purpose
 
-ZHOPA ALIFE 2.2 does not build a separate ALife layer on top of Anomaly. It is a motive, task, consequence and economy layer integrated into vanilla SIMBOARD, `smart_terrain`, `sim_squad_scripted`, `xr_gather_items` and related callback points.
+ZHOPA ALIFE 2.3 does not build a separate ALife layer on top of Anomaly. It is a motive, task, consequence and economy layer integrated into vanilla SIMBOARD, `smart_terrain`, `sim_squad_scripted`, `xr_gather_items` and related callback points.
 
 Vanilla still owns:
 
@@ -30,7 +30,7 @@ Vanilla still owns:
 - pathfinding and concrete NPC animation life inside a smart;
 - ordinary combat behavior.
 
-ZHOPA ALIFE 2.2 owns:
+ZHOPA ALIFE 2.3 owns:
 
 - why a squad chooses the next target;
 - which tasks are available for stalkers and mutants;
@@ -60,6 +60,7 @@ Entry points:
 
 Runtime modules:
 
+- `zhopa2_bases`
 - `zhopa2_index`
 - `zhopa2_topology`
 - `zhopa2_task_scoring`
@@ -67,7 +68,10 @@ Runtime modules:
 - `zhopa2_economy`
 - `zhopa2_smart_service_slot_doctor`
 - `zhopa2_revenge`
+- `zhopa2_service_recruitment`
 - `zhopa2_service_fillers`
+- `zhopa2_guard_refill`
+- `zhopa2_service_quests`
 - `zhopa2_artifacts`
 - `zhopa2_story_psy_watchdog`
 - `zhopa2_story_north_migration`
@@ -95,7 +99,7 @@ The MCM master switch is a runtime transition rather than a passive config gate.
 
 1. Sets the global hard gate before any cleanup begins.
 2. Stops module-owned work in dependency order and unregisters module callbacks.
-3. Cancels managed squad tasks, clears ZHOPA squad/storage/smart fields and removes service squads created by ZHOPA.
+3. Cancels managed squad tasks, clears ZHOPA squad/storage/smart fields and returns recruits to ordinary squads and removes legacy spawned service squads.
 4. Restores chain-friendly runtime patches only when the current function is still the wrapper installed by ZHOPA. A later foreign wrapper is never overwritten.
 5. Keeps only the MCM option-change listener alive so the addon can be enabled again without reloading.
 
@@ -254,6 +258,8 @@ Shared selection and validation layer:
 
 Perception must not perform unbounded world scans in hot paths. It should consume candidates from `zhopa2_index` and topology.
 
+Actor-target protection is derived once per frame from active `task_manager.task_info` records, current markers and saved quest targets. Historical `sim_offline_combat.task_squads` or bounty entries left by previews/cancellation do not independently block management. Area quests additionally match the smart/level and target factions. While the task manager is unavailable during loading, marked targets retain a conservative guard. OCS-owned data is never modified; story NPC and hostage protection remains independent.
+
 ### 4.5 `zhopa2_topology`
 
 Tracks level adjacency:
@@ -286,6 +292,7 @@ Rules:
 Current patch anchors:
 
 - `sim_squad_scripted` — squad lifecycle, ZHOPA task update, state read/write, scripted target adapter;
+- `tasks_assault`, `tasks_smart_control`, `tasks_dominance`, `xr_conditions` — scoped actor-quest target compatibility: selection and status checks ignore only an ordinary squad's ZHOPA-owned scripted target. Story squads, service NPCs, companions and hostages retain native behavior. Squad fields are untouched; the context is restored on errors and does not apply during movement updates;
 - `sim_board` — squad/smart registration facts and safety wrappers;
 - `smart_terrain` — smart update, arrival facts, ownership, service filler hooks;
 - `bind_anomaly_zone` — artifact spawn/take/destroy registration;
@@ -373,6 +380,16 @@ Blacklists must be respected during selection, active task validation, retargeti
 
 `BASE_CAMPING` keeps one managed squad attached to a base through dynamic ownership. It is not a random weighted roam task.
 
+Automatic selection uses the same non-interruptible-task list as camping assignment, so a nearby hunter or other ineligible candidate cannot block a valid squad farther away. Indirect assignments, including `POPULATE` arrival and camping return, honor current global/faction task toggles. A zero weight alone does not prohibit forced or resumed actions. Generic `resume_task` reports success and clears its snapshot only after confirmed assignment; rejection returns `false` and preserves retry data.
+
+Ordinary base filling, `POPULATE` arrival and `occupy` completion use the shared `assign_base_camping`. `base_camping_timed_enabled` controls the mode (default `true`); `base_camping_duration_game_hours` controls duration (default `6`, range 0.25–72 in-game hours). Both settings are available in LTX and the MCM tasks tab, directly below the base-camping toggle, and apply to all factions and mutants. Disabling makes current and new stays permanent. Enabling starts a fresh timer of the selected duration for permanent garrisons. Changing hours affects new stays without resetting an ongoing remaining timer.
+
+The timer starts after arrival. Its start is stored in `zhopa2_started`, independently of diagnostic reasons, so trading cannot restart it. Interrupted camping resumes its remaining duration. Expiry prevents that smart from automatically pulling the same squad back until it moves beyond 50 meters or changes level. Only this squad–smart pair is blocked; other candidates remain eligible. One ID, `zhopa2_base_camping_release_smart`, survives save/load and clears on departure or master purge.
+
+Completing a timed stay starts an individual squad cooldown on `BASE_CAMPING` at every base. `base_camping_cooldown_game_hours = 12` is LTX-only; `0` disables the time cooldown but not the previous base's 50-meter departure guard. Its start is stored in `zhopa2_base_camping_cooldown_started` as game time through native `w_CTime`/`r_CTime`; level transitions, online/offline switching and save/load do not restart it. Shared eligibility blocks base pulls, `POPULATE` conversion and taking new `occupy` work. An unavailable `occupy` contract is skipped only for that executor, not deleted from the shared pool. Interrupted or permanent stays do not start the cooldown; expiry uses the current LTX value.
+
+When a moving squad is intercepted, its `EXPLORE`, `POPULATE`, `PATROL`, `TRADE` or `ARTEFACT` task is stored separately in `zhopa2_base_camping_return`: one string snapshot of the task, target, remaining duration, patrol and artifact data. Night rest and save/load preserve it. Camping completion resumes it through normal assignment, rechecking the target, blacklists and artifact reservation; otherwise it falls back to ordinary rest. Stationary squads and completed `occupy` contracts create no return task. Squad serialization uses version 19 with 49 fields; older versions default missing fields to nil.
+
 `PATROL` builds a short route through safe smarts and completes by route index or timer.
 
 `NIGHT_REST` interrupts stalkers at night, stores resumable state, and resumes the previous task if it is still valid.
@@ -395,7 +412,7 @@ Blacklists must be respected during selection, active task validation, retargeti
 
 Online interaction uses a real trade customer job only for approach and animation. `axr_trade_manager` recognizes the quest token and completes the service phase before monetary trade; path/intent state is then cleared, the NPC immediately receives `select_npc_job`, and the service doctor remains a fallback. Offline or unsafe online preparation uses a one-minute smart-level fallback.
 
-Documents and packages are real ZHOPA-specific sections. Online, the commander picks the document from the top of its backpack through pickup animation, while a delivery package is issued into commander inventory during the giver service phase; offline, the equivalent server transfer completes the phase. A reward is added exactly once to `zhopa2_virtual_money`. `clear` returns for reporting, `occupy` transitions the winner into permanent `BASE_CAMPING`, `hunt` follows the target squad, and `delivery` carries a selected package between compatible traders.
+Documents and packages are real ZHOPA-specific sections. Online, the commander picks the document from the top of its backpack through pickup animation, while a delivery package is issued into commander inventory during the giver service phase; offline, the equivalent server transfer completes the phase. A reward is added exactly once to `zhopa2_virtual_money`. `clear` returns for reporting, `occupy` transitions the winner into `BASE_CAMPING` using the shared mode and duration settings, `hunt` follows the target squad, and `delivery` carries a selected package between compatible traders.
 
 ### 6.5 Commander dialogue and joint travel
 
@@ -553,18 +570,17 @@ Rules:
 
 ## 11. Service NPCs and Dynamic Ownership
 
-Dynamic base ownership is part of the core model. It tracks who effectively owns a base smart from real squad presence and faction compatibility.
+Dynamic ownership covers the whole compound base and one vote from the local player's actual faction. `zhopa2_service_fillers` queues trader, technician, medic and cook/barman vacancies; guides are not supported yet. Smart updates and population events refresh the queue. `zhopa2_service_recruitment` owns the shared existing-NPC transfer, load restoration and rollback. Production recruitment creates no NPCs and is not triggered by emissions.
 
-`zhopa2_service_fillers` uses ownership to place or maintain service roles:
+`service_filler_enabled` controls the system; `service_filler_interval_sec` sets the retry interval (15 real seconds by default). Services and guards share a 0.5-second timer: up to eight queue entries are examined, with at most one smart processed/appointment made per step. Catalogs and presence are cached; vacancies are rechecked before transfer. Offline entries remain unconfirmed until the level and job tables load; incomplete data defers recruitment.
 
-- trader;
-- medic;
-- mechanic;
-- other service job candidates configured by smart/base rules.
+Eligible owner-faction donors across the whole base have priority, followed by factions neutral or allied to the owner and existing services and guards. Relations are checked in both directions. The NPC must be alive, online and physically near a member smart; its registration may belong to a neighboring smart. Story, quest and companion NPCs remain protected. Donor faction, ID and inventory are retained. Only an empty squad container is created; one NPC is detached while remaining members continue simulation. A singleton can also donate; its empty source squad is removed after successful transfer.
 
-Service fillers must not fight the smart job system every frame. They should assign or repair service logic through bounded events and avoid per-tick job spam.
+The original workplace supplies the service profile, dialogue, stock and tasks. `zhopa2_service_quests` supports task offers, turn-in and cancellation with giver checks; DXML modules adapt branches only for recruited services. Lua replenishes trade funds, while GAMMA repair restrictions remain respected. Unknown or unconfirmed jobs are skipped; named NPCs without a suitable native job are not automatically replaced.
 
-After an emission or psi storm, the filler runs a bounded world-reconciliation queue that also services offline levels. Live ALife NPCs determine whether a provider exists and are cached; static smart configuration only describes available jobs and is not proof that an old trader is still alive.
+Migration removes services spawned by the old filler, preserving originals and existing recruits. Recruitment records contain serializable data only (limit 2048), including the source smart for rollback. Disabling an individual option stops new appointments; the ZHOPA master switch returns living recruited services and guards to ordinary squads, including offline recruits.
+
+Read-only diagnostics `zhopa2_service_recruitment.audit_level()` and the compatible alias `zhopa2_recruit_trader_probe.audit_level()` ship in the release. `test_smart()` is a separate destructive test command: it kills services and creates ordinary donor squads, then uses the same recruitment mechanism. Guard diagnostics are available through `zhopa2_guard_refill.audit_level()`.
 
 `zhopa2_smart_service_slot_doctor` handles visitors, not providers, in trade/tech customer jobs. It recognizes customer jobs by section name or their `suitable` condition, waits for confirmed completion/stall, and clears only the completed intent. Recovery goes through vanilla `smart:select_npc_job(npc_info, true)`; direct `state_mgr` resets, forced `idle`, and vertex teleporting are forbidden.
 
@@ -600,7 +616,7 @@ Save safety rules:
 
 The master switch provides bounded ZHOPA2 uninstall preparation for the currently loaded world. The supported procedure is to load the save with the addon enabled, disable it in MCM, wait for successful cleanup, create a new manual save, exit the game, and only then remove the addon. A cleanup error blocks safe removal.
 
-Cleanup covers ZHOPA tasks and fields, the global NPC-quest pool, temporary service/travel tables, script storage, generated service squads, callbacks, indexes, debug markers and restorable monkey patches. It does not reverse deaths, spawned or collected objects, completed trade, zombification, migration or changes owned by another addon. It is not a SISKI/ZHOPA1 save migration system; old-save compatibility remains non-destructive and best-effort.
+Cleanup covers ZHOPA tasks and fields, the global NPC-quest pool, temporary service/travel tables, script storage, recruitment rollback and legacy spawned service squads, callbacks, indexes, debug markers and restorable monkey patches. It does not reverse deaths, spawned or collected objects, completed trade, zombification, migration or changes owned by another addon. It is not a SISKI/ZHOPA1 save migration system; old-save compatibility remains non-destructive and best-effort.
 
 ## 14. Debug and Diagnostics
 
@@ -685,3 +701,27 @@ The system is healthy when:
 - story systems stay gated by story mode and configured triggers;
 - old saves are read best-effort without destructive cleanup; invalid ids and missing fields must not break runtime.
 
+
+## Compound Bases
+
+`zhopa2_bases.script` reads the approved `zhopa2_base_clusters.ltx` and resolves names through native `SIMBOARD.smarts_by_names`. No object references are saved. Missing members and members on another level are excluded; ungrouped smarts retain their own identity.
+
+The index calculates ownership, population and garrison presence across the compound, deduplicating NPC registrations, squads and the player's vote. Capacity remains local: roaming uses aggregate base occupancy, but a full or unavailable member remains an invalid destination. Candidate collection and scoring count each physical base once.
+
+Service Filler retains per-smart vacancies and searches local donors before other members of the same compound. Transfer unregisters only the selected NPC and assigns its service squad/job at the destination. `donor_smart_id` records the rollback origin; older records without it keep the previous behavior. `audit_level()` emits `audit_base` membership records.
+
+After BASE_CAMPING ends, the departure guard covers the whole compound. Automatic settlement honors a garrison already reserved by a sibling smart and shares its retry interval, preventing multiple parts from intercepting additional squads at once.
+
+`simulation_objects.available_by_id` / `sim_avail` controls simulation target selection and native respawning. It does not by itself forbid assigning an existing NPC to a confirmed service job: recruitment checks `disabled`, `respawn_only_smart`, online data and the job conditions. Roaming still respects `sim_avail`. `audit_donor` reports the selected donor or specific rejection counts.
+
+Donor selection considers all owner-faction squads before non-hostile factions. Live game_relations checks run in both directions against the owner and existing service factions; unknown relations defer recruitment. The container and saved service_faction follow the donor, while owner remains the base-ownership snapshot. A registered NPC physically inside the base may donate even when registered elsewhere; donor_smart_id preserves the original registration for rollback.
+
+## Guard Refill
+
+`zhopa2_guard_refill` maintains a cached defensive-post catalog and a scalar-ID queue. Smart updates/population events feed it through the service filler; it shares that timer and the one-appointment-per-step budget. All core service roles across the compound must be filled first. A step checks up to eight queued IDs and processes at most one smart; retry spacing uses service_filler_interval_sec. Occupancy is collected in one pass and refreshed after load.
+
+Generated guard/sniper/camper jobs and guard/security/sniper/camper-named exclusive jobs are recognized. Followers, attacker jobs, trading and monster/heli jobs are excluded. Paths/covers must exist; beh posts use pt1 coordinates. Physical path aliases share one vacancy. Section owners, registered NPCs, saved jobs, native active logic and persistent reservations prevent duplicates. An ordinary transient occupant can be promoted in place; native scripted/story guards are retained.
+
+Transfer, identity, serialization and rollback use `zhopa2_service_recruitment` with role=guard and saved guard_post/job_section. *_sim_squad_guard containers are excluded from simulation management even before runtime flags restore. scripted_target/always_arrived pin the squad; narrow job-selection, setup and precondition hooks pin the post against Redone rotation. Native surge shelter jobs remain available, with return to the post afterward. Normal combat remains enabled. Guards receive no service dialogue, stock or money refills.
+
+Native companion hiring is blocked for guards. Disabling guard_refill_enabled stops new appointments but retains existing records. Master-disable uses the common undo path, including offline guards. No all.spawn change, story-ID spoofing or NPC creation is used. Third-party code that directly teleports NPCs without job changes is outside these hooks.

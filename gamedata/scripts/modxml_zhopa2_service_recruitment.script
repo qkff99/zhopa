@@ -1,0 +1,219 @@
+-- Production service dialogs; shared profiles only gain NPC-ID-gated branches.
+local registered = false
+local ids = {"zhopa2_probe_trade", "zhopa2_probe_work", "zhopa2_probe_complete", "zhopa2_probe_cancel",
+    "zhopa2_probe_upgrade", "zhopa2_probe_heal"}
+local mismatch_logged = false
+local actor_dialog_ids = {}
+local native_mechanic_found = false
+local native_upgrade_menu = false
+
+local function compatible_probe()
+    local probe = rawget(_G, "zhopa2_service_recruitment")
+    if type(probe) == "table" and type(probe.is_service_dialog) == "function"
+        and type(probe.open_trade) == "function" then return probe end
+    if not mismatch_logged then
+        mismatch_logged = true
+        printf("! ZHOPA_RECRUIT_PROBE | dialogue_version_mismatch | update ZHOPA recruitment core and DXML helper; check MO2 overrides")
+    end
+end
+
+-- XML calls this always-present module, never an unchecked function in an older probe.
+function is_service_dialog(a, b)
+    local probe = compatible_probe()
+    return probe ~= nil and probe.is_service_dialog(a, b) == true
+end
+
+function open_trade(a, b)
+    local probe = compatible_probe()
+    if probe and probe.is_service_dialog(a, b) then return probe.open_trade(a, b) end
+end
+
+function is_tech(a, b)
+    local probe = compatible_probe()
+    return native_mechanic_found and probe ~= nil and type(probe.is_role) == "function" and probe.is_role(a, b, "tech") == true
+end
+
+function upgrade_menu_enabled() return native_upgrade_menu end
+
+function is_medic(a, b)
+    local probe = compatible_probe()
+    return probe ~= nil and type(probe.is_role) == "function" and probe.is_role(a, b, "medic") == true
+end
+
+function open_upgrade(a, b)
+    local probe = compatible_probe()
+    if is_tech(a, b) and type(probe.open_upgrade) == "function" then return probe.open_upgrade(a, b) end
+end
+
+local function heal(a, b, kind)
+    local probe = compatible_probe()
+    if is_medic(a, b) and type(probe.heal) == "function" then return probe.heal(a, b, kind) end
+end
+function heal_injury(a, b) return heal(a, b, "injury") end
+function heal_radiation(a, b) return heal(a, b, "radiation") end
+function heal_both(a, b) return heal(a, b, "both") end
+
+function allow_native_dialog(a, b, dialog_id)
+    local probe = compatible_probe()
+    if not probe or not probe.is_service_dialog(a, b) then return true end
+    -- Decide at conversation time, after character metadata has loaded.
+    return dialog_id == "actor_break_dialog" or dialog_id == "hello_dialog" or not actor_dialog_ids[dialog_id]
+end
+
+local function remember_dialog_list(character_id, list)
+    if type(character_id) ~= "string" then return end
+    -- Character IDs are pack-specific (e.g. dick_sim_default_*); only runtime role gates select NPCs.
+    for _, id in ipairs(list or {}) do
+        if type(id) == "string" and not id:match("^zhopa2_probe_") then actor_dialog_ids[id] = true end
+    end
+end
+
+local function add_dialogs(character_id, list)
+    if type(list.get_dialogs) == "function" then
+        remember_dialog_list(character_id, list:get_dialogs())
+    end
+    if type(character_id) ~= "string" then return end
+    for _, id in ipairs(ids) do
+        if not list:has(id) then list:add(id) end
+    end
+end
+
+local function add_gate(xml, node, gate)
+    -- Preconditions are direct children. Do not rescan every phrase graph.
+    for _, pre in ipairs(node.kids or {}) do
+        if xml:getElementName(pre) == "precondition" and xml:getText(pre) == gate then return end
+    end
+    local pre = xml:insertElement({name="precondition"}, node, 1)
+    xml:setText(pre, gate)
+    -- Older shipped DXML does not attach parents to inserted nodes.
+    pre.parent = node
+    for _, child in ipairs(pre.kids or {}) do child.parent = pre end
+end
+
+local function adapt_mechanic_dialog(xml)
+    local source = xml:query("dialog[id=dm_init_mechanic]")[1]
+    local target = xml:query("dialog[id=zhopa2_probe_upgrade]")[1]
+    native_mechanic_found, native_upgrade_menu = source ~= nil, false
+    if not (source and target) then return end
+    -- Exactly one small native branch, never the game's dialog catalog.
+    local function copy(node, parent)
+        local out = {el=node.el, parent=parent}
+        if node.kids then
+            out.kids = {}
+            for i, child in ipairs(node.kids) do out.kids[i] = copy(child, out) end
+        end
+        if xml:getElementName(node) == "action" and xml:getText(node) == "dialogs.npc_is_tech" then
+            native_upgrade_menu = true
+            out.kids = {{el="#modxml_zhopa2_service_recruitment.open_upgrade", parent=out}}
+        end
+        return out
+    end
+    target.kids = {}
+    for _, child in ipairs(source.kids or {}) do
+        local our_filter = xml:getElementName(child) == "precondition"
+            and xml:getText(child) == "modxml_zhopa2_service_recruitment.allow_native_dialog"
+        if not our_filter then target.kids[#target.kids + 1] = copy(child, target) end
+    end
+    add_gate(xml, target, "modxml_zhopa2_service_recruitment.is_tech")
+end
+
+local function inject(path, xml)
+    if not xml or not path:find([[gameplay\dialogs]], 1, true) then return end
+    -- One small predicate per existing dialog; add only the fixed service definitions below.
+    for _, node in ipairs(xml:query("dialog")) do
+        local id = xml:getElementAttr(node).id
+        if id and not id:match("^zhopa2_probe_") then
+            add_gate(xml, node, "modxml_zhopa2_service_recruitment.allow_native_dialog")
+        end
+    end
+    if path ~= [[gameplay\dialogs.xml]] then return end
+    local existing = xml:query("dialog[id=zhopa2_probe_trade]")
+    if (type(is_not_empty) == "function" and is_not_empty(existing))
+        or (type(existing) == "table" and next(existing) ~= nil) then
+        adapt_mechanic_dialog(xml)
+        return
+    end
+    xml:insertFromXMLString([[
+        <dialog id="zhopa2_probe_trade" priority="10000">
+            <precondition>modxml_zhopa2_service_recruitment.is_service_dialog</precondition>
+            <phrase_list>
+                <phrase id="0"><text>st_trader_dialog_init</text><next>1</next><next>2</next></phrase>
+                <phrase id="1">
+                    <precondition>dialogs_mlr.check_no_debt</precondition>
+                    <script_text>dialogs.st_trader_dialog_reply</script_text>
+                    <action>modxml_zhopa2_service_recruitment.open_trade</action>
+                </phrase>
+                <phrase id="2">
+                    <precondition>dialogs_mlr.check_debt</precondition>
+                    <script_text>dialogs_mlr.st_debt_no_trade</script_text>
+                </phrase>
+            </phrase_list>
+        </dialog>
+        <dialog id="zhopa2_probe_work">
+            <precondition>modxml_zhopa2_service_recruitment.is_service_dialog</precondition>
+            <init_func>dialog_manager.dm_init_dynamic_task_dialog</init_func>
+        </dialog>
+        <dialog id="zhopa2_probe_complete">
+            <precondition>modxml_zhopa2_service_recruitment.is_service_dialog</precondition>
+            <precondition>dialogs.actor_has_finished_ordered_task</precondition>
+            <init_func>dialog_manager.dm_init_dynamic_task_completed_dialog</init_func>
+        </dialog>
+        <dialog id="zhopa2_probe_cancel">
+            <precondition>modxml_zhopa2_service_recruitment.is_service_dialog</precondition>
+            <precondition>dialogs.actor_has_ongoing_task</precondition>
+            <init_func>dialog_manager.dm_init_dynamic_task_cancel_dialog</init_func>
+        </dialog>
+        <dialog id="zhopa2_probe_upgrade" priority="9000">
+            <precondition>modxml_zhopa2_service_recruitment.is_tech</precondition>
+            <phrase_list>
+                <phrase id="0"><text>st_mechanic_dialog_init</text></phrase>
+            </phrase_list>
+        </dialog>
+        <dialog id="zhopa2_probe_heal" priority="9000">
+            <precondition>modxml_zhopa2_service_recruitment.is_medic</precondition>
+            <phrase_list>
+                <phrase id="0"><text>st_dm_medic_general_text_0</text><next>1</next><next>10</next></phrase>
+                <phrase id="1">
+                    <precondition>dialogs.is_actor_not_healthy</precondition>
+                    <script_text>dialogs.st_dm_medic_general_text_1</script_text>
+                    <next>2</next><next>3</next><next>4</next><next>5</next>
+                </phrase>
+                <phrase id="2">
+                    <precondition>dialogs.is_actor_injured</precondition><text>st_dm_medic_general_text_2</text>
+                    <action>modxml_zhopa2_service_recruitment.heal_injury</action><next>6</next>
+                </phrase>
+                <phrase id="3">
+                    <precondition>dialogs.is_actor_irradiated</precondition><text>st_dm_medic_general_text_3</text>
+                    <action>modxml_zhopa2_service_recruitment.heal_radiation</action><next>6</next>
+                </phrase>
+                <phrase id="4">
+                    <precondition>dialogs.is_actor_injured_irradiated</precondition><text>st_dm_medic_general_text_4</text>
+                    <action>modxml_zhopa2_service_recruitment.heal_both</action><next>6</next>
+                </phrase>
+                <phrase id="5"><text>st_dm_medic_general_text_5</text><next>7</next></phrase>
+                <phrase id="6"><text>st_dm_medic_general_text_6</text></phrase>
+                <phrase id="7"><text>st_dm_medic_general_text_7</text></phrase>
+                <phrase id="10">
+                    <precondition>dialogs.is_actor_healthy</precondition>
+                    <script_text>dialogs.st_dm_medic_general_text_10</script_text>
+                </phrase>
+            </phrase_list>
+        </dialog>
+    ]])
+    adapt_mechanic_dialog(xml)
+end
+
+function on_xml_read()
+    if registered then return end
+    RegisterScriptCallback("on_xml_read", inject)
+    RegisterScriptCallback("on_specific_character_dialog_list", add_dialogs)
+    local original = rawget(_G, "CSpecificCharacterDialogList")
+    if type(original) == "function" then
+        _G.CSpecificCharacterDialogList = function(character, list)
+            local result = original(character, list)
+            remember_dialog_list(character, result) -- includes other addons' later callbacks
+            return result
+        end
+    end
+    registered = true
+end

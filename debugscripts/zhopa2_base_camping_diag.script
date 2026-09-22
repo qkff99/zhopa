@@ -1,0 +1,109 @@
+-- Manual snapshot: no task assignments, spawning, callbacks or save changes.
+local function log(format, ...)
+    printf("%s", "~ ZHOPA2 camping diag | " .. string.format(format, ...))
+end
+
+local function call(fn, ...)
+    if type(fn) ~= "function" then return "missing_function" end
+    local ok, a, b = pcall(fn, ...)
+    if not ok then return "ERROR:" .. tostring(a) end
+    return a, b
+end
+
+local function name(obj)
+    return tostring(obj and call(obj.name, obj))
+end
+
+local function run(smart_name)
+    local idx, tasks, p, cfg = rawget(_G, "zhopa2_index"), rawget(_G, "zhopa2_tasks"),
+        rawget(_G, "zhopa2_perception"), rawget(_G, "zhopa2_cfg")
+    if not (idx and tasks and p and cfg and SIMBOARD and level and db and db.actor) then
+        log("runtime_not_ready"); return false
+    end
+    local lvl = level.name()
+    local indexed = idx.squads_on_levels({lvl})
+    local in_index, squads, bases = {}, {}, {}
+    for _, q in ipairs(indexed) do in_index[q.id] = true end
+    -- Also inspect the board: an empty/broken level index must be visible.
+    for id, stored in pairs(SIMBOARD.squads or {}) do
+        local q = alife_object(id) or (type(stored) == "table" and stored)
+        if q and call(p.obj_level, q) == lvl then squads[#squads + 1] = q end
+    end
+    for _, node in pairs(SIMBOARD.smarts or {}) do
+        local s = node.smrt
+        local sname = s and name(s)
+        local is_base = s and ((s.props and tonumber(s.props.base) and tonumber(s.props.base) > 0)
+            or (simulation_objects and simulation_objects.base_smarts and simulation_objects.base_smarts[sname]))
+        if s and call(p.obj_level, s) == lvl and ((smart_name and sname == smart_name) or (not smart_name and is_base)) then
+            bases[#bases + 1] = s
+        end
+    end
+    table.sort(bases, function(a, b) return a.id < b.id end)
+    table.sort(squads, function(a, b) return a.id < b.id end)
+    log("begin level=%s bases=%s board_squads=%s indexed_squads=%s surge=%s", lvl,
+        tostring(#bases), tostring(#squads), tostring(#indexed), tostring(call(tasks.surge_active)))
+    for _, key in ipairs({"enabled", "stalker_movement_enabled", "base_ownership_enabled", "base_camping_enabled"}) do
+        log("setting %s=%s", key, tostring(call(cfg.get_bool, key, true)))
+    end
+    if debug and debug.getinfo then
+        for _, fn in ipairs({idx.try_empty_base_pull, tasks.assign_base_camping, p.smart_settlement_capacity}) do
+            local info = debug.getinfo(fn, "S")
+            log("source=%s line=%s", tostring(info and info.source), tostring(info and info.linedefined))
+        end
+    end
+    for _, s in ipairs(bases) do
+        local old = idx.smart_ownership[s.id]
+        log("base=%s id=%s max_population=%s cached_state=%s cached_presence=%s cached_updated=%s pull_squad=%s pull_time=%s",
+            name(s), tostring(s.id), tostring(s.max_population), tostring(old and old.state),
+            tostring(old and old.presence), tostring(old and old.updated), tostring(idx.base_pull_squad[s.id]),
+            tostring(idx.base_pull_time[s.id]))
+        local own = call(idx.update_base_ownership, s)
+        if type(own) == "table" then
+            log("ownership state=%s presence=%s owner=%s total=%s camping_npcs=%s actor=%s",
+                tostring(own.state), tostring(own.presence), tostring(own.owner), tostring(own.total),
+                tostring(own.zhopa2_count), tostring(own.actor_count))
+        else
+            log("ownership result=%s", tostring(own))
+        end
+        for id, info in pairs(s.npc_info or {}) do
+            local npc = info and info.se_obj
+            local alive = npc and call(npc.alive, npc)
+            if alive ~= true then
+                log("npc id=%s stype=%s server=%s alive=%s", tostring(id), tostring(info and info.stype),
+                    tostring(npc ~= nil), tostring(alive))
+            end
+        end
+        local nearby = 0
+        for _, q in ipairs(squads) do
+            local d2 = q.position and s.position and call(q.position.distance_to_sqr, q.position, s.position)
+            if type(d2) == "number" and d2 <= 2500 then
+                nearby = nearby + 1
+                local cached_count = q.zhopa2_cached_npc_count
+                local capacity, free = call(p.smart_settlement_capacity, q, s)
+                local quests = rawget(_G, "zhopa2_npc_quests")
+                local active_quest = quests and call(quests.is_active_squad, q)
+                log("squad=%s id=%s faction=%s dist=%.1f indexed=%s task=%s target=%s managed=%s cached_npcs=%s live_npcs=%s",
+                    name(q), tostring(q.id), tostring(q.player_id), math.sqrt(d2), tostring(in_index[q.id] == true),
+                    tostring(q.zhopa2_task), tostring(q.zhopa2_target), tostring(q.zhopa2_managed),
+                    tostring(cached_count), tostring(call(q.npc_count, q)))
+                log("gates enabled=%s interrupt=%s manage=%s quest_protected=%s active_quest=%s free=%s capacity=%s cooldown=%s release_smart=%s",
+                    tostring(call(tasks.task_enabled, q, "BASE_CAMPING")), tostring(call(tasks.base_camping_can_interrupt, q)),
+                    tostring(call(q.zhopa2_can_manage, q)), tostring(call(idx.quest_protected_squad, q)),
+                    tostring(active_quest), tostring(free), tostring(capacity), tostring(q.zhopa2_base_camping_cooldown_started),
+                    tostring(q.zhopa2_base_camping_release_smart))
+                log("guards disabled=%s story=%s companion=%s random_targets=%s action_condlist=%s scripted_target=%s level_blacklisted=%s smart_blacklisted=%s reason=%s result=%s",
+                    tostring(q.disabled), tostring(call(get_object_story_id, q.id)),
+                    tostring(axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[q.id]),
+                    tostring(q.random_targets), tostring(q.action_condlist), tostring(q.scripted_target),
+                    tostring(call(cfg.is_level_blacklisted_for_squad, q, lvl)),
+                    tostring(call(cfg.is_smart_blacklisted_for_squad, q, s, lvl)),
+                    tostring(q.zhopa2_last_reason), tostring(q.zhopa2_last_result))
+            end
+        end
+        log("base_end=%s nearby=%s", name(s), tostring(nearby))
+    end
+    log("end")
+    return true
+end
+
+return {run = run}

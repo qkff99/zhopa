@@ -34,6 +34,15 @@ enemy_penalty_per_strength = 0.035
 minimum_multiplier = 0.35
 maximum_multiplier = 1.50
 
+; Roaming uses live stalker NPC counts per level plus cross-level incoming squads.
+; Controlled by the existing faction_presence_balance_enabled setting.
+[roam_population]
+smoothing_npc = 10
+minimum_multiplier = 0.50
+maximum_multiplier = 2.00
+ally_bonus_cap = 0.10
+extra_hop_cost = 0.35
+
 [conditional_targets]
 balanced_min_gap = 3
 balanced_reject_chance = 50

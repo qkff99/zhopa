@@ -1,6 +1,7 @@
 local M = {}
 
 local MODULE_STOP_ORDER = {
+	"zhopa2_service_quests",
 	"zhopa2_squad_dialogue",
 	"zhopa2_npc_quests",
 	"zhopa2_economy",
@@ -12,8 +13,10 @@ local MODULE_STOP_ORDER = {
 	"zhopa2_story_north_migration",
 	"zhopa2_story_psy_watchdog",
 	"zhopa2_service_fillers",
+	"zhopa2_guard_refill",
 	"zhopa2_perception",
 	"zhopa2_index",
+	"zhopa2_bases",
 	"zhopa2_topology",
 	"zhopa2_debug_hud",
 	"zhopa2_runtime_patches",

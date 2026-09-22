@@ -109,14 +109,6 @@ local function cfg_bool(key, default)
 	return default == true
 end
 
-local function squad_task_enabled(squad, key, default)
-	local cfg = cfg_mod()
-	if cfg and type(cfg.squad_task_enabled) == "function" then
-		return cfg.squad_task_enabled(squad, key, default) == true
-	end
-	return cfg_bool(key, default)
-end
-
 function M.offline_artifacts_enabled()
 	return cfg_bool("enabled", true) == true and cfg_bool("artefact_offline_enabled", true) == true
 end
@@ -617,6 +609,8 @@ local function artifact_reserved_for_other_squad(artifact_id, squad)
 end
 
 local function smart_is_base(smart)
+	local bases = rawget(_G, "zhopa2_bases")
+	if bases then return bases.is_base(smart) end
 	if smart and smart.props and smart.props.base and smart.props.base > 0 then
 		return true
 	end
@@ -2219,95 +2213,135 @@ function M.base_ownership(smart)
 	return smart and smart.id and M.smart_ownership[smart.id] or nil
 end
 
+local function physically_at_base(object, smart)
+	if not (object and object.position and smart.position) then return false end
+	local ok, present = pcall(function()
+		local object_level = obj_level(object)
+		local radius = tonumber(smart.arrive_dist) or BASE_PULL_RADIUS
+		return object_level ~= nil and object_level == obj_level(smart)
+			and object.position:distance_to_sqr(smart.position) <= radius * radius
+	end)
+	return ok and present == true
+end
+
+function M.actor_service_base()
+	local scratch = current_frame_scratch()
+	if scratch.actor_service_base ~= nil then return scratch.actor_service_base or nil end
+	scratch.actor_service_base = false
+	local actor = db and db.actor
+	local svc = service_fillers_mod()
+	local actor_level = current_level_name()
+	if not (actor and actor_level and svc and type(svc.is_service_base) == "function"
+		and type(actor.alive) == "function" and type(actor.position) == "function"
+		and type(get_actor_true_community) == "function") then return nil end
+	local ok, position, faction = pcall(function()
+		if not actor:alive() then return nil end
+		return actor:position(), get_actor_true_community()
+	end)
+	if not (ok and position and type(faction) == "string" and faction ~= "") then return nil end
+	faction = relation_faction(faction:gsub("^actor_", ""))
+	local best, best_dist
+	local bases = M.base_smarts_on_levels({actor_level})
+	for i = 1, #bases do
+		local smart = bases[i]
+		if smart and smart.position and not smart.disabled and not smart.respawn_only_smart
+			and svc.is_service_base(smart) then
+			local measured, dist = pcall(position.distance_to_sqr, position, smart.position)
+			local radius = tonumber(smart.arrive_dist) or BASE_PULL_RADIUS
+			if measured and type(dist) == "number" and dist <= radius * radius
+				and (not best_dist or dist < best_dist or (dist == best_dist and smart.id < best.id)) then
+				best, best_dist = smart, dist
+			end
+		end
+	end
+	if best then scratch.actor_service_base = {smart_id = best.id, faction = faction} end
+	return scratch.actor_service_base or nil
+end
+
 function M.update_base_ownership(smart)
-	if not (smart and smart.id and smart_is_base(smart)) then
-		return nil
-	end
-
-	local counts = {}
-	local total = 0
-	if smart.npc_info then
-		for _, info in pairs(smart.npc_info) do
-			local se_obj = info and info.se_obj or nil
-			local community = object_community(se_obj)
-			if community then
-				add_count(counts, community, 1)
-				total = total + 1
-			end
-		end
-	end
-
-	local zhopa2_count = 0
-	local seen_zhopa2 = {}
-	local squad_bucket = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart.id] and SIMBOARD.smarts[smart.id].squads or nil
-	if squad_bucket then
-		for squad_id in pairs(squad_bucket) do
-			local squad = alife_object(squad_id)
-			local community = object_community(squad)
-			local count = squad_cached_npc_count(squad)
-			if community and count > 0 then
-				add_count(counts, community, count)
-				total = total + count
-			end
-			if squad_base_camping_at_smart(squad, smart.id) then
-				seen_zhopa2[squad.id] = true
-				zhopa2_count = zhopa2_count + count
-			end
-		end
-	end
-
-	local base_bucket = M.base_camping_targets[smart.id]
-	if base_bucket then
-		for squad_id in pairs(base_bucket) do
-			if not seen_zhopa2[squad_id] then
-				local squad = alife_object(squad_id)
-				if squad_base_camping_at_smart(squad, smart.id) then
-					seen_zhopa2[squad_id] = true
-					zhopa2_count = zhopa2_count + squad_cached_npc_count(squad)
-				else
-					base_bucket[squad_id] = nil
-					M.base_camping_squad_target[squad_id] = nil
-				end
-			end
-		end
-	end
-
-	local owner
-	local owner_count = 0
-	local tie = false
-	for community, count in pairs(counts) do
-		if count > owner_count then
-			owner = community
-			owner_count = count
-			tie = false
-		elseif count == owner_count then
-			tie = true
-		end
-	end
-
-	local state = "empty"
-	if total > 0 then
-		if tie then
-			state = "unstable"
-		else
-			state = "owned"
-		end
-	end
-	local ownership = {
-		state = state,
-		owner = state == "owned" and owner or nil,
-		count = owner_count,
-		total = total,
-		updated = time_global and time_global() or 0,
-		presence = zhopa2_count > 0 and "occupied" or "empty",
-		zhopa2_count = zhopa2_count,
-	}
-	M.smart_ownership[smart.id] = ownership
-	smart.zhopa2_ownership_state = ownership.state
-	smart.zhopa2_ownership_owner = ownership.owner
-	smart.zhopa2_presence_state = ownership.presence
-	smart.zhopa2_presence_count = ownership.zhopa2_count
-	return ownership
+    if not (smart and smart.id and smart_is_base(smart)) then return nil end
+    local bases = rawget(_G, "zhopa2_bases")
+    local members = bases and bases.members(smart) or {smart}
+    local counts, registered_by_squad, seen_npcs = {}, {}, {}
+    local total, population_pending = 0, false
+    -- Gather all registrations first, before subtracting them from squad headcounts.
+    for _, part in ipairs(members) do
+        for _, info in pairs(part.npc_info or {}) do
+            local npc = info and info.se_obj
+            if not npc or not npc.id then population_pending = true
+            elseif not seen_npcs[npc.id] then
+                seen_npcs[npc.id] = true
+                local valid, alive = false, false
+                if type(npc.alive) == "function" then valid, alive = pcall(npc.alive, npc) end
+                if not valid then population_pending = true end
+                local community = valid and alive and object_community(npc)
+                if community then
+                    add_count(counts, relation_faction(community), 1)
+                    total = total + 1
+                    local group = tonumber(npc.group_id)
+                    if group and group ~= 65535 then registered_by_squad[group] = (registered_by_squad[group] or 0) + 1 end
+                end
+            end
+        end
+    end
+    local seen_squads, seen_camping, zhopa2_count = {}, {}, 0
+    for _, part in ipairs(members) do
+        local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[part.id]
+        for id in pairs(node and node.squads or {}) do
+            local squad = alife_object(id)
+            if squad and not seen_squads[id] then
+                seen_squads[id] = true
+                local community, count = object_community(squad), squad_cached_npc_count(squad)
+                local present = false
+                for _, area in ipairs(members) do if physically_at_base(squad, area) then present = true; break end end
+                if community and count > 0 and present then
+                    local unregistered = math.max(0, count - (registered_by_squad[id] or 0))
+                    add_count(counts, relation_faction(community), unregistered)
+                    total = total + unregistered
+                end
+            end
+            if squad and not seen_camping[id] and squad_base_camping_at_smart(squad, part.id) then
+                seen_camping[id] = true
+                zhopa2_count = zhopa2_count + squad_cached_npc_count(squad)
+            end
+        end
+        local bucket = M.base_camping_targets[part.id]
+        for id in pairs(bucket or {}) do
+            if not seen_camping[id] then
+                local squad = alife_object(id)
+                if squad_base_camping_at_smart(squad, part.id) then
+                    seen_camping[id] = true
+                    zhopa2_count = zhopa2_count + squad_cached_npc_count(squad)
+                else
+                    bucket[id], M.base_camping_squad_target[id] = nil, nil
+                end
+            end
+        end
+    end
+    local actor_presence = M.actor_service_base()
+    local actor_count = 0
+    for _, part in ipairs(members) do
+        if actor_presence and actor_presence.smart_id == part.id then actor_count = 1; break end
+    end
+    if actor_count > 0 then add_count(counts, actor_presence.faction, 1); total = total + 1 end
+    local owner, owner_count, tie = nil, 0, false
+    for community, count in pairs(counts) do
+        if count > owner_count then owner, owner_count, tie = community, count, false
+        elseif count == owner_count then tie = true end
+    end
+    local state = "empty"
+    if population_pending or (total > 0 and tie) then state = "unstable"
+    elseif total > 0 then state = "owned" end
+    local ownership = {state=state, owner=state == "owned" and owner or nil, count=owner_count,
+        total=total, actor_count=actor_count, updated=time_global and time_global() or 0,
+        presence=zhopa2_count > 0 and "occupied" or "empty", zhopa2_count=zhopa2_count,
+        base_id=bases and bases.key(smart) or tostring(smart.id)}
+    for _, part in ipairs(members) do
+        M.smart_ownership[part.id] = ownership
+        part.zhopa2_ownership_state, part.zhopa2_ownership_owner = ownership.state, ownership.owner
+        part.zhopa2_presence_state, part.zhopa2_presence_count = ownership.presence, ownership.zhopa2_count
+    end
+    return ownership
 end
 
 local function distance_to_sqr(a, b)
@@ -2338,6 +2372,40 @@ local function current_base_pull_valid(smart)
 	return false
 end
 
+function M.base_camping_release_blocks(squad, smart)
+	local released_id = squad and tonumber(squad.zhopa2_base_camping_release_smart)
+	if not released_id then
+		return false
+	end
+	if alife_object then
+		local released_smart = alife_object(released_id)
+		if not released_smart then
+			return smart == nil or tonumber(smart.id) == released_id
+		end
+		local squad_ok, squad_level = pcall(obj_level, squad)
+		local smart_ok, smart_level = pcall(obj_level, released_smart)
+		if squad_ok and smart_ok and squad_level and smart_level then
+			local dist = squad_level == smart_level and distance_to_sqr(squad, released_smart) or nil
+			local departed = dist and dist > BASE_PULL_RADIUS_SQR
+			local bases = rawget(_G, "zhopa2_bases")
+			if departed and bases then
+				for _, part in ipairs(bases.members(released_smart)) do
+					local part_dist = distance_to_sqr(squad, part)
+					if not part_dist or part_dist <= BASE_PULL_RADIUS_SQR then departed = false; break end
+				end
+			end
+			if squad_level ~= smart_level or departed then
+				squad.zhopa2_base_camping_release_smart = nil
+				return false
+			end
+		end
+		local bases = rawget(_G, "zhopa2_bases")
+		if smart and bases and bases.same(released_smart, smart) then return true end
+	end
+	-- Unknown position/level must not cancel the departure grace period during loading.
+	return smart == nil or tonumber(smart.id) == released_id
+end
+
 function M.try_empty_base_pull(smart)
 	if not (smart and smart.id and smart_is_base(smart)) then
 		return false
@@ -2349,17 +2417,19 @@ function M.try_empty_base_pull(smart)
 	if not (ownership and ownership.presence == "empty" and ownership.state ~= "unstable") then
 		return false
 	end
-	if current_base_pull_valid(smart) then
-		return false
-	end
+	local bases = rawget(_G, "zhopa2_bases")
+	local parts = bases and bases.members(smart) or {smart}
+	for _, part in ipairs(parts) do if current_base_pull_valid(part) then return false end end
 	local now = time_global and time_global() or 0
-	if M.base_pull_time[smart.id] and now > 0 and now - M.base_pull_time[smart.id] < BASE_PULL_COOLDOWN_MS then
-		return false
+	for _, part in ipairs(parts) do
+		if M.base_pull_time[part.id] and now > 0 and now - M.base_pull_time[part.id] < BASE_PULL_COOLDOWN_MS then return false end
 	end
-	M.base_pull_time[smart.id] = now
+	for _, part in ipairs(parts) do M.base_pull_time[part.id] = now end
 
 	local level_name = obj_level(smart)
 	local candidates = M.squads_on_levels({ level_name })
+	local tasks = tasks_mod()
+	if not (tasks and type(tasks.base_camping_can_interrupt) == "function") then return false end
 	local best
 	local best_dist
 	local best_priority = -1
@@ -2367,7 +2437,7 @@ function M.try_empty_base_pull(smart)
 	for i = 1, #candidates do
 		local squad = candidates[i]
 		local dist = distance_to_sqr(squad, smart)
-		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and squad_zhopa2_manageable_soft(squad) and squad_task_enabled(squad, "base_camping_enabled", true) and not npc_quest_active_squad(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
+		if squad and squad.id ~= smart.id and dist and dist <= BASE_PULL_RADIUS_SQR and not M.base_camping_release_blocks(squad, smart) and squad_zhopa2_manageable_soft(squad) and tasks.base_camping_can_interrupt(squad) and not npc_quest_active_squad(squad) and not smart_blacklisted_for_squad(squad, smart, level_name) then
 			local priority = 0
 			local reason = "base_camping_empty_base"
 			local monster = is_monster_squad(squad)
@@ -2405,8 +2475,7 @@ function M.try_empty_base_pull(smart)
 		return false
 	end
 
-	local tasks = tasks_mod()
-	if tasks and type(tasks.assign_base_camping_permanent) == "function" and tasks.assign_base_camping_permanent(best, smart, best_reason) then
+	if tasks and type(tasks.assign_base_camping) == "function" and tasks.assign_base_camping(best, smart, best_reason) then
 		M.base_pull_squad[smart.id] = best.id
 		smart.zhopa2_base_pull_squad_id = best.id
 		return true

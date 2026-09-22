@@ -1,11 +1,12 @@
 local M = {}
 
-local VERSION = 16
+local VERSION = 19
 local MARKER_START = "zhopa2_squad"
 local MARKER_END = "zhopa2_squad_end"
 local NIL = "nil"
 local BASE_FIELD_COUNT = 8
-local FIELD_COUNT = 46
+local FIELD_COUNT = 49
+local BASE_CAMPING_RETURN_TASKS = { EXPLORE = true, POPULATE = true, PATROL = true, TRADE = true, ARTEFACT = true }
 local RECENT_LIMIT = 8
 local MAX_ARTIFACT_CARGO_HISTORY = 16
 local VIRTUAL_LOOT_SECTION_LIMIT = 64
@@ -84,6 +85,9 @@ function M.reset_squad(squad)
 	squad.zhopa2_previous_task = nil
 	squad.zhopa2_previous_target = nil
 	squad.zhopa2_npc_quest_id = nil
+	squad.zhopa2_base_camping_release_smart = nil
+	squad.zhopa2_base_camping_return = nil
+	squad.zhopa2_base_camping_cooldown_started = nil
 	squad.zhopa2_state_version = VERSION
 end
 
@@ -383,6 +387,51 @@ function M.add_artifact_cargo(squad, section, value, artifact_id, reason)
 	return true
 end
 
+function M.capture_base_camping_return(squad)
+	if not (squad and squad.current_action == 0 and BASE_CAMPING_RETURN_TASKS[squad.zhopa2_task]) then
+		return nil
+	end
+	local target = tonumber(squad.zhopa2_target)
+	if not target or target == tonumber(squad.id) then
+		return nil
+	end
+	local duration = tonumber(squad.zhopa2_until) or 0
+	local p = rawget(_G, "zhopa2_perception")
+	if duration > 0 and squad.zhopa2_started and p and type(p.elapsed) == "function" then
+		local ok, spent = pcall(p.elapsed, squad.zhopa2_started)
+		if ok and tonumber(spent) then
+			duration = math.max(1, duration - math.max(0, tonumber(spent)))
+		end
+	end
+	-- One bounded, scalar snapshot independent of the NIGHT_REST/revenge resume slot.
+	local values = {
+		squad.zhopa2_task, target, duration, squad.zhopa2_patrol or NIL, squad.zhopa2_patrol_idx or NIL,
+		squad.zhopa2_artifact_id or NIL, squad.zhopa2_artifact_section or NIL,
+		squad.zhopa2_artifact_smart or NIL, squad.zhopa2_artifact_zone or NIL,
+	}
+	for i = 1, #values do
+		values[i] = tostring(values[i])
+		if string.find(values[i], "|", 1, true) then return nil end
+	end
+	return table.concat(values, "|")
+end
+
+function M.take_base_camping_return(squad)
+	local saved = squad and squad.zhopa2_base_camping_return
+	if squad then squad.zhopa2_base_camping_return = nil end
+	if type(saved) ~= "string" then return nil end
+	local values = str_explode(saved, "|", true)
+	if #values ~= 9 or not BASE_CAMPING_RETURN_TASKS[values[1]] or not tonumber(values[2]) then
+		return nil
+	end
+	return {
+		task = values[1], target = tonumber(values[2]), duration = math.max(0, tonumber(values[3]) or 0),
+		patrol = values[4] ~= NIL and values[4] or nil, patrol_idx = tonumber(values[5]),
+		artifact_id = tonumber(values[6]), artifact_section = values[7] ~= NIL and values[7] or nil,
+		artifact_smart = tonumber(values[8]), artifact_zone = tonumber(values[9]),
+	}
+end
+
 function M.snapshot_task(squad, reason)
 	if not (squad and squad.zhopa2_task and squad.zhopa2_target) then
 		return false
@@ -393,6 +442,15 @@ function M.snapshot_task(squad, reason)
 	squad.zhopa2_resume_task = squad.zhopa2_task
 	squad.zhopa2_resume_target = squad.zhopa2_target
 	squad.zhopa2_resume_until = squad.zhopa2_until
+	if squad.zhopa2_task == "BASE_CAMPING" and (tonumber(squad.zhopa2_until) or 0) > 0 and squad.zhopa2_started then
+		local p = rawget(_G, "zhopa2_perception")
+		if p and type(p.elapsed) == "function" then
+			local ok, spent = pcall(p.elapsed, squad.zhopa2_started)
+			if ok and tonumber(spent) then
+				squad.zhopa2_resume_until = math.max(1, squad.zhopa2_until - math.max(0, tonumber(spent)))
+			end
+		end
+	end
 	squad.zhopa2_resume_patrol = squad.zhopa2_patrol
 	squad.zhopa2_resume_patrol_idx = squad.zhopa2_patrol_idx
 	squad.zhopa2_resume_reason = reason or squad.zhopa2_last_reason
@@ -424,13 +482,18 @@ function M.resume_task(squad, reason)
 	if type(squad.zhopa2_assign_task) ~= "function" then
 		return false
 	end
-	squad:zhopa2_assign_task(
+	local tasks = rawget(_G, "zhopa2_tasks")
+	if tasks and type(tasks.task_enabled) == "function" and not tasks.task_enabled(squad, squad.zhopa2_resume_task) then
+		return false
+	end
+	local assigned = squad:zhopa2_assign_task(
 		squad.zhopa2_resume_task,
 		target or squad.zhopa2_resume_target,
 		tonumber(squad.zhopa2_resume_until) or 0,
 		reason or "resume",
 		squad.zhopa2_resume_patrol
 	)
+	if assigned ~= true then return false end
 	if squad.zhopa2_resume_patrol_idx then
 		squad.zhopa2_patrol_idx = tonumber(squad.zhopa2_resume_patrol_idx) or squad.zhopa2_patrol_idx
 	end
@@ -488,6 +551,9 @@ function M.write_squad(packet, squad)
 	write_string(packet, squad and squad.zhopa2_previous_task)
 	write_string(packet, squad and squad.zhopa2_previous_target)
 	write_string(packet, squad and squad.zhopa2_npc_quest_id)
+	write_string(packet, squad and squad.zhopa2_base_camping_release_smart)
+	write_string(packet, squad and squad.zhopa2_base_camping_return)
+	utils_data.w_CTime(packet, squad and squad.zhopa2_base_camping_cooldown_started, "zhopa2_memory.base_camping_cooldown")
 	packet:w_stringZ(MARKER_END)
 end
 
@@ -558,6 +624,9 @@ function M.read_squad(packet, squad)
 	squad.zhopa2_previous_task = field_count >= 44 and read_string(packet) or nil
 	squad.zhopa2_previous_target = field_count >= 45 and tonum(read_string(packet)) or nil
 	squad.zhopa2_npc_quest_id = field_count >= 46 and tonum(read_string(packet)) or nil
+	squad.zhopa2_base_camping_release_smart = field_count >= 47 and tonum(read_string(packet)) or nil
+	squad.zhopa2_base_camping_return = field_count >= 48 and read_string(packet) or nil
+	squad.zhopa2_base_camping_cooldown_started = field_count >= 49 and utils_data.r_CTime(packet, "zhopa2_memory.base_camping_cooldown") or nil
 	clamp_virtual_loot_state(squad)
 	squad.zhopa2_artifact_collect_started = nil
 	squad.zhopa2_state_version = version

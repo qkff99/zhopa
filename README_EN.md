@@ -1,4 +1,4 @@
-# Z.H.O.P.A. ALIFE 2.2
+# Z.H.O.P.A. ALIFE 2.3
 
 [Русский](README.md) | [Changelog](changelog_en.md) | [Architecture](docs/zhopa_alife_2_design_document_en.md) | [Function reference](docs/zhopa_alife_2_function_reference_en.md)
 
@@ -20,10 +20,15 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Loot | Online logic extends vanilla pickup and prevents loops on rejected items. Offline loot is bounded virtual cargo and consumes no engine object IDs. |
 | Economy | The leader trades for the whole squad, sells real and virtual goods, pools member money, and buys basic supplies. |
 | Artefacts | Real and virtual offline artefacts are supported, including smart assignment and online pickup by a selected NPC with detector animation. |
-| Bases and services | The addon tracks base ownership and can refill suitable service roles after an emission. |
+| Bases and services | The addon tracks base vacancies and recruits existing local NPCs as traders, technicians, medics and cooks/barmen, without spawning new NPCs. |
 | Story events | Story mode enables psi zombification and northern migration after the Brain Scorcher shutdown. These systems do not run in freeplay. |
 
 Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `QUEST`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
+
+## Guard Refill
+
+“Service Filler: replenish guards” is enabled by default. Once all traders, technicians, medics and cooks/barmen across the base are present, suitable arriving NPCs leave their squads and become permanent guards. The owner faction has priority, followed by non-hostile factions. Native guards remain in place and physical posts are not duplicated. Detached guards do not roam or consume BASE_CAMPING capacity; the remaining donor squad continues its tasks. Combat and surge sheltering do not cancel the permanent assignment. Turning off Guard Refill stops new recruitment; disabling ZHOPA entirely returns recruits to ordinary squads. Diagnostics: `zhopa2_guard_refill.audit_level()`.
+
 
 ## Trade and Economy
 
@@ -34,6 +39,16 @@ Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PAT
 - Offline deals sell serializable virtual cargo and use virtual squad money.
 - `npc_sell_price_multiplier` controls NPC sale income; the default value is `0.2`.
 - A quest interaction reuses the customer job and animation but exits before a monetary deal. Every service result immediately reselects the NPC's normal smart job and remains covered by the service doctor.
+
+## Service Base Settlement
+
+Compound bases are defined in `gamedata/configs/zhopa2_base_clusters.ltx`. They share ownership and population; squad capacity and service jobs remain local to each smart. The filler can recruit a donor from another smart of the same base. Membership covers vanilla levels and three New Levels maps; absent maps are skipped.
+
+Roaming considers the population of each entire level: living stalkers of all factions and incoming squads. Less populated levels gain weight among nearby and distant reachable destinations, while distance and danger still matter. The population multiplier is bounded between 0.5 and 2. The existing MCM option is now named "Faction and level population balance". Settlement capacity uses `max_population` squad slots identically online and offline, regardless of loaded NPC job tables.
+
+A living local player counts as one member of their real faction at the nearest service-capable base within its arrival radius. Clear a base and wait for suitable squads: the filler separates existing members to fill service vacancies. An emission is no longer required. Leaving before the recruitment check removes the player's presence; disguises do not change ownership faction.
+
+Empty and sparsely occupied service bases gain weight for exploration, population and patrol routes. Night rest uses the bonus to adjust distance between equally crowded options. Empty bases admit any stalker faction, while occupied bases attract the owner's faction and non-hostile factions. Capacity includes incoming squads; ordinary base-tagged smarts without service jobs get no bonus. Together remote players are outside this feature's scope.
 
 ## NPC Squad Quests
 
@@ -63,7 +78,7 @@ Real artefacts are registered in runtime indexes and belong to exactly one suita
 
 1. Disable or remove old REZNYA, SISKI, and ZHOPA versions.
 2. In MO2, select `File` -> `Install Mod...`.
-3. Select the Z.H.O.P.A. ALIFE 2.2 archive and confirm installation.
+3. Select the Z.H.O.P.A. ALIFE 2.3 archive and confirm installation.
 4. Place the addon below conflicting mods when its bundled `axr_trade_manager.script` must win the conflict.
 
 ### Manual
@@ -118,7 +133,7 @@ ZHOPA can cleanly leave a running game and prepare the next save for addon remov
 4. Create a new manual save after cleanup succeeds.
 5. Exit the game before disabling or removing the addon in MO2.
 
-The switch immediately cancels managed tasks, removes service squads created by ZHOPA, clears ZHOPA fields from squads and script storage, unregisters its callbacks, and restores runtime-patched functions where no later addon has replaced them. While disabled, ZHOPA remains dormant; enabling it again rebuilds its runtime from the current world state.
+The switch immediately cancels managed tasks, returns recruited NPCs to ordinary squads and removes old spawned service squads, clears ZHOPA fields from squads and script storage, unregisters its callbacks, and restores runtime-patched functions where no later addon has replaced them. While disabled, ZHOPA remains dormant; enabling it again rebuilds its runtime from the current world state.
 
 Cleanup cannot reverse events that already changed the world, including deaths, spawned or collected items, faction relations changed by other systems, zombification, or completed migration. It does not migrate SISKI/ZHOPA1 saves. Do not continue playing after a BusyHands warning; reload a save or return to the main menu.
 
@@ -127,6 +142,8 @@ Cleanup cannot reverse events that already changed the world, including deaths, 
 Enable `debug_hud_enabled` in MCM. Managed squad markers will appear on the PDA map; their tooltips show task, target, smart, reason, and last result. This mode is intended for diagnostics and can reveal otherwise hidden simulation behavior.
 
 Additional diagnostic scripts live in `debugscripts`. They are not part of a normal user installation and are enabled only for focused subsystem testing.
+
+Service audits `zhopa2_service_recruitment.audit_level()` (also `zhopa2_recruit_trader_probe.audit_level()`) and guard audits `zhopa2_guard_refill.audit_level()` ship in the release and require no debug package.
 
 ## Documentation
 

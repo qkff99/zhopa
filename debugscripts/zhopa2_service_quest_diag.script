@@ -1,0 +1,79 @@
+-- Manual, read-only snapshot. No startup hooks or quest mutations.
+local function log(text)
+    printf("~ ZHOPA2 quest diag | %s", text)
+end
+
+local function call(object, method, ...)
+    local args = {...}
+    local ok, value = pcall(function()
+        return object[method](object, unpack(args))
+    end)
+    return ok and value or nil
+end
+
+local function run(npc_id)
+    if not (db and db.actor and task_manager and axr_task_manager and level) then
+        log("runtime_not_ready")
+        return false
+    end
+    local npc = npc_id and level.object_by_id(tonumber(npc_id)) or level.get_target_obj()
+    if not npc then
+        log("no_target: aim at the trader, or pass his numeric object ID")
+        return false
+    end
+    local id = call(npc, "id")
+    local section = call(npc, "section")
+    local name = call(npc, "name")
+    if not (id and section and name) then
+        log("target_has_no_npc_identity")
+        return false
+    end
+    local st = db.storage and db.storage[id]
+    local override = st and st.ini and st.section_logic
+        and call(st.ini, "r_string_ex", st.section_logic, "task_section")
+    local prefix = override and (override .. "_task_")
+        or ((section ~= "m_trader" and section or name) .. "_task_")
+    local sim_prefix = override and (override .. "_task_") or "simulation_task_"
+    local server = alife() and alife():object(id)
+    log(string.format("npc=%s name=%s section=%s group=%s logic=%s override=%s prefix=%s",
+        tostring(id), name, section, tostring(server and server.group_id),
+        tostring(st and st.section_logic), tostring(override), prefix))
+
+    local lookup = axr_task_manager.get_first_finished_task
+    for _, mode in ipairs({"dynamic", "simulation"}) do
+        local ok, result = pcall(lookup, npc, mode == "simulation")
+        log(mode .. " lookup_ok=" .. tostring(ok) .. " result=" .. tostring(result))
+    end
+    local info = debug and debug.getinfo and debug.getinfo(lookup, "S")
+    log("lookup_source=" .. tostring(info and info.short_src))
+
+    local tm = task_manager.get_task_manager()
+    if not (tm and type(tm.task_info) == "table") then
+        log("task_info_unavailable")
+        return false
+    end
+    local count = 0
+    for task_id, task in pairs(tm.task_info) do
+        if type(task_id) == "string" and task
+            and task.status ~= "completed" and task.status ~= "fail" then
+            count = count + 1
+            if count > 200 then
+                log("truncated_after_200_active_tasks")
+                break
+            end
+            local cache = axr_task_manager.CFG_CACHE and axr_task_manager.CFG_CACHE[task_id]
+            local configured = call(task_manager.task_ini, "r_float_ex", task_id, "stage_complete")
+            local engine_task = call(db.actor, "get_task", task_id, true)
+            local dynamic_match = task_id:sub(1, #prefix) == prefix
+            local sim_match = task_id:sub(1, #sim_prefix) == sim_prefix
+            log(string.format("task=%s giver=%s stage=%s cached_complete=%s ini_complete=%s status=%s engine_task=%s dynamic_prefix=%s sim_prefix=%s cache_present=%s",
+                task_id, tostring(task.task_giver_id), tostring(task.stage),
+                tostring(cache and cache.stage_complete), tostring(configured), tostring(task.status),
+                tostring(engine_task ~= nil), tostring(dynamic_match), tostring(sim_match), tostring(cache ~= nil)))
+        end
+    end
+    log("snapshot_end")
+    return true
+end
+
+return {run = run}

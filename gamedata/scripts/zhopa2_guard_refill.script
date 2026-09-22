@@ -1,0 +1,394 @@
+-- Permanent guard posts; recruitment transactions and persistence belong to service_recruitment.
+local M = {pending={}}
+local catalogs, claims, cursor = {}, {}, nil
+local claims_revision = -1
+local KEY = "zhopa2_guard_vacancies_v1"
+local function object(id)
+    id=tonumber(id)
+    return id and id>0 and id<65535 and alife_object and alife_object(id) or nil
+end
+local function enabled()
+    local cfg=rawget(_G,"zhopa2_cfg")
+    return cfg and cfg.get_bool and cfg.get_bool("enabled",true) and cfg.get_bool("service_filler_enabled",true)
+        and cfg.get_bool("guard_refill_enabled",true)
+end
+local function ensure_claims()
+    local core=rawget(_G,"zhopa2_service_recruitment")
+    local revision=core and core.guard_revision or 0
+    if claims_revision==revision then return end
+    claims,claims_revision={},revision
+    for _,r in ipairs(core and core.guard_records and core.guard_records() or {}) do
+        if r.guard_post then
+            claims[r.smart_id]=claims[r.smart_id] or {}
+            claims[r.smart_id][r.guard_post]=r.npc_id
+        end
+    end
+end
+local function text(job,smart,section,key)
+    local ini=job.ltx or smart.ltx
+    if not ini or not section then return nil end
+    local ok,value=pcall(function()
+        if ini:section_exist(section) and ini:line_exist(section,key) then return ini:r_string(section,key) end
+    end)
+    return ok and value or nil
+end
+local function alive(id)
+    local npc=object(id)
+    if not npc then return false end
+    if type(npc.alive)~="function" then return nil end
+    local ok,value=pcall(npc.alive,npc)
+    if ok then return value == true end
+    return nil
+end
+local function prefix(job,smart,path)
+    local p=text(job,smart,job.section,"prefix_name") or job.prefix_name
+    return (p and (p=="nil" and "" or p) or smart:name().."_") .. path
+end
+local function place(job,smart)
+    local active=text(job,smart,job.section,"active")
+    if not active or active=="nil" or active:find("{",1,true) then return nil end
+    local scheme=active:match("^([%w_]+)")
+    if scheme~="walker" and scheme~="camper" and scheme~="patrol" and scheme~="animpoint" and scheme~="beh" then return nil end
+    local path=text(job,smart,active,"path_walk") or text(job,smart,active,"path_main")
+    if path then
+        path=prefix(job,smart,path)
+        if not (level and level.patrol_path_exists and level.patrol_path_exists(path)) then return nil end
+        return "path:"..path
+    end
+    local cover=text(job,smart,active,"cover_name")
+    if cover and se_smart_cover and se_smart_cover.registered_smartcovers and se_smart_cover.registered_smartcovers[cover] then
+        return "cover:"..cover
+    end
+    local pt=text(job,smart,active,"pt1")
+    if scheme=="beh" and pt then
+        local x,y,z=pt:match("pos:%s*([%-%d%.]+),%s*([%-%d%.]+),%s*([%-%d%.]+)")
+        if x then return "point:"..x..","..y..","..z end
+    end
+end
+local function guard_job(job,smart)
+    local section=job.section or ""
+    if section:find("follower",1,true) or section:find("defense_enemy",1,true)
+        or text(job,smart,section,"trade") or text(job,smart,section,"monster_job")=="true"
+        or text(job,smart,section,"heli_job")=="true" then return false end
+    if not job.exclusive then return job.job_type_id==9 or job.job_type_id==11 or job.job_type_id==12 end
+    return section:find("guard",1,true)~=nil or section:find("security",1,true)~=nil
+        or section:find("sniper",1,true)~=nil or section:find("camper",1,true)~=nil
+end
+local function catalog(smart)
+    if not smart or not smart.online or type(smart.stalker_jobs)~="table" then return nil end
+    local cached=catalogs[smart.id]
+    if cached and cached.jobs==smart.stalker_jobs and cached.ltx==smart.ltx then return cached end
+    cached={jobs=smart.stalker_jobs,ltx=smart.ltx,posts={},sections={},places={}}
+    for _,job in ipairs(smart.stalker_jobs) do
+        local key=place(job,smart)
+        if key then
+            cached.sections[job.section]={job=job,key=key}
+            if guard_job(job,smart) then
+                local post=cached.places[key]
+                if not post then post={key=key,jobs={}};cached.places[key]=post;cached.posts[#cached.posts+1]=post end
+                post.jobs[#post.jobs+1]=job
+            end
+        end
+    end
+    -- Real exclusive posts precede generated aliases of the same physical point.
+    for _,post in ipairs(cached.posts) do
+        table.sort(post.jobs,function(a,b)
+            if (a.exclusive==true)~=(b.exclusive==true) then return a.exclusive==true end
+            return a.section<b.section
+        end)
+    end
+    table.sort(cached.posts,function(a,b) return a.key<b.key end)
+    catalogs[smart.id]=cached
+    return cached
+end
+local function named_alive(post,smart)
+    for _,job in ipairs(post.jobs) do
+        local raw=text(job,smart,job.section,"suitable") or ""
+        for name in raw:gmatch("=check_npc_name%s*%(([%w_]+)%)") do
+            local id=get_story_object_id and get_story_object_id(name)
+            if id and alive(id)~=false then return true end
+        end
+        for condition,name in raw:gmatch("=([%w_]+)%s*%(([%w_]+)%)") do
+            if condition=="target_squad_name" or condition=="npc_squad_name" then
+                local group=get_story_squad and get_story_squad(name)
+                if group and group:npc_count()>0 then return true end
+            end
+        end
+    end
+    return false
+end
+local function collect_occupants(smart,cat)
+    local by_place,liveness={},{}
+    local function add(section,id)
+        local entry=cat.sections[section]
+        if not entry or not cat.places[entry.key] then return end
+        id=tonumber(id)
+        if not id then return end
+        if liveness[id]==nil then liveness[id]=alive(id)~=false end
+        if not liveness[id] then return end
+        by_place[entry.key]=by_place[entry.key] or {}
+        by_place[entry.key][id]=true
+    end
+    for section,id in pairs(smart.npc_by_job_section or {}) do add(section,id) end
+    for id,info in pairs(smart.npc_info or {}) do if info.job then add(info.job.section,id) end end
+    for id,info in pairs(smart.load_info or {}) do add(info.job_section,id) end
+    -- Native Rostok guard aliases can be active before the job ownership tables catch up.
+    for id,st in pairs(db and db.storage or {}) do
+        if st.section_logic and cat.sections[st.section_logic] then
+            local npc=object(id)
+            if st.gulag_name==smart:name() or (npc and tonumber(npc.m_smart_terrain_id)==smart.id) then add(st.section_logic,id) end
+        end
+    end
+    return by_place
+end
+local function occupancy(post,smart,occupants)
+    local core=rawget(_G,"zhopa2_service_recruitment")
+    occupants=occupants or {}
+    local reserved=claims[smart.id] and claims[smart.id][post.key]
+    if reserved and (not object(reserved) or alive(reserved)~=false) then return "reserved",reserved end
+    if named_alive(post,smart) then return "native_present" end
+    local id=next(occupants)
+    if id then
+        if next(occupants,id) then return "occupied" end
+        local npc=object(id)
+        local squad=npc and object(npc.group_id)
+        if core and core.guard_donor_reason and not core.guard_donor_reason(squad) then return "temporary",id end
+        return "occupied",id
+    end
+    return "vacant"
+end
+function M.snapshot(smart)
+    ensure_claims()
+    local cat=catalog(smart)
+    if not cat then return nil,"guard_jobs_pending" end
+    local result={}
+    local occupied=collect_occupants(smart,cat)
+    for _,post in ipairs(cat.posts) do
+        local state,id=occupancy(post,smart,occupied[post.key])
+        result[#result+1]={post=post,state=state,occupant=id}
+    end
+    return result
+end
+local function services_ready(smart)
+    local bases=rawget(_G,"zhopa2_bases")
+    local core=zhopa2_service_recruitment
+    for _,part in ipairs(bases and bases.members(smart) or {smart}) do
+        if core.is_reserved(part) then return false,"manual_test" end
+        local snap,reason=zhopa2_service_fillers.recruitment_snapshot(part)
+        if not snap then return false,reason or "services_pending" end
+        local present={}
+        for _,list in ipairs({snap.npcs or {},snap.external_npcs or {}}) do
+            for _,npc in ipairs(list) do present[npc.role]=true end
+        end
+        for _,role in ipairs(snap.roles) do
+            if not present[role] and (role=="trader" or role=="tech" or role=="medic" or role=="barman") then
+                local context,why=zhopa2_service_fillers.recruitment_context(part,role)
+                if context or why~="service_present" then return false,"services_first:"..part.id..":"..role end
+            end
+        end
+    end
+    return true
+end
+function M.context(smart,section)
+    if not enabled() then return nil,"guard_refill_disabled" end
+    if not smart or not smart.online or smart.disabled or smart.respawn_only_smart then return nil,"smart_unavailable" end
+    if zhopa2_tasks.surge_active() then return nil,"surge_active" end
+    local ready,why=services_ready(smart)
+    if not ready then return nil,why end
+    local own=zhopa2_index.update_base_ownership(smart)
+    if not own or own.state~="owned" then return nil,"owner_not_stable" end
+    local snap,reason=M.snapshot(smart)
+    if not snap then return nil,reason end
+    for _,entry in ipairs(snap) do
+        if entry.state=="vacant" or entry.state=="temporary" then
+            for _,job in ipairs(entry.post.jobs) do
+                if not section or section==job.section then
+                    return {smart_id=smart.id,owner=own.owner,role="guard",job=job,guard_post=entry.post.key,
+                        guard_occupant=entry.occupant,squad_section=M.section(own.owner)},"guard_vacant"
+                end
+            end
+        end
+    end
+    return nil,"guards_filled"
+end
+function M.section(faction)
+    faction=({dolg="duty",killer="merc"})[faction] or faction
+    local section=tostring(faction).."_sim_squad_guard"
+    return ini_sys and ini_sys:section_exist(section) and section or nil
+end
+function M.accepts(npc,context,smart)
+    if not (db and db.actor) then return false end
+    if context.guard_occupant and context.guard_occupant~=npc.id then return false end
+    local job=context.job
+    if not job.exclusive then
+        local fn=gulag_general.get_job_precondition(job)
+        return not fn or fn(npc,smart,job,smart.npc_info and smart.npc_info[npc.id])==true
+    end
+    local raw=text(job,smart,job.section,"suitable") or "true"
+    if raw=="true" then return true end
+    local parsed=job.zhopa2_guard_conditions
+    if not parsed then
+        local source=xr_logic.parse_condlist(smart,job.section,"suitable",raw)
+        parsed={}
+        for i,clause in ipairs(source or {}) do
+            if clause[3] and next(clause[3]) then return false end
+            local checks={}
+            for _,check in ipairs(clause[2] or {}) do
+                local identity=check[1]=="check_npc_name" or check[1]=="target_squad_name" or check[1]=="npc_squad_name"
+                if not (clause[1]=="true" and identity and check[2]==3) then checks[#checks+1]=check end
+            end
+            parsed[i]={clause[1],checks}
+        end
+        job.zhopa2_guard_conditions=parsed
+    end
+    for _,clause in ipairs(parsed) do for _,check in ipairs(clause[2]) do
+        if (check[2]==3 or check[2]==4) and not (xr_conditions and type(xr_conditions[check[1]])=="function") then return false end
+    end end
+    return xr_logic.pick_section_from_condlist(db.actor,npc,parsed)=="true"
+end
+function M.adopt(group,smart,faction)
+    if group.zhopa2_clear_task then group:zhopa2_clear_task("permanent_guard") end
+    group.zhopa2_managed,group.zhopa2_task,group.zhopa2_target=false,nil,nil
+    group.zhopa2_guard_filler,group.zhopa2_guard_smart_id=true,smart.id
+    group.player_id,group.scripted_target,group.assigned_target_id=faction,smart:name(),smart.id
+    group.current_target_id,group.current_action,group.always_arrived=nil,0,true
+    if tonumber(group.smart_id)~=smart.id then SIMBOARD:assign_squad_to_smart(group,smart.id) end
+    return true
+end
+function M.bind(smart,info,r,setup)
+    if not (smart and info and r and r.smart_id==smart.id) then return false end
+    local cat=catalog(smart)
+    local entry=cat and cat.sections[r.job_section]
+    if not entry or entry.key~=r.guard_post then return false end
+    local current=smart.npc_by_job_section and smart.npc_by_job_section[r.job_section]
+    local st=db.storage and db.storage[r.npc_id]
+    if current==r.npc_id and info.job and info.job.section==r.job_section
+        and (not setup or not (st and st.object) or (info.begin_job and st.section_logic==r.job_section)) then return true end
+    if current and current~=r.npc_id and alive(current)~=false then return false end
+    local occupied=collect_occupants(smart,cat)[entry.key]
+    for id in pairs(occupied or {}) do if id~=r.npc_id then return false end end
+    smart.npc_by_job_section=smart.npc_by_job_section or {}
+    local changed=not info.job or info.job.section~=r.job_section
+    for section,id in pairs(smart.npc_by_job_section) do if id==r.npc_id then smart.npc_by_job_section[section]=nil end end
+    smart.npc_by_job_section[r.job_section]=r.npc_id
+    info.job,info.current_index=entry.job,1
+    if setup and st and st.object and (changed or st.section_logic~=r.job_section or not info.begin_job) then
+        info.begin_job=true
+        if db.offline_objects then db.offline_objects[r.npc_id]={} end
+        smart:setup_logic(st.object)
+    end
+    return true
+end
+function M.reserve(r)
+    ensure_claims()
+    claims[r.smart_id]=claims[r.smart_id] or {}
+    claims[r.smart_id][r.guard_post]=r.npc_id
+end
+function M.release(r)
+    ensure_claims()
+    local set=claims[r.smart_id]
+    if set and set[r.guard_post]==r.npc_id then set[r.guard_post]=nil end
+    M.on_smart_update(object(r.smart_id))
+end
+function M.blocks(job,smart,npc_id)
+    ensure_claims()
+    local set=smart and claims[smart.id]
+    if not set or not next(set) then return false end
+    local cat=catalog(smart)
+    local entry=cat and cat.sections[job.section]
+    local owner=entry and set[entry.key]
+    return owner and owner~=npc_id and (not object(owner) or alive(owner)~=false) or false
+end
+function M.factions(smart)
+    ensure_claims()
+    local result={}
+    for _,part in ipairs(zhopa2_bases.members(smart)) do
+        for _,id in pairs(claims[part.id] or {}) do
+            local npc=object(id)
+            if not npc then return nil,"guard_factions_pending" end
+            if alive(id)~=false then
+                local r=zhopa2_service_recruitment.guard_record(npc)
+                if not r then return nil,"guard_factions_pending" end
+                result[r.service_faction or r.owner]=true
+            end
+        end
+    end
+    return result
+end
+function M.on_smart_update(smart)
+    if smart and smart.id and zhopa2_bases.is_base(smart) and not M.pending[smart.id] then
+        M.pending[smart.id]={next_check=0,reason="guard_check"}
+    end
+end
+function M.process_queue()
+    if not enabled() or not (db and db.actor and level) then return false end
+    local now=time_global()
+    for _=1,8 do
+        if cursor and not M.pending[cursor] then cursor=nil end
+        local id,entry=next(M.pending,cursor);cursor=id
+        if not id then return false end
+        if now>=(entry.next_check or 0) then
+            entry.next_check=now+math.max(5,zhopa2_cfg.get_num("service_filler_interval_sec",15))*1000
+            local smart=object(id)
+            if not smart then M.pending[id]=nil;return false end
+            if not smart.online or zhopa2_perception.obj_level(smart)~=level.name() then entry.reason="offline_unconfirmed";entry.next_check=now+60000;return false end
+            local selected
+            local snap=M.snapshot(smart)
+            local choices={}
+            for _,item in ipairs(snap or {}) do
+                if item.state=="vacant" or item.state=="temporary" then
+                    for _,job in ipairs(item.post.jobs) do choices[#choices+1]=job.section end
+                end
+            end
+            if #choices>0 then entry.cursor=((entry.cursor or 0)%#choices)+1;selected=choices[entry.cursor] end
+            local context,why=M.context(smart,selected)
+            entry.reason=why
+            if why=="guards_filled" then M.pending[id]=nil end
+            if context then
+                local ok,detail=zhopa2_service_recruitment.recruit(id,"guard",context.job.section)
+                entry.reason=ok and "guard_recruited" or tostring(detail)
+                return true
+            end
+            return false
+        end
+    end
+    return false
+end
+function M.on_smart_unregister(smart)
+    if smart then M.pending[smart.id],catalogs[smart.id],claims[smart.id]=nil,nil,nil end
+end
+function M.audit_level()
+    if not (SIMBOARD and level and db and db.actor) then return false end
+    for _,node in pairs(SIMBOARD.smarts or {}) do
+        local smart=node.smrt
+        if smart and zhopa2_bases.is_base(smart) and zhopa2_perception.obj_level(smart)==level.name() then
+            local snap=M.snapshot(smart)
+            if snap and #snap>0 then
+                local queued=M.pending[smart.id]
+                printf("~ ZHOPA_GUARD | smart=%s name=%s posts=%s queue=%s",smart.id,smart:name(),#snap,tostring(queued and queued.reason))
+                for _,entry in ipairs(snap) do
+                    printf("~ ZHOPA_GUARD | post=%s job=%s state=%s npc=%s",entry.post.key,entry.post.jobs[1].section,entry.state,tostring(entry.occupant))
+                end
+            end
+        end
+    end
+    return true
+end
+local function save(data) data[KEY]=M.pending end
+local function load(data)
+    M.pending,catalogs,claims,cursor={}, {},{},nil
+    claims_revision=-1
+    for id in pairs(type(data[KEY])=="table" and data[KEY] or {}) do
+        id=tonumber(id);if id and id>0 and id<65535 then M.pending[id]={next_check=0,reason="loaded_unconfirmed"} end
+    end
+end
+function M.on_game_start()
+    for name,fn in pairs({save_state=save,load_state=load}) do
+        if UnregisterScriptCallback then UnregisterScriptCallback(name,fn) end
+        if RegisterScriptCallback then RegisterScriptCallback(name,fn) end
+    end
+end
+function M.on_master_disable() M.pending,catalogs,claims,cursor={},{},{},nil;claims_revision=-1;return true end
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_guard_refill=M
+return M

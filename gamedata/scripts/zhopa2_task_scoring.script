@@ -12,6 +12,10 @@ local level_meta_cache = {}
 local profile_name_cache = {}
 local strength_cache = {}
 local on_game_load
+local population_by_level = {}
+local arrivals_by_level = {}
+local population_by_squad = {}
+local population_ready = false
 
 local function cfg()
 	local mod = rawget(_G, "zhopa2_cfg")
@@ -60,6 +64,8 @@ local function reset_runtime()
 	level_meta_cache = {}
 	profile_name_cache = {}
 	strength_cache = {}
+	population_by_level, arrivals_by_level, population_by_squad = {}, {}, {}
+	population_ready = false
 end
 
 local function reload_ini()
@@ -275,6 +281,81 @@ local function ensure_presence()
 	end
 end
 
+local function add_population(bucket, level_name, amount)
+	if level_name then bucket[level_name] = math.max(0, (bucket[level_name] or 0) + amount) end
+end
+
+local function remove_population(id)
+	local entry = population_by_squad[id]
+	if not entry then return end
+	add_population(population_by_level, entry.level, -entry.count)
+	add_population(arrivals_by_level, entry.destination, -entry.count)
+	population_by_squad[id] = nil
+end
+
+function M.on_squad_population_changed(squad, level_name)
+	if not population_ready then return end
+	local id = tonumber(squad and squad.id)
+	if not id then return end
+	local p = perception()
+	if not p or (p.is_monster_squad and p.is_monster_squad(squad)) or squad.disabled then
+		remove_population(id)
+		return
+	end
+	level_name = level_name or (p.obj_level and p.obj_level(squad))
+	local count = tonumber(squad.zhopa2_cached_npc_count)
+	if count == nil and type(squad.npc_count) == "function" then
+		local ok, value = pcall(squad.npc_count, squad)
+		count = ok and tonumber(value) or nil
+	end
+	if not level_name or not count or count <= 0 then remove_population(id); return end
+	local target_id = tonumber(squad.zhopa2_target or squad.assigned_target_id or squad.current_target_id)
+	local target = target_id and target_id > 0 and alife_object and alife_object(target_id)
+	local destination = target and p.obj_level and p.obj_level(target) or nil
+	if destination == level_name then destination = nil end
+	local old = population_by_squad[id]
+	if old and old.level == level_name and old.count == count and old.destination == destination then return end
+	remove_population(id)
+	population_by_squad[id] = {level = level_name, count = count, destination = destination}
+	add_population(population_by_level, level_name, count)
+	add_population(arrivals_by_level, destination, count)
+end
+
+local function rebuild_population(board)
+	population_by_level, arrivals_by_level, population_by_squad = {}, {}, {}
+	population_ready = true
+	for level_name, bucket in pairs(board and board.zhopa2_squads_by_level or {}) do
+		for _, squad in pairs(bucket) do M.on_squad_population_changed(squad, level_name) end
+	end
+	population_ready = true
+end
+
+function M.roam_population_modifier(squad, target_level)
+	if not cfg_bool("faction_presence_balance_enabled", true) then return 1 end
+	local p = perception()
+	if not p or not target_level or (p.is_monster_squad and p.is_monster_squad(squad)) then return 1 end
+	if not population_ready then
+		local board = rawget(_G, "SIMBOARD")
+		if not (board and board.zhopa2_buckets_ready and board.zhopa2_squads_by_level) then return 1 end
+		rebuild_population(board)
+	end
+	M.on_squad_population_changed(squad)
+	local own = population_by_squad[tonumber(squad and squad.id)]
+	if not own then return 1 end
+	local source = (population_by_level[own.level] or 0) + (arrivals_by_level[own.level] or 0)
+	local target = (population_by_level[target_level] or 0) + (arrivals_by_level[target_level] or 0)
+	if target_level ~= own.level and target_level ~= own.destination then target = target + own.count end
+	local smoothing = math.max(1, ini_number("roam_population", "smoothing_npc") or 10)
+	local minimum = math.max(0.01, ini_number("roam_population", "minimum_multiplier") or 0.5)
+	local maximum = math.max(minimum, ini_number("roam_population", "maximum_multiplier") or 2)
+	return math.max(minimum, math.min(maximum, (source + smoothing) / (target + smoothing)))
+end
+
+function M.roam_distance_modifier(hops)
+	local cost = math.max(0, ini_number("roam_population", "extra_hop_cost") or 0.35)
+	return 1 / (1 + math.max(0, (tonumber(hops) or 1) - 1) * cost)
+end
+
 local function profile_name_for_faction(faction)
 	if not faction then
 		return nil
@@ -401,7 +482,7 @@ local function geography_modifier(squad, target_level)
 	return math.max(floor, modifier)
 end
 
-local function presence_modifier(squad, target_level)
+local function presence_modifier(squad, target_level, roaming)
 	if cfg_bool("faction_presence_balance_enabled", true) ~= true then
 		return 1
 	end
@@ -429,7 +510,14 @@ local function presence_modifier(squad, target_level)
 		end
 	end
 	local modifier = 1
-	modifier = modifier + friendly * (ini_number("faction_presence", "ally_bonus_per_strength") or 0.025)
+	local ally_bonus = friendly * (ini_number("faction_presence", "ally_bonus_per_strength") or 0.025)
+	if roaming then
+		local load = (population_by_level[target_level] or 0) + (arrivals_by_level[target_level] or 0)
+		local smoothing = math.max(1, ini_number("roam_population", "smoothing_npc") or 10)
+		ally_bonus = math.min(ally_bonus, ini_number("roam_population", "ally_bonus_cap") or 0.1)
+			* smoothing / (smoothing + load)
+	end
+	modifier = modifier + ally_bonus
 	modifier = modifier - hostile * (ini_number("faction_presence", "enemy_penalty_per_strength") or 0.035)
 	local minimum = ini_number("faction_presence", "minimum_multiplier") or 0.35
 	local maximum = ini_number("faction_presence", "maximum_multiplier") or 1.50
@@ -475,6 +563,7 @@ function M.make_candidate(squad, choice, base_weight, selection_class)
 		task = choice.task,
 		target = choice.target,
 		target_level = choice.target_level or M.target_level(target),
+		target_hops = choice.target_hops,
 		base_weight = math.max(0, tonumber(base_weight) or tonumber(choice.weight) or 0),
 		payload = choice,
 		selection_class = selection_class or "ordinary",
@@ -509,12 +598,25 @@ function M.select_candidate(squad, candidates, context)
 		local candidate = candidates[i]
 		local base = tonumber(candidate and candidate.base_weight) or 0
 		if base > 0 then
+			local p = perception()
+			local roaming = (candidate.task == "EXPLORE" or candidate.task == "POPULATE" or candidate.task == "PATROL")
+				and p and type(p.is_monster_squad) == "function" and not p.is_monster_squad(squad)
+			local population = roaming and M.roam_population_modifier(squad, candidate.target_level) or 1
+			local distance = roaming and M.roam_distance_modifier(candidate.target_hops) or 1
 			local geography = geography_modifier(squad, candidate.target_level)
-			local presence = presence_modifier(squad, candidate.target_level)
+			local presence = presence_modifier(squad, candidate.target_level, roaming)
 			local lore, profile = lore_modifier(squad, candidate)
-			local final = base * geography * presence * lore
+			local settlement = 1
+			if candidate.task == "EXPLORE" or candidate.task == "POPULATE" or candidate.task == "PATROL" then
+				local p = perception()
+				local smart = alife_object and alife_object(tonumber(candidate.target))
+				if p and type(p.service_base_roam_weight) == "function" and smart then
+					settlement = p.service_base_roam_weight(squad, smart) or 1
+				end
+			end
+			local final = base * geography * presence * lore * settlement * population * distance
 			if final > 0 then
-				candidate.modifiers = { geography = geography, presence = presence, lore = lore }
+				candidate.modifiers = { geography = geography, presence = presence, lore = lore, settlement = settlement, population = population, distance = distance }
 				candidate.profile = profile
 				candidate.final_weight = final
 				scored[#scored + 1] = candidate
@@ -527,8 +629,29 @@ function M.select_candidate(squad, candidates, context)
 			debug_printf("~ ZHOPA2 task score | skipped [%s] task [%s] target [%s]", candidate.skipped_reason, tostring(candidate and candidate.task or "-"), tostring(candidate and candidate.target or "-"))
 		end
 	end
+	local base_perception = perception()
+	local bases = base_perception and base_perception.is_monster_squad and not base_perception.is_monster_squad(squad) and rawget(_G, "zhopa2_bases")
+	if bases then
+		local shares = {}
+		for _, candidate in ipairs(scored) do
+			candidate.base_group_key = nil
+			if candidate.task == "EXPLORE" or candidate.task == "POPULATE" or candidate.task == "PATROL" then
+				local target = tonumber(candidate.target)
+				local smart = target and alife_object and alife_object(target)
+				local group = smart and bases.group(smart)
+				candidate.base_group_key = group and (candidate.task .. ":" .. group) or nil
+				if candidate.base_group_key then shares[candidate.base_group_key] = (shares[candidate.base_group_key] or 0) + 1 end
+			end
+		end
+		for _, candidate in ipairs(scored) do
+			if candidate.base_group_key then candidate.final_weight = candidate.final_weight / shares[candidate.base_group_key] end
+		end
+	end
 	local selected = weighted_pick(scored)
 	if selected then
+		if selected.task == "EXPLORE" or selected.task == "POPULATE" or selected.task == "PATROL" then
+			debug_printf("~ ZHOPA2 roam balance | squad [%s] task [%s] level [%s] population [%.2f] route [%.2f] hops [%s] safety [%.2f]", tostring(squad and squad.id or "-"), tostring(selected.task), tostring(selected.target_level or "-"), selected.modifiers.population, selected.modifiers.distance, tostring(selected.target_hops or "-"), selected.modifiers.presence)
+		end
 		debug_printf("~ ZHOPA2 task score | squad [%s] task [%s] target [%s] level [%s] base [%.2f] geo [%.2f] presence [%.2f] lore [%.2f] final [%.2f] profile [%s]", tostring(squad and squad.id or "-"), tostring(selected.task), tostring(selected.target), tostring(selected.target_level or "-"), tonumber(selected.base_weight) or 0, tonumber(selected.modifiers.geography) or 1, tonumber(selected.modifiers.presence) or 1, tonumber(selected.modifiers.lore) or 1, tonumber(selected.final_weight) or 0, tostring(selected.profile or "-"))
 		return selected.payload, selected
 	end
@@ -595,6 +718,8 @@ function M.on_smart_unregistered(_, _)
 end
 
 function M.on_squad_level_changed(squad, old_level, new_level)
+	if new_level then M.on_squad_population_changed(squad, new_level)
+	else remove_population(tonumber(squad and squad.id)) end
 	if new_level then
 		track_presence(squad, new_level)
 	else
@@ -605,6 +730,7 @@ end
 
 function M.on_squad_unregistered(squad, _)
 	local squad_id = tonumber(squad and squad.id)
+	if squad_id then remove_population(squad_id) end
 	remove_presence(squad_id)
 	if squad_id then
 		strength_cache[squad_id] = nil
@@ -614,6 +740,7 @@ end
 function M.on_buckets_rebuilt(board)
 	geometry_dirty = true
 	rebuild_presence(board)
+	rebuild_population(board)
 end
 
 function M.on_game_start()

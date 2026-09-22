@@ -256,11 +256,11 @@ local function service_squad_soft(squad)
 	if not squad then
 		return false
 	end
-	if squad.zhopa2_service_filler == true then
+	if squad.zhopa2_service_filler == true or squad.zhopa2_guard_filler == true then
 		return true
 	end
 	local section = squad_section_name(squad)
-	return type(section) == "string" and string.find(section, "_sim_squad_service_", 1, true) ~= nil
+	return type(section) == "string" and (string.find(section, "_sim_squad_service_", 1, true) ~= nil or section:match("_sim_squad_guard$") ~= nil)
 end
 
 local function scripted_target_manageable_soft(squad)
