@@ -278,12 +278,14 @@ local function install_hooks()
     if guards then
         for _,name in ipairs({"dialogs_axr_companion","dialogs_axr_companion2"}) do
             local companion=rawget(_G,name)
-            for _,key in ipairs({"is_non_story","become_actor_companion"}) do
+            for _,key in ipairs({"is_non_story"}) do
                 if companion and type(companion[key])=="function" then
                     hook(companion,key,function(original)
                         return function(a,b,...)
-                            local r=record_for(dialogs.who_is_npc(a,b))
-                            if r and r.role=="guard" then return false end
+                            local npc=b
+                            if a~=nil then npc=dialogs.who_is_npc(a,b) end
+                            local r=record_for(npc)
+                            if a~=nil and r and r.role=="guard" then return false end
                             return original(a,b,...)
                         end
                     end)

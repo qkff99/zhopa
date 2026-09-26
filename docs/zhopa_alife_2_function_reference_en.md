@@ -11,8 +11,8 @@ python tools/generate_function_reference.py
 ```
 
 - Runtime script functions: 2389
-- Diagnostic script functions: 586
-- Total documented named functions: 2975
+- Diagnostic script functions: 591
+- Total documented named functions: 2980
 
 ## Reading Notes
 
@@ -59,6 +59,7 @@ python tools/generate_function_reference.py
 | Diagnostic | `debugscripts/zhopa2_artifact_flow_diag.script` | 64 | artifact flow diag diagnostics or helpers. |
 | Diagnostic | `debugscripts/zhopa2_base_camping_diag.script` | 4 | base camping diag diagnostics or helpers. |
 | Diagnostic | `debugscripts/zhopa2_bucket_diag.script` | 54 | bucket diag diagnostics or helpers. |
+| Diagnostic | `debugscripts/zhopa2_guard_guide_probe.script` | 5 | one-shot debug helper that creates a vanilla guide offer for the looked-at ZHOPA guard. |
 | Diagnostic | `debugscripts/zhopa2_loot_loop_diag.script` | 52 | loot loop diag diagnostics or helpers. |
 | Diagnostic | `debugscripts/zhopa2_loot_post_job_diag.script` | 39 | loot post job diag diagnostics or helpers. |
 | Diagnostic | `debugscripts/zhopa2_mutant_diag.script` | 47 | mutant diag diagnostics or helpers. |
@@ -1963,44 +1964,44 @@ Role: shared existing-NPC transfer, service and guard records, rollback, save/lo
 | 227 | `M.open_upgrade` | module export | `a, b` | Supports service recruitment subsystem behavior. |
 | 263 | `M.heal` | module export | `a, b, kind` | Supports service recruitment subsystem behavior. |
 | 276 | `install_hooks` | local helper | `` | Supports service recruitment subsystem behavior. |
-| 398 | `snapshot` | local helper | `npc, label` | Supports service recruitment subsystem behavior. |
-| 411 | `assert_inventory` | local helper | `before, after` | Supports service recruitment subsystem behavior. |
-| 415 | `protected_quest` | local helper | `npc_id, squad_id` | Supports service recruitment subsystem behavior. |
-| 425 | `choose_smart` | local helper | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 434 | `donor_squads` | local helper | `smart, owner` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 438 | `add` | local helper | `id, part_id, origin` | Maintains indexed runtime state by adding or removing entries. |
-| 481 | `peaceful_factions` | local helper | `a, b` | Supports service recruitment subsystem behavior. |
-| 492 | `donor_block_reason` | local helper | `group, owner, services` | Supports service recruitment subsystem behavior. |
-| 525 | `preflight` | local helper | `smart_id, role, quiet, job_section` | Supports service recruitment subsystem behavior. |
-| 628 | `refresh` | local helper | `group` | Supports service recruitment subsystem behavior. |
-| 637 | `release_empty` | local helper | `group` | Clears transient state, reservations, or stale runtime references. |
-| 646 | `bind_service` | local helper | `smart, group, npc, context` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 674 | `undo_record` | local helper | `allow_offline` | Supports service recruitment subsystem behavior. |
-| 746 | `M.inspect` | module export | `smart_id, role` | Supports service recruitment subsystem behavior. |
-| 753 | `M.run` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
-| 825 | `M.status` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 853 | `M.stock` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 869 | `M.undo` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 878 | `finish_batch` | local helper | `reason` | Supports service recruitment subsystem behavior. |
-| 890 | `batch_step` | local helper | `` | Supports service recruitment subsystem behavior. |
-| 970 | `M.test_smart` | module export | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 1036 | `M.batch_status` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1048 | `M.audit_level` | module export | `` | Resolves level, graph, route, distance, or position data. |
-| 1128 | `M.restore` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1166 | `save_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
-| 1167 | `load_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
-| 1172 | `trade_closed` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 1173 | `traded` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 1177 | `npc_online` | local helper | `npc` | Supports service recruitment subsystem behavior. |
-| 1187 | `npc_gone` | local helper | `npc` | Supports service recruitment subsystem behavior. |
-| 1198 | `M.owns_squad` | module export | `group` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1204 | `M.is_reserved` | module export | `smart` | Supports service recruitment subsystem behavior. |
-| 1211 | `M.recruit` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
-| 1226 | `M.guard_record` | module export | `npc` | Supports service recruitment subsystem behavior. |
-| 1230 | `M.guard_records` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1237 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 1248 | `M.on_game_start` | module export | `` | Runtime hook for service recruitment lifecycle integration. |
-| 1270 | `on_game_start` | script hook/global | `` | Runtime hook for service recruitment lifecycle integration. |
+| 400 | `snapshot` | local helper | `npc, label` | Supports service recruitment subsystem behavior. |
+| 413 | `assert_inventory` | local helper | `before, after` | Supports service recruitment subsystem behavior. |
+| 417 | `protected_quest` | local helper | `npc_id, squad_id` | Supports service recruitment subsystem behavior. |
+| 427 | `choose_smart` | local helper | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 436 | `donor_squads` | local helper | `smart, owner` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 440 | `add` | local helper | `id, part_id, origin` | Maintains indexed runtime state by adding or removing entries. |
+| 483 | `peaceful_factions` | local helper | `a, b` | Supports service recruitment subsystem behavior. |
+| 494 | `donor_block_reason` | local helper | `group, owner, services` | Supports service recruitment subsystem behavior. |
+| 527 | `preflight` | local helper | `smart_id, role, quiet, job_section` | Supports service recruitment subsystem behavior. |
+| 630 | `refresh` | local helper | `group` | Supports service recruitment subsystem behavior. |
+| 639 | `release_empty` | local helper | `group` | Clears transient state, reservations, or stale runtime references. |
+| 648 | `bind_service` | local helper | `smart, group, npc, context` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 676 | `undo_record` | local helper | `allow_offline` | Supports service recruitment subsystem behavior. |
+| 748 | `M.inspect` | module export | `smart_id, role` | Supports service recruitment subsystem behavior. |
+| 755 | `M.run` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
+| 827 | `M.status` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 855 | `M.stock` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 871 | `M.undo` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 880 | `finish_batch` | local helper | `reason` | Supports service recruitment subsystem behavior. |
+| 892 | `batch_step` | local helper | `` | Supports service recruitment subsystem behavior. |
+| 972 | `M.test_smart` | module export | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 1038 | `M.batch_status` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1050 | `M.audit_level` | module export | `` | Resolves level, graph, route, distance, or position data. |
+| 1130 | `M.restore` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1168 | `save_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
+| 1169 | `load_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
+| 1174 | `trade_closed` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 1175 | `traded` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 1179 | `npc_online` | local helper | `npc` | Supports service recruitment subsystem behavior. |
+| 1189 | `npc_gone` | local helper | `npc` | Supports service recruitment subsystem behavior. |
+| 1200 | `M.owns_squad` | module export | `group` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1206 | `M.is_reserved` | module export | `smart` | Supports service recruitment subsystem behavior. |
+| 1213 | `M.recruit` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
+| 1228 | `M.guard_record` | module export | `npc` | Supports service recruitment subsystem behavior. |
+| 1232 | `M.guard_records` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1239 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 1250 | `M.on_game_start` | module export | `` | Runtime hook for service recruitment lifecycle integration. |
+| 1272 | `on_game_start` | script hook/global | `` | Runtime hook for service recruitment lifecycle integration. |
 
 ### `gamedata/scripts/zhopa2_smart_service_slot_doctor.script`
 
@@ -2855,6 +2856,18 @@ Role: bucket diag diagnostics or helpers.
 | 958 | `actor_on_first_update` | script hook/global | `` | Runtime hook for bucket diag lifecycle integration. |
 | 962 | `actor_on_update` | script hook/global | `` | Runtime hook for bucket diag lifecycle integration. |
 | 966 | `on_game_start` | script hook/global | `` | Runtime hook for bucket diag lifecycle integration. |
+
+### `debugscripts/zhopa2_guard_guide_probe.script`
+
+Role: one-shot debug helper that creates a vanilla guide offer for the looked-at ZHOPA guard.
+
+| Line | Function | Kind | Parameters | Description |
+| ---: | --- | --- | --- | --- |
+| 4 | `fail` | local helper | `reason` | Supports guard guide probe subsystem behavior. |
+| 9 | `has_native_destination` | local helper | `npc` | Supports guard guide probe subsystem behavior. |
+| 42 | `M.force_from_looked_at_npc` | module export | `` | Supports guard guide probe subsystem behavior. |
+| 79 | `guide.ins_mass_onl` | assigned wrapper | `` | Supports guard guide probe subsystem behavior. |
+| 80 | `guide.go_poisk` | assigned wrapper | `` | Supports guard guide probe subsystem behavior. |
 
 ### `debugscripts/zhopa2_loot_loop_diag.script`
 

@@ -1,3 +1,8 @@
+# 2.3.1
+
+### Fixes
+- Guard Refill no longer blocks the underlying action that adds an NPC to the actor's squad, so guide tasks and the debug command work; normal dialogue-based guard hiring remains disabled.
+
 # 2.3
 
 ### General

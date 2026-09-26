@@ -1,0 +1,92 @@
+-- One-shot debug helper. Load from the Debug Executor; this file registers no hooks.
+local M = {}
+
+local function fail(reason)
+    if printf then printf("~ ZHOPA_GUARD_GUIDE | failed | %s", tostring(reason)) end
+    return false, reason
+end
+
+local function has_native_destination(npc)
+    if not (SIMBOARD and SIMBOARD.smarts_by_names and SIMBOARD.smarts
+        and simulation_objects and simulation_objects.available_by_id
+        and simulation_objects.is_on_the_same_level and game_relations
+        and game_relations.is_factions_enemies and alife and game_graph and level) then
+        return false
+    end
+    local se_npc = alife_object(npc:id())
+    local sim, graph = alife(), game_graph()
+    if not (se_npc and sim and graph) then return false end
+
+    for _, smart in pairs(SIMBOARD.smarts_by_names) do
+        local vertex_id = smart and smart.m_game_vertex_id
+        if smart and vertex_id and simulation_objects.available_by_id[smart.id] == true
+            and graph:valid_vertex_id(vertex_id) then
+            local vertex = graph:vertex(vertex_id)
+            if vertex and sim:level_name(vertex:level_id()) == level.name() then
+                local node = SIMBOARD.smarts[smart.id]
+                if not (node and node.squads) then return true end
+                for squad_id in pairs(node.squads) do
+                    local squad = alife_object(squad_id)
+                    if squad and simulation_objects.is_on_the_same_level(squad, smart)
+                        and squad.current_target_id == smart.id and squad.current_action == 1
+                        and not game_relations.is_factions_enemies(se_npc:community(), squad.player_id) then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function M.force_from_looked_at_npc()
+    local npc = level and level.get_target_obj and level.get_target_obj()
+    if not npc then return fail("aim at the guard before running this function") end
+
+    local recruitment = rawget(_G, "zhopa2_service_recruitment")
+    local guard = recruitment and recruitment.guard_record and recruitment.guard_record(npc)
+    if not guard then return fail("looked-at NPC is not an active ZHOPA guard") end
+    if not (db and db.actor and item_device and item_device.is_pda_charged(true)) then
+        return fail("player needs an in-game actor and a charged PDA")
+    end
+
+    local guide = rawget(_G, "tasks_guide")
+    if not (guide and guide.prec_1 and guide.prepare_follower and guide.ins_mass_onl and guide.go_poisk) then
+        return fail("vanilla guide generator is unavailable")
+    end
+    if db.actor:has_info("guider_start") then return fail("finish or cancel the active guide task first") end
+
+    for _, id in pairs(db.OnlineStalkers or {}) do
+        local other = level.object_by_id(id)
+        if other then
+            local ok, has_offer = pcall(guide.prec_1, db.actor, other)
+            if ok and has_offer then return fail("finish or cancel the existing guide offer first") end
+        end
+    end
+
+    local squad = get_object_squad(npc)
+    local squad_id = squad and squad.id
+    local server_squad = squad_id and alife_object(squad_id)
+    if not (server_squad and npc:id() == server_squad:commander_id()) then
+        return fail("guard must command its own squad")
+    end
+    if not has_native_destination(npc) then
+        return fail("no valid vanilla guide destination on this level; move to a populated location")
+    end
+
+    local old_picker, old_path = guide.ins_mass_onl, guide.go_poisk
+    local ok, err = pcall(function()
+        guide.ins_mass_onl = function() return npc end
+        guide.go_poisk = function() return level.name(), 1 end
+        guide.prepare_follower()
+    end)
+    guide.ins_mass_onl, guide.go_poisk = old_picker, old_path
+    if not ok then return fail(err) end
+
+    local check_ok, offered = pcall(guide.prec_1, db.actor, npc)
+    if not (check_ok and offered) then return fail("vanilla generator did not publish the guard's offer") end
+    if printf then printf("~ ZHOPA_GUARD_GUIDE | vanilla offer created | npc=%s", npc:character_name()) end
+    return true
+end
+
+return M

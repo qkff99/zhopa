@@ -30,6 +30,7 @@ SCRIPT_ROLES = {
     "modxml_zhopa2_squad_dialogue.script": "DXML injection that registers the managed-squad information and travel dialogue without replacing the vanilla dialogue XML",
     "zhopa2_bases.script": "configured compound-base membership and shared base identity",
     "zhopa2_guard_refill.script": "defensive-post catalog, vacancy queue, permanent reservations, and native job pinning",
+    "zhopa2_guard_guide_probe.script": "one-shot debug helper that creates a vanilla guide offer for the looked-at ZHOPA guard",
     "zhopa2_service_recruitment.script": "shared existing-NPC transfer, service and guard records, rollback, save/load restoration, and release diagnostics",
     "zhopa2_service_quests.script": "original workplace task identity, simulation task fallback, turn-in and cancellation",
     "modxml_zhopa2_service_recruitment.script": "DXML dialogue adaptation for recruited service NPCs",
