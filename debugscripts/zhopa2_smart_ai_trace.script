@@ -1,0 +1,653 @@
+-- Paste this whole chunk into the in-game Debug UI Lua Execute.
+-- Snapshot ZHOPA inputs and candidate gates for the smart nearest the actor.
+local PREFIX = "~ ZHOPA2 smart AI trace | "
+local MAX_LOG_LINES = 5000
+local MAX_SQUADS = 60
+local log_lines = 0
+local log_truncated = false
+
+local function log(fmt, ...)
+	if log_lines >= MAX_LOG_LINES then
+		if not log_truncated then
+			log_truncated = true
+			if type(printf) == "function" then pcall(printf, "%s", PREFIX .. "truncated at line limit") end
+		end
+		return
+	end
+	log_lines = log_lines + 1
+	local ok, message = pcall(string.format, fmt, ...)
+	message = ok and message or (tostring(fmt) .. " [format_error]")
+	if type(printf) == "function" then
+		pcall(printf, "%s", PREFIX .. message)
+	elseif type(print) == "function" then
+		pcall(print, PREFIX .. message)
+	end
+end
+
+local function field(obj, key)
+	if obj == nil then return nil end
+	local ok, value = pcall(function() return obj[key] end)
+	if ok then return value end
+	return nil
+end
+
+local function method(obj, key, ...)
+	if obj == nil then return false, nil, "no_object" end
+	local ok_field, fn = pcall(function() return obj[key] end)
+	if not (ok_field and type(fn) == "function") then return false, nil, "missing_method" end
+	local ok, a, b, c = pcall(fn, obj, ...)
+	return ok, a, b, c
+end
+
+local function invoke(fn, ...)
+	if type(fn) ~= "function" then return false, nil, "missing_function" end
+	local ok, a, b, c = pcall(fn, ...)
+	return ok, a, b, c
+end
+
+local function module_call(module, key, ...)
+	return invoke(field(module, key), ...)
+end
+
+local function call_preserving_squad_cooldown(module, name, squad, ...)
+	local before = field(squad, "zhopa2_base_camping_cooldown_started")
+	local ok, a, b, c = module_call(module, name, squad, ...)
+	if before ~= nil and field(squad, "zhopa2_base_camping_cooldown_started") ~= before then
+		pcall(function() squad.zhopa2_base_camping_cooldown_started = before end)
+	end
+	return ok, a, b, c
+end
+
+local function safe_zhopa_manage(squad)
+	local keys = { "zhopa2_cached_npc_count", "zhopa2_task", "zhopa2_target" }
+	local before = {}
+	for i = 1, #keys do before[keys[i]] = field(squad, keys[i]) end
+	local ok, can_manage, reason = method(squad, "zhopa2_can_manage")
+	for i = 1, #keys do
+		local key = keys[i]
+		if field(squad, key) ~= before[key] then
+			pcall(function() squad[key] = before[key] end)
+		end
+	end
+	return ok, can_manage, reason
+end
+
+local function object_id(obj)
+	local id = field(obj, "id")
+	if id ~= nil and type(id) ~= "function" then return id end
+	local ok, value = method(obj, "id")
+	return ok and value or nil
+end
+
+local function object_name(obj)
+	local name = field(obj, "name")
+	if type(name) == "string" then return name end
+	local ok, value = method(obj, "name")
+	return ok and value or nil
+end
+
+local function function_source(fn)
+	if not (debug and type(debug.getinfo) == "function" and type(fn) == "function") then return "-" end
+	local ok, info = pcall(debug.getinfo, fn, "S")
+	if not (ok and info) then return "-" end
+	return tostring(info.short_src or info.source or "?") .. ":" .. tostring(info.linedefined or "?")
+end
+
+local function sorted_keys(value)
+	local keys = {}
+	if type(value) == "table" then
+		for key in pairs(value) do keys[#keys + 1] = key end
+	end
+	table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+	return keys
+end
+
+local function dump_value(path, value, depth, seen)
+	depth = depth or 2
+	seen = seen or {}
+	local kind = type(value)
+	if kind == "table" then
+		if seen[value] then
+			log("%s=<cycle>", path)
+			return
+		end
+		seen[value] = true
+		local keys = sorted_keys(value)
+		log("%s=<table entries=%d>", path, #keys)
+		if depth > 0 then
+			local count = math.min(#keys, 60)
+			for i = 1, count do
+				local key = keys[i]
+				dump_value(path .. "[" .. tostring(key) .. "]", value[key], depth - 1, seen)
+			end
+			if #keys > count then log("%s=<truncated entries=%d>", path, #keys - count) end
+		end
+		seen[value] = nil
+	elseif kind == "function" then
+		log("%s=<function %s>", path, function_source(value))
+	elseif kind == "userdata" or kind == "thread" then
+		log("%s=<%s %s>", path, kind, tostring(value))
+	else
+		log("%s=%s", path, tostring(value))
+	end
+end
+
+local function object_position(obj)
+	local pos = field(obj, "position")
+	if type(pos) == "function" then
+		local ok, value = method(obj, "position")
+		return ok and value or nil
+	end
+	return pos
+end
+
+local function distance_squared(a, b)
+	if not (a and b) then return nil end
+	local ok, distance = pcall(function() return a:distance_to_sqr(b) end)
+	return ok and tonumber(distance) or nil
+end
+
+local function resolve_smart(value)
+	if type(value) == "table" or type(value) == "userdata" then return value end
+	local id = tonumber(value)
+	if not (id and alife_object) then return nil end
+	local ok, smart = pcall(alife_object, id)
+	return ok and smart or nil
+end
+
+local function locate_smart(index, perception)
+	if not (db and db.actor and level and type(level.name) == "function") then
+		log("actor_context=unavailable")
+		return nil
+	end
+	local ok_level, level_name = pcall(level.name)
+	local ok_pos, actor_pos = method(db.actor, "position")
+	if not (ok_level and level_name and ok_pos and actor_pos) then
+		log("actor_context=partial level_ok=%s position_ok=%s", tostring(ok_level), tostring(ok_pos))
+		return nil
+	end
+	local ok_smarts, smarts = module_call(index, "smarts_on_levels", { level_name })
+	if not (ok_smarts and type(smarts) == "table") then
+		smarts = {}
+		for _, node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do
+			local smart = field(node, "smrt") or node
+			if smart and perception and type(perception.obj_level) == "function" then
+				local ok, smart_level = invoke(perception.obj_level, smart)
+				if ok and smart_level == level_name then smarts[#smarts + 1] = smart end
+			end
+		end
+	end
+	local candidates = {}
+	for i = 1, #smarts do
+		local smart = resolve_smart(smarts[i])
+		local dist2 = distance_squared(actor_pos, object_position(smart))
+		if smart and dist2 then
+			local radius = tonumber(field(smart, "arrive_dist")) or 50
+			candidates[#candidates + 1] = {
+				smart = smart,
+				dist2 = dist2,
+				radius = radius,
+				inside = dist2 <= radius * radius,
+			}
+		end
+	end
+	table.sort(candidates, function(a, b) return a.dist2 < b.dist2 end)
+	local chosen
+	for i = 1, #candidates do
+		if candidates[i].inside then chosen = candidates[i]; break end
+	end
+	chosen = chosen or candidates[1]
+	log("actor_level=%s indexed_smarts=%d within_smart_radius=%s", tostring(level_name), #candidates,
+		tostring(chosen and chosen.inside == true))
+	for i = 1, math.min(#candidates, 8) do
+		local entry = candidates[i]
+		local smart = entry.smart
+		local bases = rawget(_G, "zhopa2_bases")
+		local base_ok, is_base = module_call(bases, "is_base", smart)
+		log("near_smart rank=%d name=%s id=%s dist=%.1f arrive_dist=%s inside=%s base=%s disabled=%s",
+			i, tostring(object_name(smart)), tostring(object_id(smart)), math.sqrt(entry.dist2),
+			tostring(entry.radius), tostring(entry.inside),
+			tostring(base_ok and is_base),
+			tostring(field(smart, "disabled")))
+	end
+	return chosen and chosen.smart or nil, level_name
+end
+
+local function dump_function(label, fn)
+	log("function %s=%s", label, function_source(fn))
+end
+
+local function dump_squad(squad, smart, member_ids, members, modules)
+	local id = object_id(squad)
+	local name = object_name(squad)
+	local faction = field(squad, "player_id")
+	local qlevel_ok, qlevel = invoke(modules.perception and modules.perception.obj_level, squad)
+	local smart_id = tonumber(field(squad, "smart_id"))
+	local target_id = tonumber(field(squad, "zhopa2_target"))
+	local task = field(squad, "zhopa2_task")
+	local can_manage_ok, can_manage, manage_reason = safe_zhopa_manage(squad)
+	local at_base = member_ids[smart_id] == true
+	local targets_base = member_ids[target_id] == true
+	local smart_level_ok, smart_level = invoke(modules.perception and modules.perception.obj_level, smart)
+	local same_level = smart_level_ok and qlevel_ok and smart_level ~= nil and smart_level == qlevel
+	local d2 = same_level and distance_squared(object_position(squad), object_position(smart)) or nil
+	log("squad id=%s name=%s faction=%s level=%s smart_id=%s target=%s target_name=%s task=%s managed=%s can_manage=%s manage_reason=%s",
+		tostring(id), tostring(name), tostring(faction), tostring(qlevel_ok and qlevel or "-"),
+		tostring(smart_id), tostring(target_id), tostring(object_name(resolve_smart(target_id))),
+		tostring(task), tostring(field(squad, "zhopa2_managed")), tostring(can_manage_ok and can_manage),
+		tostring(manage_reason))
+	log("squad_state id=%s at_base=%s targets_base=%s distance=%s last_reason=%s last_result=%s script_target=%s current_action=%s disabled=%s cached_npcs=%s",
+		tostring(id), tostring(at_base), tostring(targets_base),
+		tostring(d2 and string.format("%.1f", math.sqrt(d2)) or "-"),
+		tostring(field(squad, "zhopa2_last_reason")), tostring(field(squad, "zhopa2_last_result")),
+		tostring(field(squad, "scripted_target")), tostring(field(squad, "current_action")),
+		tostring(field(squad, "disabled")), tostring(field(squad, "zhopa2_cached_npc_count")))
+	for _, key in ipairs({
+		"zhopa2_until", "zhopa2_started", "zhopa2_base_camping_cooldown_started",
+		"zhopa2_base_camping_release_smart", "zhopa2_runtime_wait_reason",
+		"zhopa2_base_camping_return", "zhopa2_no_target",
+	}) do
+		log("squad_field id=%s %s=%s", tostring(id), key, tostring(field(squad, key)))
+	end
+
+	local live_count_ok, live_count = method(squad, "npc_count")
+	log("squad_npc_count id=%s live_ok=%s live=%s cached=%s", tostring(id),
+		tostring(live_count_ok), tostring(live_count), tostring(field(squad, "zhopa2_cached_npc_count")))
+
+	local cfg, tasks, p, scoring = modules.cfg, modules.tasks, modules.perception, modules.scoring
+	local cfg_pop_ok, cfg_pop = module_call(cfg, "squad_task_weight", squad, "stalker_populate_weight", 20)
+	local task_pop_ok, task_pop = module_call(tasks, "task_enabled", squad, "POPULATE")
+	local task_camp_ok, task_camp = call_preserving_squad_cooldown(tasks, "task_enabled", squad, "BASE_CAMPING")
+	local interrupt_ok, interrupt = call_preserving_squad_cooldown(tasks, "base_camping_can_interrupt", squad)
+	local blacklist_level_ok, blacklist_level = module_call(cfg, "is_level_blacklisted_for_squad", squad, qlevel)
+	local blacklist_smart_ok, blacklist_smart = module_call(cfg, "is_smart_blacklisted_for_squad", squad, smart, qlevel)
+	log("task_gates id=%s populate_enabled=%s populate_weight=%s base_camping_enabled=%s can_interrupt=%s level_blacklisted=%s smart_blacklisted=%s",
+		tostring(id), tostring(task_pop_ok and task_pop), tostring(cfg_pop_ok and cfg_pop),
+		tostring(task_camp_ok and task_camp), tostring(interrupt_ok and interrupt),
+		tostring(blacklist_level_ok and blacklist_level), tostring(blacklist_smart_ok and blacklist_smart))
+
+	local base_weight = cfg_pop_ok and tonumber(cfg_pop) or 0
+	local profile_ok, profile = module_call(scoring, "profile_for_squad", squad)
+	local profile_weight_ok, profile_weight = module_call(scoring, "profile_task_weight", squad, "POPULATE")
+	local hops_ok, hops = module_call(p, "roam_level_hops", squad)
+	local target_level_ok, target_level = invoke(p and p.obj_level, smart)
+	local target_hops = hops_ok and type(hops) == "table" and hops[target_level] or nil
+	local population_ok, population = module_call(scoring, "roam_population_modifier", squad, target_level)
+	local distance_ok, distance = module_call(scoring, "roam_distance_modifier", target_hops)
+	log("task_scoring id=%s profile=%s profile_task_weight=%s populate_config_weight=%s target_level=%s hops=%s population_modifier=%s distance_modifier=%s",
+		tostring(id), tostring(profile_ok and profile or "-"),
+		tostring(profile_weight_ok and profile_weight or "-"), tostring(base_weight),
+		tostring(target_level_ok and target_level or "-"), tostring(target_hops),
+		tostring(population_ok and population or "-"), tostring(distance_ok and distance or "-"))
+	local metadata_ok, level_metadata = module_call(scoring, "level_metadata", target_level)
+	log("task_scoring_level_metadata id=%s ok=%s", tostring(id), tostring(metadata_ok))
+	dump_value("task_scoring_level_metadata_value", level_metadata, 2)
+	for _, entry in ipairs(tasks and tasks.task_registry and tasks.task_registry.stalker or {}) do
+		local enabled_ok, enabled = module_call(tasks, "task_enabled", squad, entry.name)
+		local weight_ok, weight = module_call(cfg, "squad_task_weight", squad,
+			entry.weight_key or "", entry.weight_default or 1)
+		local profile_ok_task, profile_weight_task = module_call(scoring, "profile_task_weight", squad, entry.name)
+		log("task_option id=%s task=%s enabled=%s weight_key=%s weight=%s profile_weight=%s weight_fn=%s",
+			tostring(id), tostring(entry.name), tostring(enabled_ok and enabled),
+			tostring(entry.weight_key), tostring(weight_ok and weight),
+			tostring(profile_ok_task and profile_weight_task), function_source(entry.weight_fn))
+	end
+
+	local valid_smart = p and p.valid_smart
+	for _, mode in ipairs({ "same", "neighbor", "nearby" }) do
+		local options = {
+			level_mode = mode,
+			kind = "rest",
+			populate = true,
+			exclude_current = true,
+			skip_prior = true,
+			service_roam = true,
+		}
+		local ok, allowed = invoke(valid_smart, squad, smart, options)
+		log("populate_target_gate id=%s mode=%s valid_smart=%s", tostring(id), mode,
+			tostring(ok and allowed))
+	end
+	local owner = field(modules.index, "smart_ownership")
+	owner = type(owner) == "table" and owner[object_id(smart)] or nil
+	local relation_ok, relation = module_call(p, "faction_relation_kind", faction, owner and owner.owner)
+	log("base_owner_relation id=%s owner=%s relation_to_owner=%s",
+		tostring(id), tostring(owner and owner.owner), tostring(relation_ok and relation or "-"))
+	local within_pull = same_level and d2 and d2 <= 50 * 50
+	local quest_ok, quest_protected, quest_reason = module_call(p, "quest_protected_squad", squad)
+	local quest_mod = rawget(_G, "zhopa2_npc_quests")
+	local active_quest_ok, active_quest = module_call(quest_mod, "is_active_squad", squad)
+	local story_id
+	if type(get_object_story_id) == "function" and id then
+		local story_ok, value = pcall(get_object_story_id, id)
+		story_id = story_ok and value or nil
+	end
+	local companions = axr_companions and axr_companions.companion_squads
+		and axr_companions.companion_squads[id] or nil
+	local release_block_ok, release_block = false, "not_checked"
+	local released_smart = tonumber(field(squad, "zhopa2_base_camping_release_smart"))
+	if not released_smart then
+		release_block_ok, release_block = true, false
+	elseif within_pull and member_ids[released_smart] then
+		release_block_ok, release_block = module_call(modules.index, "base_camping_release_blocks", squad, smart)
+	end
+	log("empty_base_pull_inputs id=%s same_level=%s distance=%s within_50m=%s ownership_state=%s presence=%s quest_protected=%s quest_reason=%s active_quest=%s story_id=%s companion=%s random_targets=%s action_condlist=%s scripted_target=%s released_smart=%s release_blocks=%s release_check_ok=%s",
+		tostring(id), tostring(same_level), tostring(d2 and string.format("%.1f", math.sqrt(d2)) or "-"),
+		tostring(within_pull), tostring(owner and owner.state), tostring(owner and owner.presence),
+		tostring(quest_ok and quest_protected), tostring(quest_reason),
+		tostring(active_quest_ok and active_quest), tostring(story_id), tostring(companions),
+		tostring(field(squad, "random_targets")), tostring(field(squad, "action_condlist")),
+		tostring(field(squad, "scripted_target")), tostring(field(squad, "zhopa2_base_camping_release_smart")),
+		tostring(release_block_ok and release_block), tostring(release_block_ok))
+	for i = 1, #members do
+		local part = members[i]
+		local part_capacity_ok, part_capacity, part_free, part_resident =
+			module_call(p, "smart_settlement_capacity", squad, part)
+		local service_weight_ok, service_weight = module_call(p, "service_base_roam_weight", squad, part)
+		local job_slots_ok, job_slots = module_call(p, "smart_stalker_free_job_slots", squad, part)
+		local target_valid_ok, target_valid = module_call(p, "base_camping_populate_target_valid", squad, part)
+		log("base_member_gate id=%s member=%s member_id=%s capacity=%s free=%s resident=%s service_roam_weight=%s free_job_slots=%s basecamp_target_valid=%s",
+			tostring(id), tostring(object_name(part)), tostring(object_id(part)),
+			tostring(part_capacity_ok and part_capacity or "-"), tostring(part_capacity_ok and part_free or "-"),
+			tostring(part_capacity_ok and part_resident or "-"), tostring(service_weight_ok and service_weight or "-"),
+			tostring(job_slots_ok and job_slots or "-"), tostring(target_valid_ok and target_valid))
+	end
+
+	local pick_opts = {
+		level_mode = "current_or_nearby",
+		kind = "base",
+		ignore_population = true,
+		exclude_current = true,
+		skip_prior = true,
+		skip_target_precondition = true,
+		safe_rest = true,
+		base_populate_level_priority = true,
+	}
+	local pick_ok, picked = module_call(p, "pick_base_camping_populate_smart", squad, pick_opts)
+	log("basecamp_picker id=%s selected=%s selected_id=%s selected_is_this_base=%s options=%s",
+		tostring(id), tostring(pick_ok and object_name(picked) or "-"),
+		tostring(pick_ok and object_id(picked) or "-"),
+		tostring(pick_ok and picked and member_ids[tonumber(object_id(picked))] == true),
+		"current_or_nearby/base/ignore_population/exclude_current/skip_prior/safe_rest")
+end
+
+local function dump_job_npcs(smart)
+	local npc_info = field(smart, "npc_info")
+	local keys = sorted_keys(npc_info)
+	log("smart_npc_info name=%s id=%s entries=%d", tostring(object_name(smart)),
+		tostring(object_id(smart)), #keys)
+	for i = 1, math.min(#keys, 120) do
+		local key = keys[i]
+		local info = npc_info[key]
+		local npc = field(info, "se_obj")
+		local alive_ok, alive = method(npc, "alive")
+		local community_ok, community = method(npc, "community")
+		local profile_ok, profile = method(npc, "profile_name")
+		local character_ok, character = method(npc, "character_name")
+		log("job_npc smart=%s id=%s stype=%s section=%s job=%s npc_id=%s alive=%s alive_ok=%s player_id=%s community=%s profile=%s character=%s group_id=%s",
+			tostring(object_name(smart)), tostring(key), tostring(field(info, "stype")),
+			tostring(field(info, "section")), tostring(field(field(info, "job"), "section")),
+			tostring(object_id(npc)), tostring(alive), tostring(alive_ok),
+			tostring(field(npc, "player_id")), tostring(community_ok and community or "-"),
+			tostring(profile_ok and profile or "-"), tostring(character_ok and character or "-"),
+			tostring(field(npc, "group_id")))
+		dump_value("npc_info[" .. tostring(key) .. "]", info, 2)
+	end
+	if #keys > 120 then log("job_npc_truncated=%d", #keys - 120) end
+	dump_value("npc_by_job_section", field(smart, "npc_by_job_section"), 2)
+	dump_value("load_info", field(smart, "load_info"), 2)
+end
+
+local function dump_smart(smart, level_name, modules)
+	local idx, bases, p, svc, guards = modules.index, modules.bases,
+		modules.perception, modules.service, modules.guards
+	log("target_smart name=%s id=%s level=%s max_population=%s disabled=%s respawn_only=%s props=%s",
+		tostring(object_name(smart)), tostring(object_id(smart)), tostring(level_name),
+		tostring(field(smart, "max_population")), tostring(field(smart, "disabled")),
+		tostring(field(smart, "respawn_only_smart")), tostring(field(smart, "props")))
+	dump_value("target_smart.props", field(smart, "props"), 2)
+	local base_ok, is_base = module_call(bases, "is_base", smart)
+	local group_ok, group = module_call(bases, "group", smart)
+	local key_ok, base_key = module_call(bases, "key", smart)
+	local service_ok, is_service = module_call(svc, "is_service_base", smart)
+	log("base_api is_base=%s group=%s key=%s service_base=%s",
+		tostring(base_ok and is_base), tostring(group_ok and group or "-"),
+		tostring(key_ok and base_key or "-"), tostring(service_ok and is_service))
+	local members_ok, members = module_call(bases, "members", smart)
+	members = members_ok and type(members) == "table" and members or { smart }
+	local member_ids = {}
+	for i = 1, #members do member_ids[tonumber(object_id(members[i])) or object_id(members[i])] = true end
+	for i = 1, #members do
+		local part = members[i]
+		local id = object_id(part)
+		local part_level_ok, part_level = invoke(p and p.obj_level, part)
+		log("base_member_data name=%s id=%s max_population=%s disabled=%s respawn_only=%s props=%s",
+			tostring(object_name(part)), tostring(id), tostring(field(part, "max_population")),
+			tostring(field(part, "disabled")), tostring(field(part, "respawn_only_smart")),
+			tostring(field(part, "props")))
+		dump_value("base_member.props[" .. tostring(id) .. "]", field(part, "props"), 2)
+		for _, key in ipairs({
+			"zhopa2_ownership_state", "zhopa2_ownership_owner",
+			"zhopa2_presence_state", "zhopa2_presence_count", "zhopa2_base_pull_squad_id",
+			"zhopa2_service_owner", "zhopa2_service_count", "zhopa2_service_allowed_roles",
+			"zhopa2_service_missing_count", "zhopa2_service_missing_roles",
+			"zhopa2_service_native_roles", "zhopa2_service_needs_fill",
+			"zhopa2_job_capacity_stalker", "zhopa2_stalker_job_nonexclusive_sections",
+			"zhopa2_artefact_available", "zhopa2_blacklist_name",
+		}) do
+			dump_value("smart_field[" .. tostring(id) .. "]." .. key, field(part, key), 2)
+		end
+		log("smart_jobs member=%s stalker=%s monster=%s",
+			tostring(id), tostring(type(field(part, "stalker_jobs")) == "table" and #field(part, "stalker_jobs") or "-"),
+			tostring(type(field(part, "monster_jobs")) == "table" and #field(part, "monster_jobs") or "-"))
+		dump_value("stalker_jobs[" .. tostring(id) .. "]", field(part, "stalker_jobs"), 1)
+		dump_value("monster_jobs[" .. tostring(id) .. "]", field(part, "monster_jobs"), 1)
+		dump_job_npcs(part)
+		local own = field(idx, "smart_ownership")
+		own = type(own) == "table" and own[id] or nil
+		log("base_member index=%d name=%s id=%s level=%s cached_owner=%s cached_state=%s presence=%s count=%s",
+			i, tostring(object_name(part)), tostring(id),
+			tostring(part_level_ok and part_level or "-"),
+			tostring(type(own) == "table" and own.owner or "-"),
+			tostring(type(own) == "table" and own.state or "-"),
+			tostring(type(own) == "table" and own.presence or "-"),
+			tostring(type(own) == "table" and own.zhopa2_count or "-"))
+		dump_value("basecamp_bucket[" .. tostring(id) .. "]",
+			type(field(idx, "base_camping_targets")) == "table" and idx.base_camping_targets[id] or nil, 2)
+		dump_value("base_pull_squad[" .. tostring(id) .. "]",
+			type(field(idx, "base_pull_squad")) == "table" and idx.base_pull_squad[id] or nil, 1)
+		dump_value("base_pull_time[" .. tostring(id) .. "]",
+			type(field(idx, "base_pull_time")) == "table" and idx.base_pull_time[id] or nil, 1)
+		local service_snapshot_ok, service_snapshot, service_reason = module_call(svc, "recruitment_snapshot", part)
+		log("service_recruitment_snapshot member=%s ok=%s reason=%s",
+			tostring(id), tostring(service_snapshot_ok), tostring(service_reason))
+		dump_value("service_recruitment_snapshot[" .. tostring(id) .. "]", service_snapshot, 3)
+		local guard_snapshot_ok, guard_snapshot, guard_reason = module_call(guards, "snapshot", part)
+		log("guard_refill_snapshot member=%s ok=%s reason=%s",
+			tostring(id), tostring(guard_snapshot_ok), tostring(guard_reason))
+		dump_value("guard_refill_snapshot[" .. tostring(id) .. "]", guard_snapshot, 3)
+	end
+
+	local cached_ok, cached = module_call(idx, "base_ownership", smart)
+	log("base_ownership_cached ok=%s", tostring(cached_ok))
+	dump_value("base_ownership_cached_value", cached, 3)
+	local update_ok, updated, update_reason = module_call(idx, "update_base_ownership", smart)
+	log("base_ownership_update ok=%s reason=%s", tostring(update_ok), tostring(update_reason))
+	dump_value("base_ownership_update_value", updated, 3)
+	local current_ownership = field(idx, "smart_ownership")
+	dump_value("smart_ownership[" .. tostring(object_id(smart)) .. "]",
+		type(current_ownership) == "table" and current_ownership[object_id(smart)] or nil, 3)
+	local actor_base_ok, actor_base = module_call(idx, "actor_service_base")
+	log("actor_service_base ok=%s", tostring(actor_base_ok))
+	dump_value("actor_service_base_value", actor_base, 2)
+	local camp_smarts_ok, camp_smarts = module_call(idx, "base_camping_target_smarts_on_levels", { level_name })
+	log("base_camping_target_smarts_on_level ok=%s", tostring(camp_smarts_ok))
+	dump_value("base_camping_target_smarts_on_level_value", camp_smarts, 2)
+	local candidate_levels_ok, candidate_levels = module_call(p, "level_names_for_mode", level_name, "current_or_nearby")
+	candidate_levels = candidate_levels_ok and type(candidate_levels) == "table" and candidate_levels or { level_name }
+	local base_pool_ok, base_pool = module_call(idx, "base_smarts_on_levels", candidate_levels)
+	log("ZHOPA_base_smart_pool mode=current_or_nearby ok=%s", tostring(base_pool_ok))
+	if base_pool_ok and type(base_pool) == "table" then
+		for i = 1, #base_pool do
+			local item_level_ok, item_level = invoke(p and p.obj_level, base_pool[i])
+			log("ZHOPA_base_smart_pool_item index=%d name=%s id=%s level=%s",
+				i, tostring(object_name(base_pool[i])), tostring(object_id(base_pool[i])),
+				tostring(item_level_ok and item_level or "-"))
+		end
+	end
+	local active_base_pool_ok, active_base_pool =
+		module_call(idx, "base_camping_target_smarts_on_levels", candidate_levels)
+	log("ZHOPA_active_BASE_CAMPING_targets mode=current_or_nearby ok=%s", tostring(active_base_pool_ok))
+	dump_value("ZHOPA_active_BASE_CAMPING_targets", active_base_pool, 2)
+
+	local board = rawget(_G, "SIMBOARD")
+	local seen = {}
+	for i = 1, #members do
+		local part = members[i]
+		local node = board and board.smarts and board.smarts[object_id(part)]
+		local ids = field(node, "squads")
+		log("smart_board_squads member=%s id=%s", tostring(object_name(part)), tostring(object_id(part)))
+		dump_value("SIMBOARD.smarts[" .. tostring(object_id(part)) .. "].squads", ids, 2)
+		for squad_id in pairs(type(ids) == "table" and ids or {}) do
+			local numeric_id = tonumber(squad_id) or squad_id
+			if not seen[numeric_id] then
+				seen[numeric_id] = true
+				local squad = alife_object and alife_object(numeric_id) or nil
+				if squad then dump_squad(squad, smart, member_ids, members, modules)
+				else log("smart_board_squad_unresolved id=%s", tostring(squad_id)) end
+			end
+		end
+	end
+	return member_ids, members
+end
+
+local function task_entry_for(tasks, task_name)
+	for _, entry in ipairs(tasks and tasks.task_registry and tasks.task_registry.stalker or {}) do
+		if entry.name == task_name then return entry end
+	end
+	return nil
+end
+
+local function dump_task_registry(modules)
+	local tasks = modules.tasks
+	local list = tasks and tasks.task_registry and tasks.task_registry.stalker or {}
+	log("task_registry_stalker_count=%d", #list)
+	for i = 1, #list do
+		local entry = list[i]
+		log("task_registry index=%d name=%s weight_key=%s weight_default=%s enabled_key=%s enabled_default=%s build=%s",
+			i, tostring(entry.name), tostring(entry.weight_key), tostring(entry.weight_default),
+			tostring(entry.enabled_key), tostring(entry.enabled_default), function_source(entry.build))
+	end
+	local populate = task_entry_for(tasks, "POPULATE")
+	if populate then
+		dump_function("POPULATE.builder", populate.build)
+		log("POPULATE.builder_invoked=false reason=collect_roam_smarts samples with math.random")
+	end
+end
+
+local function dump_nearby_squads(smart, level_name, member_ids, members, modules)
+	local p, idx = modules.perception, modules.index
+	local levels_ok, levels = module_call(p, "level_names_for_mode", level_name, "current_or_nearby")
+	levels = levels_ok and type(levels) == "table" and levels or { level_name }
+	log("candidate_levels mode=current_or_nearby")
+	dump_value("candidate_levels", levels, 1)
+	local squads_ok, squads = module_call(idx, "squads_on_levels", levels)
+	if not (squads_ok and type(squads) == "table") then
+		log("candidate_squads unavailable ok=%s", tostring(squads_ok))
+		return
+	end
+	local candidates = {}
+	for i = 1, #squads do
+		local squad = squads[i]
+		local id = tonumber(object_id(squad))
+		local faction = field(squad, "player_id")
+		local monster_ok, monster = module_call(p, "is_monster_squad", squad)
+		local manage_ok, can_manage = safe_zhopa_manage(squad)
+		local task_target = tonumber(field(squad, "zhopa2_target"))
+		local current_smart = tonumber(field(squad, "smart_id"))
+		local squad_level_ok, squad_level = invoke(p and p.obj_level, squad)
+		local d2 = squad_level_ok and squad_level == level_name
+			and distance_squared(object_position(squad), object_position(smart)) or nil
+		local relevant = member_ids[task_target] or member_ids[current_smart]
+			or field(squad, "zhopa2_managed") == true or (manage_ok and can_manage == true)
+			or (d2 and d2 <= 500 * 500)
+		if id and faction ~= "monster" and not (monster_ok and monster == true) and relevant then
+			local priority = 0
+			if member_ids[task_target] then priority = priority + 100 end
+			if member_ids[current_smart] then priority = priority + 80 end
+			if field(squad, "zhopa2_managed") == true then priority = priority + 40 end
+			if manage_ok and can_manage == true then priority = priority + 20 end
+			if d2 then priority = priority + math.max(0, 10 - math.floor(math.sqrt(d2) / 50)) end
+			candidates[#candidates + 1] = { squad = squad, priority = priority }
+		end
+	end
+	table.sort(candidates, function(a, b)
+		if a.priority == b.priority then return (tonumber(object_id(a.squad)) or 0) < (tonumber(object_id(b.squad)) or 0) end
+		return a.priority > b.priority
+	end)
+	log("candidate_squads_indexed=%d relevant=%d inspected=%d", #squads, #candidates,
+		math.min(#candidates, MAX_SQUADS))
+	for i = 1, math.min(#candidates, MAX_SQUADS) do
+		log("candidate_squad rank=%d relevance=%d", i, candidates[i].priority)
+		dump_squad(candidates[i].squad, smart, member_ids, members, modules)
+	end
+	if #candidates > MAX_SQUADS then log("candidate_squads_omitted=%d", #candidates - MAX_SQUADS) end
+end
+
+local function run()
+	local modules = {
+		index = rawget(_G, "zhopa2_index"),
+		bases = rawget(_G, "zhopa2_bases"),
+		perception = rawget(_G, "zhopa2_perception"),
+		tasks = rawget(_G, "zhopa2_tasks"),
+		cfg = rawget(_G, "zhopa2_cfg"),
+		scoring = rawget(_G, "zhopa2_task_scoring"),
+		service = rawget(_G, "zhopa2_service_fillers"),
+		guards = rawget(_G, "zhopa2_guard_refill"),
+	}
+	log("begin")
+	for name, module in pairs(modules) do log("module %s=%s", name, tostring(type(module))) end
+	if not (modules.index and modules.bases and modules.perception and modules.tasks and modules.cfg and SIMBOARD and db and db.actor and level) then
+		log("runtime_not_ready")
+		return
+	end
+	dump_task_registry(modules)
+	for _, entry in ipairs({
+		{ "zhopa2_index.smarts_on_levels", modules.index.smarts_on_levels },
+		{ "zhopa2_index.squads_on_levels", modules.index.squads_on_levels },
+		{ "zhopa2_index.base_ownership", modules.index.base_ownership },
+		{ "zhopa2_index.update_base_ownership", modules.index.update_base_ownership },
+		{ "zhopa2_index.base_smarts_on_levels", modules.index.base_smarts_on_levels },
+		{ "zhopa2_index.on_smart_update", modules.index.on_smart_update },
+		{ "zhopa2_index.try_empty_base_pull", modules.index.try_empty_base_pull },
+		{ "zhopa2_bases.members", modules.bases and modules.bases.members },
+		{ "zhopa2_perception.valid_smart", modules.perception.valid_smart },
+		{ "zhopa2_perception.base_camping_populate_target_valid", modules.perception.base_camping_populate_target_valid },
+		{ "zhopa2_perception.pick_base_camping_populate_smart", modules.perception.pick_base_camping_populate_smart },
+		{ "zhopa2_perception.collect_roam_smarts", modules.perception.collect_roam_smarts },
+		{ "zhopa2_perception.smart_settlement_capacity", modules.perception.smart_settlement_capacity },
+		{ "zhopa2_perception.service_base_roam_weight", modules.perception.service_base_roam_weight },
+		{ "zhopa2_tasks.assign_next_task", modules.tasks.assign_next_task },
+		{ "zhopa2_tasks.base_camping_can_interrupt", modules.tasks.base_camping_can_interrupt },
+	}) do
+		dump_function(entry[1], entry[2])
+	end
+	for _, key in ipairs({
+		"enabled", "stalker_movement_enabled", "populate_enabled", "base_camping_enabled",
+		"base_camping_timed_enabled", "base_camping_duration_game_hours",
+		"base_camping_cooldown_game_hours", "base_ownership_enabled",
+		"faction_task_settings_enabled", "geographic_balance_enabled",
+		"faction_presence_balance_enabled", "faction_lore_preferences_enabled",
+		"stalker_populate_weight", "service_filler_enabled", "guard_refill_enabled",
+	}) do
+		local ok, value = module_call(modules.cfg, "get", key)
+		log("config %s ok=%s value=%s", key, tostring(ok), tostring(value))
+	end
+	local smart, level_name = locate_smart(modules.index, modules.perception)
+	if not smart then log("target_smart_not_found"); return end
+	log("snapshot_smart=%s id=%s level=%s", tostring(object_name(smart)), tostring(object_id(smart)), tostring(level_name))
+	local member_ids, members = dump_smart(smart, level_name, modules)
+	dump_nearby_squads(smart, level_name, member_ids, members, modules)
+	log("end lines=%d", log_lines)
+end
+
+run()

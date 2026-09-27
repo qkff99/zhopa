@@ -570,7 +570,7 @@ Rules:
 
 ## 11. Service NPCs and Dynamic Ownership
 
-Dynamic ownership covers the whole compound base and one vote from the local player's actual faction. `zhopa2_service_fillers` queues trader, technician, medic and cook/barman vacancies; guides are not supported yet. Smart updates and population events refresh the queue. `zhopa2_service_recruitment` owns the shared existing-NPC transfer, load restoration and rollback. Production recruitment creates no NPCs and is not triggered by emissions.
+Dynamic ownership covers the whole compound base and one vote from the local player's actual faction. The neutral `trader` community contributes no votes, including NPCs awaiting smart registration; their presence still fills service vacancies. Services belonging to a regular faction community contribute to ownership like its other members. `zhopa2_service_fillers` queues trader, technician, medic and cook/barman vacancies; guides are not supported yet. Smart updates and population events refresh the queue. `zhopa2_service_recruitment` owns the shared existing-NPC transfer, load restoration and rollback. Production recruitment creates no NPCs and is not triggered by emissions.
 
 `service_filler_enabled` controls the system; `service_filler_interval_sec` sets the retry interval (15 real seconds by default). Services and guards share a 0.5-second timer: up to eight queue entries are examined, with at most one smart processed/appointment made per step. Catalogs and presence are cached; vacancies are rechecked before transfer. Offline entries remain unconfirmed until the level and job tables load; incomplete data defers recruitment.
 

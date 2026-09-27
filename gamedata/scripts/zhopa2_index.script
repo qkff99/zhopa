@@ -787,6 +787,27 @@ local function add_count(counts, community, amount)
 	counts[community] = (counts[community] or 0) + (tonumber(amount) or 1)
 end
 
+local function unregistered_trader_count(squad, registered_ids)
+	local traders, pending = 0, false
+	local ok = pcall(function()
+		for member in squad:squad_members() do
+			local id = member and tonumber(member.id)
+			if not id or id < 0 or id >= 65535 then
+				pending = true
+			elseif not registered_ids[id] then
+				local npc = alife_object(id)
+				local community = npc and object_community(npc)
+				if type(community) ~= "string" or community == "" then
+					pending = true
+				elseif relation_faction(community) == "trader" then
+					traders = traders + 1
+				end
+			end
+		end
+	end)
+	return traders, pending or not ok
+end
+
 local function each_level(levels, fn)
 	if type(fn) ~= "function" then
 		return
@@ -2262,7 +2283,7 @@ function M.update_base_ownership(smart)
     if not (smart and smart.id and smart_is_base(smart)) then return nil end
     local bases = rawget(_G, "zhopa2_bases")
     local members = bases and bases.members(smart) or {smart}
-    local counts, registered_by_squad, seen_npcs = {}, {}, {}
+    local counts, registered_by_squad, seen_npcs, registered_npc_ids = {}, {}, {}, {}
     local total, population_pending = 0, false
     -- Gather all registrations first, before subtracting them from squad headcounts.
     for _, part in ipairs(members) do
@@ -2276,10 +2297,17 @@ function M.update_base_ownership(smart)
                 if not valid then population_pending = true end
                 local community = valid and alive and object_community(npc)
                 if community then
-                    add_count(counts, relation_faction(community), 1)
-                    total = total + 1
                     local group = tonumber(npc.group_id)
-                    if group and group ~= 65535 then registered_by_squad[group] = (registered_by_squad[group] or 0) + 1 end
+                    if group and group ~= 65535 then
+                        -- A living neutral trader still consumes its squad's registration slot.
+                        registered_by_squad[group] = (registered_by_squad[group] or 0) + 1
+                        registered_npc_ids[npc.id] = true
+                    end
+                    local faction = relation_faction(community)
+                    if faction ~= "trader" then
+                        add_count(counts, faction, 1)
+                        total = total + 1
+                    end
                 end
             end
         end
@@ -2296,8 +2324,16 @@ function M.update_base_ownership(smart)
                 for _, area in ipairs(members) do if physically_at_base(squad, area) then present = true; break end end
                 if community and count > 0 and present then
                     local unregistered = math.max(0, count - (registered_by_squad[id] or 0))
-                    add_count(counts, relation_faction(community), unregistered)
-                    total = total + unregistered
+                    local faction = relation_faction(community)
+                    if faction ~= "trader" then
+                        if unregistered > 0 then
+                            local traders, pending = unregistered_trader_count(squad, registered_npc_ids)
+                            unregistered = math.max(0, unregistered - traders)
+                            if pending then population_pending = true end
+                        end
+                        add_count(counts, faction, unregistered)
+                        total = total + unregistered
+                    end
                 end
             end
             if squad and not seen_camping[id] and squad_base_camping_at_smart(squad, part.id) then
@@ -2323,7 +2359,11 @@ function M.update_base_ownership(smart)
     for _, part in ipairs(members) do
         if actor_presence and actor_presence.smart_id == part.id then actor_count = 1; break end
     end
-    if actor_count > 0 then add_count(counts, actor_presence.faction, 1); total = total + 1 end
+    local actor_faction = actor_presence and relation_faction(actor_presence.faction) or nil
+    if actor_count > 0 and actor_faction ~= "trader" then
+        add_count(counts, actor_faction, 1)
+        total = total + 1
+    end
     local owner, owner_count, tie = nil, 0, false
     for community, count in pairs(counts) do
         if count > owner_count then owner, owner_count, tie = community, count, false

@@ -1,6 +1,7 @@
 # 2.3.1
 
 ### Fixes
+- The neutral `trader` faction no longer contributes to base ownership, including NPCs whose smart registration has not been restored. Their service jobs remain accounted for, while other members of mixed squads retain their votes.
 - Guard Refill no longer blocks the underlying action that adds an NPC to the actor's squad, so guide tasks and the debug command work; normal dialogue-based guard hiring remains disabled.
 
 # 2.3
