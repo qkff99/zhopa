@@ -1,6 +1,7 @@
 local M = {}
 
 local MODULE_STOP_ORDER = {
+	"zhopa2_base_invitations",
 	"zhopa2_service_quests",
 	"zhopa2_squad_dialogue",
 	"zhopa2_npc_quests",

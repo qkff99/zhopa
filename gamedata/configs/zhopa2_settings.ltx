@@ -69,6 +69,25 @@ base_ownership_enabled = true
 service_filler_enabled = true
 ; Permanent guards are recruited only after core service roles are filled across the base.
 guard_refill_enabled = true
+; Explicit settlement invitations. Scope: own level and all immediate neighbors.
+base_invitations_enabled = true
+base_invitation_player_priority = true
+base_invitation_interrupt_rest = true
+base_invitation_interrupt_night_rest = true
+base_invitation_interrupt_trade = true
+base_invitation_interrupt_hunt = true
+base_invitation_hostile_wave = true
+base_invitation_zombies = true
+base_invitation_mutants = true
+base_invitation_partial_refill = true
+; Start partial reinforcement at or below this percentage of occupied guard posts.
+base_invitation_partial_threshold = 40
+base_invitation_guard_fill_percent = 100
+base_invitation_max_inflight = 3
+base_invitation_wild_support_squads = 2
+; LTX-only safety/scan timing, real seconds.
+base_invitation_interval_sec = 15
+base_invitation_route_timeout_sec = 300
 service_filler_interval_sec = 15
 ; Experimental online ground/corpse looting. Disabled by default; artifact task pickup remains independent.
 loot_enabled = false

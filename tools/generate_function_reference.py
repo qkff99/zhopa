@@ -29,6 +29,7 @@ SCRIPT_ROLES = {
     "axr_trade_manager.script": "SISKI-derived vanilla trade-manager override that executes online squad trade and technician service through real smart customer jobs",
     "modxml_zhopa2_squad_dialogue.script": "DXML injection that registers the managed-squad information and travel dialogue without replacing the vanilla dialogue XML",
     "zhopa2_bases.script": "configured compound-base membership and shared base identity",
+    "zhopa2_base_invitations.script": "empty/depleted base invitation waves, living-member budgets, shared routing/camping, offline capacity estimates and serializable reservations",
     "zhopa2_guard_refill.script": "defensive-post catalog, vacancy queue, permanent reservations, and native job pinning",
     "zhopa2_guard_guide_probe.script": "one-shot debug helper that creates a vanilla guide offer for the looked-at ZHOPA guard",
     "zhopa2_smart_ai_trace.script": "manual smart/base ownership, squad eligibility and routing diagnostics with level-aware proximity",

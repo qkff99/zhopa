@@ -6,7 +6,7 @@ Full name: **Z.H.O.P.A. ALIFE 2.3 — Zone Hostile Operations & Population AI**.
 
 This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.3 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of September 22, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of September 28, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
@@ -71,6 +71,7 @@ Runtime modules:
 - `zhopa2_service_recruitment`
 - `zhopa2_service_fillers`
 - `zhopa2_guard_refill`
+- `zhopa2_base_invitations`
 - `zhopa2_service_quests`
 - `zhopa2_artifacts`
 - `zhopa2_story_psy_watchdog`
@@ -313,6 +314,7 @@ Current task set:
 - `EXPLORE`
 - `FORCE_EXIT`
 - `POPULATE`
+- `DYNAMIC_BASE_POPULATE`
 - `BASE_CAMPING`
 - `PATROL`
 - `NIGHT_REST`
@@ -583,6 +585,24 @@ Migration removes services spawned by the old filler, preserving originals and e
 Read-only diagnostics `zhopa2_service_recruitment.audit_level()` and the compatible alias `zhopa2_recruit_trader_probe.audit_level()` ship in the release. `test_smart()` is a separate destructive test command: it kills services and creates ordinary donor squads, then uses the same recruitment mechanism. Guard diagnostics are available through `zhopa2_guard_refill.audit_level()`.
 
 `zhopa2_smart_service_slot_doctor` handles visitors, not providers, in trade/tech customer jobs. It recognizes customer jobs by section name or their `suitable` condition, waits for confirmed completion/stall, and clears only the completed intent. Recovery goes through vanilla `smart:select_npc_job(npc_info, true)`; direct `state_mgr` resets, forced `idle`, and vertex teleporting are forbidden.
+
+### 11.1 Empty and Depleted Base Invitations
+
+`zhopa2_base_invitations` adds explicit settlement requests alongside existing roaming weights. One `zhopa2_bases.key` groups all member smarts. `smart_terrain_on_update` only queues the key; a separate 0.5-second timer examines up to eight keys and processes one base in rotating order. Base reassessment normally runs every 15 real seconds; an accepted invitation accelerates the next step to 0.5 seconds.
+
+`zhopa2_index.base_population` collects living server NPCs from registrations, saved registrations, arriving NPCs and actual rosters of physically present squads. IDs are deduplicated and each NPC supplies its own faction; mutant members use their squad's faction. No headcount cache is needed. Missing NPCs, unknown position/level or an incomplete roster produce `complete=false`, never an empty base. Ownership uses the same collector. Invitations additionally examine physically nearby squads despite delayed registration. Every service profession is excluded from emptiness; guards, regular stalkers and wild groups count as residents. The local player influences ownership without preventing an empty-base request.
+
+The pool contains only the base level and all directly adjacent levels from `zhopa2_topology`. Selection first invites one human squad friendly or neutral to the player, then an available player enemy, preferring hostility to the first squad. The player's true faction outranks distance, followed by level and distance. Reputation and disguises are ignored. Squads already on the base count as donors and receive no duplicate invitation.
+
+Eligible tasks are `REST`, `NIGHT_REST`, `EXPLORE`, `PATROL`, `TRADE`, `HUNT`, and no current task. Checks cover general ZHOPA eligibility, blacklists, camping cooldown, combat/conversation, prepared deals and proximity to a current hunt target. `POPULATE`, `BASE_CAMPING`, `QUEST`, revenge, story and safety tasks are protected. Surge sheltering suspends the queue and route-progress timer. Acceptance closes the old task through shared `interrupt_task`, clears return state and assigns `DYNAMIC_BASE_POPULATE`; arrival starts normal `assign_base_camping` without resuming the displaced route. A narrow `target_precondition` hook permits only a saved invitation/camping record matching squad ID, name and target, including destinations otherwise rejected by native faction props or squad capacity.
+
+The first human arrival opens reinforcements for the actual human owner, even a player enemy. A zombie/mutant first arrival waits for and retries the human invitation; wild groups receive one finite support wave (`base_invitation_wild_support_squads=2`). Death or route failure never resets its expenditure within the cycle. Human reclamation continues even after wild victory. A late first-wave hostile keeps traveling after the base fills; a living wild arrival can open the remaining finite support budget.
+
+Human demand is missing service slots plus target permanent-guard occupancy, minus living eligible donors and compatible incoming squads. Donors and reinforcements must be peaceful with the owner, services and guards. Defaults target 100% guards with at most three second-wave squads traveling at once; this target limits invitations, not Guard Refill appointments. Excess second-wave squads receive `REST`, preserving the first wave. Optional partial refill requests compatible reinforcements without a hostile first wave at 40% guard occupancy or below.
+
+Online snapshots retain confirmed defensive-post capacity and scalar IDs/names of permanent occupants. Offline snapshots check their lives; before a catalog exists, capacity is estimated as `max_population*2`, capped at 16 posts per smart. Visiting the level replaces the estimate with actual jobs and corrects demand. Service/guard appointments retain the existing online shared recruitment path; invitations create no NPCs.
+
+`zhopa2_base_invitations_v1` stores only scalar cycles, reservations, capacities and arrived-camper provenance. Load validates types, IDs, names and cycle generation, bounds tables and starts a fresh real-time route-progress period. Each squad belongs to one invitation. A game-graph vertex change counts as movement before a level crossing; no movement for 300 seconds releases a reservation and excludes that squad from the base for the same period. Turning off the option sends still-traveling squads to `REST` and retains arrived campers. Master-disable removes the queue, timer, callbacks and state before general task cleanup. `zhopa2_base_invitations.audit_level()` shows the origin and current level; old reservations may have no recorded origin. A traveling squad's debug map spot follows its server squad ID. `ZHOPA_INVITE` events remain debug-gated.
 
 ## 12. Blacklists
 

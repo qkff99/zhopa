@@ -23,6 +23,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_service_recruitment",
 	"zhopa2_service_fillers",
 	"zhopa2_guard_refill",
+	"zhopa2_base_invitations",
 	"zhopa2_service_quests",
 	"zhopa2_artifacts",
 	"zhopa2_story_psy_watchdog",
@@ -2822,6 +2823,14 @@ function M.patch_smart_terrain()
 	if not cls then
 		return false
 	end
+	M.patch_method(cls, "target_precondition", PATCH_ID .. "_smart_invitation", function(original)
+		return function(self, squad, ...)
+			local invites = rawget(_G, "zhopa2_base_invitations")
+            if invites and squad and (squad.zhopa2_task == "DYNAMIC_BASE_POPULATE" or squad.zhopa2_task == "BASE_CAMPING")
+                and tonumber(squad.zhopa2_target) == self.id and invites.route_allowed(squad, self) then return true end
+			return original(self, squad, ...)
+		end
+	end)
 	M.patch_method(cls, "load_jobs", PATCH_ID .. "_smart_load_jobs", function(original)
 		return function(self, ...)
 			local result = { original(self, ...) }

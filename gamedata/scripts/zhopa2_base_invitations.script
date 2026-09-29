@@ -1,0 +1,706 @@
+-- Explicit base settlement requests; existing weighted roaming remains independent.
+local M = {cycles={}, reservations={}, pending={}, capacities={}, campers={}}
+local KEY = "zhopa2_base_invitations_v1"
+local TASK = "DYNAMIC_BASE_POPULATE"
+local TIMER = "zhopa2_base_invitations"
+local cursor, camper_cursor, previous_enabled, timer_started = nil, nil, false, false
+local MAX_RESERVATIONS = 512
+
+local function cfg(key, default)
+    local c=rawget(_G,"zhopa2_cfg")
+    local value=c and c.get and c.get(key)
+    if value==nil then return default end
+    return value
+end
+local function num(key, default, low, high)
+    local value=tonumber(cfg(key,default)) or default
+    if value~=value then value=default end
+    return math.max(low,math.min(high,value))
+end
+local function now() return time_global and time_global() or 0 end
+local function enabled()
+    return rawget(_G,"zhopa2_runtime_disabled")~=true and cfg("enabled",true)==true
+        and cfg("base_invitations_enabled",true)==true and cfg("base_camping_enabled",true)==true
+end
+local function object(id)
+    id=tonumber(id)
+    return id and id>=0 and id<65535 and alife_object and alife_object(id) or nil
+end
+local function name(obj)
+    if not obj then return nil end
+    local ok,value=pcall(function() return obj:name() end)
+    return ok and value or nil
+end
+local function log(event, detail)
+    if printf and (event=="error" or cfg("debug_hud_enabled",false)) then
+        printf("~ ZHOPA_INVITE | %s | %s",event,tostring(detail or ""))
+    end
+end
+local function faction(squad)
+    local p=rawget(_G,"zhopa2_perception")
+    return p and p.squad_relation_faction and p.squad_relation_faction(squad) or squad.player_id
+end
+local function wild_faction(value)
+    return type(value)=="string" and (value=="zombied" or value=="monster" or value:find("monster",1,true)~=nil)
+end
+local function kind(squad)
+    local f=faction(squad) or ""
+    local p=rawget(_G,"zhopa2_perception")
+    if f=="zombied" or tostring(squad.player_id):find("zombied",1,true) then return "zombie" end
+    if wild_faction(f) or (p and p.is_monster_squad and p.is_monster_squad(squad)) then return "mutant" end
+    return "human"
+end
+local function relations(a,b)
+    if not (a and b) then return nil end
+    if a==b then return "same" end
+    local r=game_relations
+    if not (r and r.is_factions_enemies) then return nil end
+    local ok,ab,ba=pcall(function() return r.is_factions_enemies(a,b),r.is_factions_enemies(b,a) end)
+    if not ok then return nil end
+    return (ab or ba) and "enemy" or "neutral"
+end
+local function compatible(a,b) local r=relations(a,b);return r~=nil and r~="enemy" end
+local function actor_faction()
+    if type(get_actor_true_community)~="function" then return nil end
+    local ok,value=pcall(get_actor_true_community)
+    if not ok or type(value)~="string" then return nil end
+    value=value:gsub("^actor_","")
+    return ({duty="dolg",merc="killer"})[value] or value
+end
+local function parts(smart) return zhopa2_bases.members(smart) end
+local function distance(squad,smart)
+    local ok,value=pcall(function()
+        if zhopa2_perception.obj_level(squad)~=zhopa2_perception.obj_level(smart) then return math.huge end
+        return squad.position:distance_to_sqr(smart.position)
+    end)
+    return ok and type(value)=="number" and value or math.huge
+end
+local function inside(squad,smart)
+    local p=zhopa2_perception
+    local ok,value=pcall(function()
+        if p.obj_level(squad)~=p.obj_level(smart) then return false end
+        for _,part in ipairs(parts(smart)) do
+            if squad.position:distance_to_sqr(part.position)<=(tonumber(part.arrive_dist) or 50)^2 then return true end
+        end
+        return false
+    end)
+    return ok and value==true
+end
+local function roster(squad)
+    local list,complete,visited={},true,0
+    local ok=pcall(function()
+        for member in squad:squad_members() do
+            visited=visited+1
+            local npc=member and object(member.id)
+            if not npc or type(npc.alive)~="function" then complete=false
+            else
+                local valid,live=pcall(npc.alive,npc)
+                if not valid then complete=false elseif live then list[#list+1]=npc end
+            end
+        end
+    end)
+    local size_ok,size=pcall(function() return squad:npc_count() end)
+    return list,complete and ok and size_ok and type(size)=="number" and visited>=size
+end
+local function service_role(npc,smart)
+    local svc=zhopa2_service_fillers
+    for _,part in ipairs(parts(smart)) do
+        local role=svc.npc_service_role(npc,part)
+        if role then return role end
+    end
+    local ok,c=pcall(function() return npc:community() end)
+    return ok and c=="trader" and "trader" or nil
+end
+local function regular_faction_owner(population,smart)
+    local counts,total={},0
+    for f,n in pairs(population.counts) do counts[f]=n;total=total+n end
+    local actor=zhopa2_index.actor_service_base()
+    for _,part in ipairs(parts(smart)) do
+        if actor and actor.smart_id==part.id and actor.faction~="trader" then
+            counts[actor.faction]=(counts[actor.faction] or 0)+1;total=total+1;break
+        end
+    end
+    local owner,best,tie=nil,0,false
+    for f,n in pairs(counts) do
+        if n>best then owner,best,tie=f,n,false elseif n==best then tie=true end
+    end
+    return population.complete and not tie and total>0 and owner or nil
+end
+
+function M.snapshot(smart)
+    local population=zhopa2_index.base_population(smart,true)
+    local snap={complete=population.complete,residents={},services={},guards=0,guard_total=0,
+        guard_filled=0,service_missing=0,squads=population.squads,wild=0,human=0,estimated=false,defender_factions={}}
+    local service_by_smart={}
+    for _,entry in ipairs(population.npcs) do
+        local npc=entry.object
+        local role=service_role(npc,smart)
+        local q=population.squads[entry.squad_id] or object(entry.squad_id)
+        if role then
+            snap.services[#snap.services+1]={id=entry.id,faction=entry.faction,role=role}
+            local home=tonumber(npc.m_smart_terrain_id) or (q and tonumber(q.zhopa2_service_smart_id or q.smart_id))
+            if not home or home>=65535 then home=q and tonumber(q.zhopa2_service_smart_id or q.smart_id) or smart.id end
+            service_by_smart[home or smart.id]=service_by_smart[home or smart.id] or {}
+            service_by_smart[home or smart.id][role]=true
+        else
+            entry.kind=q and kind(q) or (wild_faction(entry.faction) and "mutant" or "human")
+            snap.residents[#snap.residents+1]=entry
+            if entry.kind=="human" then snap.human=snap.human+1 else snap.wild=snap.wild+1 end
+        end
+    end
+    local guards=rawget(_G,"zhopa2_guard_refill")
+    for _,part in ipairs(parts(smart)) do
+        if not part.online then snap.estimated=true end
+        local cache=M.capacities[part.id] or {}
+        local live=guards and guards.snapshot and guards.snapshot(part)
+        if live then
+            cache.guard_total,cache.guard_people=#live,{}
+            for _,entry in ipairs(live) do
+                if entry.state~="vacant" and entry.state~="temporary" then
+                    snap.guard_filled=snap.guard_filled+1
+                    local npc=object(entry.occupant)
+                    if npc then cache.guard_people[#cache.guard_people+1]={id=entry.occupant,name=name(npc),group_id=npc.group_id} end
+                end
+            end
+            cache.confirmed=true
+        elseif cache.confirmed then
+            for _,person in ipairs(cache.guard_people or {}) do
+                local npc=object(person.id)
+                local ok,live_npc=false,false
+                if npc and name(npc)==person.name and npc.group_id==person.group_id then ok,live_npc=pcall(function() return npc:alive() end) end
+                if not npc or (name(npc)==person.name and npc.group_id==person.group_id and not ok) then snap.complete=false end
+                if ok and live_npc then snap.guard_filled=snap.guard_filled+1 end
+            end
+        else
+            cache.guard_total=math.min(16,math.max(0,math.floor((tonumber(part.max_population) or 1)*2)))
+            snap.estimated=true
+        end
+        for _,person in ipairs(cache.guard_people or {}) do
+            local npc=object(person.id)
+            if npc and name(npc)==person.name then
+                local ok,f=pcall(function() return npc:alive() and npc:community() end)
+                if ok and type(f)=="string" and f~="trader" then snap.defender_factions[f]=true end
+            end
+        end
+        snap.guard_total=snap.guard_total+(cache.guard_total or 0)
+        local roles=zhopa2_service_fillers.service_roles_at_smart(part) or cache.roles or {}
+        cache.roles=roles;M.capacities[part.id]=cache
+        if cfg("service_filler_enabled",true) then
+            for _,role in ipairs(roles) do
+                if role~="guide" and not (service_by_smart[part.id] or {})[role] then snap.service_missing=snap.service_missing+1 end
+            end
+        end
+    end
+    if snap.estimated then
+        local fixed=0
+        for _,entry in ipairs(snap.residents) do
+            local q=snap.squads[entry.squad_id]
+            if entry.kind=="human" and q and type(q.zhopa2_can_manage)=="function" and q:zhopa2_can_manage()~=true then fixed=fixed+1 end
+        end
+        snap.guard_filled=math.max(snap.guard_filled,math.min(snap.guard_total,fixed))
+    end
+    if not cfg("guard_refill_enabled",true) then snap.guard_total,snap.guard_filled=0,0 end
+    snap.owner=regular_faction_owner(population,smart)
+    return snap
+end
+
+local ALLOWED={REST=true,NIGHT_REST=true,EXPLORE=true,PATROL=true,TRADE=true,HUNT=true}
+local function candidate(squad,smart)
+    if not (squad and squad.id) or M.reservations[squad.id] or inside(squad,smart) then return nil end
+    local cycle=M.cycles[zhopa2_bases.key(smart)]
+    local failed=cycle and cycle.failed and cycle.failed[squad.id]
+    if failed and failed.name==name(squad) and (tonumber(failed.expires) or 0)>now() then return nil end
+    if failed then cycle.failed[squad.id]=nil end
+    local k=kind(squad)
+    if (k=="zombie" and not cfg("base_invitation_zombies",true)) or (k=="mutant" and not cfg("base_invitation_mutants",true)) then return nil end
+    local task=squad.zhopa2_task
+    if task and not ALLOWED[task] then return nil end
+    if (task=="REST" and not cfg("base_invitation_interrupt_rest",true))
+        or (task=="NIGHT_REST" and not cfg("base_invitation_interrupt_night_rest",true)) then return nil end
+    if (task=="TRADE" and not cfg("base_invitation_interrupt_trade",true))
+        or (task=="HUNT" and not cfg("base_invitation_interrupt_hunt",true)) then return nil end
+    if type(squad.zhopa2_can_manage)~="function" or squad:zhopa2_can_manage()~=true then return nil end
+    if zhopa2_tasks.base_camping_cooldown_active(squad) or zhopa2_index.base_camping_release_blocks(squad,smart) then return nil end
+    if squad.zhopa2_last_trade_result=="trade_prepared" or squad.zhopa2_trade_prepared_npc_id then return nil end
+    local list,complete=roster(squad)
+    if not complete or #list==0 then return nil end
+    for _,npc in ipairs(list) do
+        local st=db and db.storage and db.storage[npc.id]
+        local online=st and st.object
+        if online then
+            local ok,busy=pcall(function() return online:best_enemy()~=nil or (online.is_talking and online:is_talking()) end)
+            if not ok or busy then return nil end
+        end
+    end
+    if task=="HUNT" then
+        local target=object(squad.zhopa2_target)
+        if target and zhopa2_perception.obj_level(target)==zhopa2_perception.obj_level(squad)
+            and squad.position and target.position and squad.position:distance_to_sqr(target.position)<=110^2 then return nil end
+    end
+    return {squad=squad,kind=k,faction=faction(squad),members=#list}
+end
+function M.valid_target(squad,smart)
+    if not (squad and smart and smart.id) or smart.disabled or smart.respawn_only_smart then return false end
+    local c=zhopa2_cfg
+    local target_level=zhopa2_perception.obj_level(smart)
+    if not target_level or (c and c.is_level_blacklisted_for_squad and c.is_level_blacklisted_for_squad(squad,target_level))
+        or (c and c.is_smart_blacklisted_for_squad and c.is_smart_blacklisted_for_squad(squad,smart,target_level)) then return false end
+    return zhopa2_service_fillers.is_service_base(smart)
+end
+function M.route_allowed(squad,smart)
+    local r=squad and (squad.zhopa2_task==TASK and M.reservations[squad.id]
+        or squad.zhopa2_task=="BASE_CAMPING" and M.campers[squad.id])
+    return r and (squad.zhopa2_task~="DYNAMIC_BASE_POPULATE" or enabled())
+        and r.smart_id==smart.id and r.squad_name==name(squad) and M.valid_target(squad,smart) or false
+end
+local function target_for(squad,smart)
+    local best, rank
+    for _,part in ipairs(parts(smart)) do
+        if M.valid_target(squad,part) then
+            local sim=rawget(_G,"simulation_objects")
+            local available=not (sim and sim.available_by_id and sim.available_by_id[part.id]==false)
+            local score=available and (tonumber(part.max_population) or 0)>0 and 0 or 1
+            if not best or score<rank or (score==rank and part.id<best.id) then best,rank=part,score end
+        end
+    end
+    return best
+end
+local function collect(smart,filter, opponent)
+    local current=zhopa2_perception.obj_level(smart)
+    local levels,seen={current},{[current]=true}
+    for _,l in ipairs(zhopa2_topology.get_level_neighbors(current)) do
+        if not seen[l] then levels[#levels+1]=l;seen[l]=true end
+    end
+    local actor=actor_faction()
+    local out={}
+    for _,q in ipairs(zhopa2_index.squads_on_levels(levels)) do
+        local c=candidate(q,smart)
+        if c and filter(c,actor) then
+            c.target=target_for(q,smart)
+            if c.target then
+                local local_level=zhopa2_perception.obj_level(q)==current
+                c.hops=local_level and 0 or 1
+                c.distance=distance(q,c.target)
+                c.priority=cfg("base_invitation_player_priority",true) and (c.faction==actor and 0 or (compatible(c.faction,actor) and 1 or 2)) or 0
+                c.opponent=opponent and relations(c.faction,opponent)=="enemy" and 0 or 1
+                out[#out+1]=c
+            end
+        end
+    end
+    table.sort(out,function(a,b)
+        if a.opponent~=b.opponent then return a.opponent<b.opponent end
+        if a.priority~=b.priority then return a.priority<b.priority end
+        if a.hops~=b.hops then return a.hops<b.hops end
+        if a.distance~=b.distance then return a.distance<b.distance end
+        return a.squad.id<b.squad.id
+    end)
+    return out
+end
+
+local function rest(q,reason)
+    if not q then return end
+    local mem=rawget(_G,"zhopa2_memory")
+    if mem and mem.clear_resume then mem.clear_resume(q) end
+    zhopa2_tasks.assign_rest(q,reason)
+end
+local function release(id,reason,to_rest)
+    local r=M.reservations[id]
+    if not r then return end
+    M.reservations[id]=nil
+    local q=object(id)
+    if reason=="base_invitation_route_stalled" then
+        local cycle=M.cycles[r.base]
+        if cycle then
+            cycle.failed=cycle.failed or {}
+            local oldest,oldest_time,count=nil,math.huge,0
+            for k,v in pairs(cycle.failed) do
+                count=count+1
+                if (tonumber(v.expires) or 0)<oldest_time then oldest,oldest_time=k,tonumber(v.expires) or 0 end
+            end
+            if count>=64 and oldest then cycle.failed[oldest]=nil end
+            cycle.failed[id]={name=r.squad_name,expires=now()+num("base_invitation_route_timeout_sec",300,30,3600)*1000}
+        end
+    end
+    if q and name(q)==r.squad_name and to_rest and q.zhopa2_task==TASK then rest(q,reason) end
+    log("released",tostring(id)..":"..tostring(reason))
+end
+local function accept(c,cycle,wave,slot)
+    local count=0;for _ in pairs(M.reservations) do count=count+1 end
+    if count>=MAX_RESERVATIONS then return false end
+    local q=c.squad
+    local squad_name=name(q)
+    if not squad_name then return false end
+    if not zhopa2_tasks.interrupt_task(q,TASK,c.target.id,0,"base_invitation_"..slot,nil,{direct_target=false,clear_reason="base_invitation_"..slot}) then return false end
+    local mem=rawget(_G,"zhopa2_memory")
+    if mem and mem.clear_resume then mem.clear_resume(q) end
+    local origin_level=zhopa2_perception.obj_level(q)
+    M.reservations[q.id]={squad_id=q.id,base=cycle.key,seq=cycle.seq,smart_id=c.target.id,wave=wave,slot=slot,
+        kind=c.kind,faction=c.faction,squad_name=squad_name,members=c.members,priority=c.priority,last_progress=now(),
+        last_distance=c.distance<math.huge and c.distance or nil,last_level=origin_level,origin_level=origin_level,
+        last_vertex=tonumber(q.m_game_vertex_id)}
+    cycle[slot.."_id"]=q.id
+    if slot=="first_human" then cycle.first_human_faction=c.faction end
+    if slot=="wild_support" then cycle.wild_sent=(cycle.wild_sent or 0)+1 end
+    log("accepted",cycle.key..":"..q.id..":"..slot)
+    return true
+end
+
+function M.update_task(q)
+    local r=M.reservations[q.id]
+    if not r or name(q)~=r.squad_name then rest(q,"base_invitation_missing_reservation");return true end
+    local smart=object(r.smart_id)
+    if not enabled() or not M.valid_target(q,smart) then release(q.id,"base_invitation_target_invalid",true);return true end
+    local list,complete=roster(q)
+    if not complete or not zhopa2_perception.obj_level(q) then r.last_progress=now();return true end
+    if #list==0 then release(q.id,"base_invitation_squad_dead",false);return true end
+    if zhopa2_tasks.surge_active() then r.last_progress=now();return true end
+    if inside(q,smart) then
+        local cycle=M.cycles[r.base]
+        if cycle and cycle.seq==r.seq then
+            if r.kind=="human" then
+                cycle.human_arrived=true;cycle.first_human_faction=cycle.first_human_faction or r.faction;cycle.phase="supply"
+            else cycle.wild_arrived=true;cycle.wild_faction=cycle.wild_faction or r.faction end
+            if r.slot=="first_hostile" then cycle.first_hostile_arrived=true end
+        end
+        if zhopa2_tasks.assign_base_camping(q,smart,"base_invitation_arrived",{invitation=true}) then
+            M.campers[q.id]={smart_id=r.smart_id,squad_name=r.squad_name}
+            M.reservations[q.id]=nil
+            log("arrived",r.base..":"..q.id)
+        end
+        return true
+    end
+    local current=zhopa2_perception.obj_level(q)
+    local vertex=tonumber(q.m_game_vertex_id)
+    local dist=distance(q,smart)
+    if current~=r.last_level or (vertex and vertex~=r.last_vertex) or dist<(tonumber(r.last_distance) or math.huge)-25 then
+        r.last_progress,r.last_distance,r.last_level,r.last_vertex=now(),dist<math.huge and dist or nil,current,vertex
+    end
+    if now()-(tonumber(r.last_progress) or now())>=num("base_invitation_route_timeout_sec",300,30,3600)*1000 then
+        release(q.id,"base_invitation_route_stalled",true)
+    end
+    return true
+end
+
+local function live_reservations(cycle)
+    local out={}
+    for id,r in pairs(M.reservations) do
+        if r.base==cycle.key and r.seq==cycle.seq then
+            local q=object(id)
+            if not q or name(q)~=r.squad_name or q.zhopa2_task~=TASK or tonumber(q.zhopa2_target)~=r.smart_id then
+                release(id,"base_invitation_squad_lost",false)
+            else
+                local list,complete=roster(q)
+                if complete and #list==0 then release(id,"base_invitation_squad_dead",false)
+                else if complete then r.members=#list end;M.update_task(q);if M.reservations[id] then out[#out+1]=r end end
+            end
+        end
+    end
+    return out
+end
+local function peaceful_stationed(snap,f)
+    for _,s in ipairs(snap.services) do if s.faction~="trader" and not compatible(f,s.faction) then return false end end
+    for other in pairs(snap.defender_factions) do if not compatible(f,other) then return false end end
+    return true
+end
+local function donors(snap,patron)
+    local count=0
+    for _,entry in ipairs(snap.residents) do
+        local q=snap.squads[entry.squad_id]
+        if entry.kind=="human" and compatible(entry.faction,patron) and peaceful_stationed(snap,entry.faction) and q
+            and type(q.zhopa2_can_manage)=="function" and q:zhopa2_can_manage()==true then count=count+1 end
+    end
+    return count
+end
+local function deficit(snap,patron)
+    local guard_goal=math.ceil(snap.guard_total*num("base_invitation_guard_fill_percent",100,10,100)/100)
+    local need=math.max(0,guard_goal-snap.guard_filled)+snap.service_missing-donors(snap,patron)
+    if snap.wild>0 and (not snap.owner or wild_faction(snap.owner)) then need=math.max(need,2+snap.wild-snap.human) end
+    return math.max(0,need)
+end
+local function reserved_slot(cycle,list,slot)
+    for _,r in ipairs(list) do if r.slot==slot then return true end end
+    return false
+end
+local function choose(smart,cycle,filter,wave,slot,opponent)
+    local candidates=collect(smart,filter,opponent)
+    for _,c in ipairs(candidates) do if accept(c,cycle,wave,slot) then return true end end
+    return false
+end
+local function process_base(smart,key)
+    local snap=M.snapshot(smart)
+    if not snap.complete then return false,"population_pending" end
+    local cycle=M.cycles[key]
+    local goal=math.ceil(snap.guard_total*num("base_invitation_guard_fill_percent",100,10,100)/100)
+    local empty=#snap.residents==0
+    local wild_owner=snap.owner and wild_faction(snap.owner)
+    local partial=cfg("base_invitation_partial_refill",true) and snap.guard_total>0
+        and 100*snap.guard_filled/snap.guard_total<=num("base_invitation_partial_threshold",40,10,80)
+    if not cycle then
+        if not (empty or wild_owner or (partial and snap.owner)) then return false,"no_request" end
+        cycle={key=key,seq=1,anchor_id=smart.id,anchor_name=name(smart),phase=empty and "wave1" or (wild_owner and "wave1" or "supply"),
+            human_arrived=not empty and not wild_owner,first_human_faction=not wild_owner and snap.owner or nil,
+            wild_arrived=wild_owner or false,wild_faction=wild_owner and snap.owner or nil,wild_sent=0,
+            first_hostile_arrived=wild_owner or false,partial=not empty and not wild_owner}
+        M.cycles[key]=cycle
+    end
+    local list=live_reservations(cycle)
+    if cycle.phase=="settled" then
+        local correction=cycle.estimated and not snap.estimated and (snap.guard_filled<goal or snap.service_missing>0)
+        local wild_event=snap.wild>0 and cycle.wild_arrived and (cycle.wild_sent or 0)<num("base_invitation_wild_support_squads",2,0,4)
+        if not (empty or wild_owner or partial or correction or wild_event) then return false,"settled" end
+        if cycle.complete_human and #list==0 and (empty or wild_owner) then
+            cycle.seq=cycle.seq+1;cycle.human_arrived=false;cycle.first_human_faction=nil
+            cycle.wild_arrived=wild_owner or false;cycle.wild_faction=wild_owner and snap.owner or nil;cycle.wild_sent=0
+            cycle.first_human_id,cycle.first_hostile_id,cycle.first_hostile_arrived=nil,nil,wild_owner or false
+            cycle.partial=false
+        end
+        if not empty and not wild_owner then cycle.partial=true end
+        cycle.phase=cycle.human_arrived and "supply" or "wave1";cycle.complete_human=false
+    end
+    if not cycle.human_arrived then
+        if not reserved_slot(cycle,list,"first_human") then
+            if choose(smart,cycle,function(c,actor) return c.kind=="human" and compatible(c.faction,actor) end,1,"first_human") then return true end
+            if cycle.wild_arrived and choose(smart,cycle,function(c) return c.kind=="human" end,1,"first_human") then return true end
+        end
+    end
+    if not cycle.partial and not cycle.first_hostile_arrived and not reserved_slot(cycle,list,"first_hostile") and cfg("base_invitation_hostile_wave",true) then
+        if choose(smart,cycle,function(c,actor) return relations(c.faction,actor)=="enemy" end,1,"first_hostile",cycle.first_human_faction) then return true end
+    end
+    if cycle.human_arrived and snap.human>0 and not wild_owner and snap.wild==0
+        and snap.guard_filled>=goal and snap.service_missing==0 then
+        for _,r in ipairs(list) do if r.wave==2 then release(r.squad_id,"base_invitation_excess",true) end end
+        cycle.phase,cycle.complete_human,cycle.estimated="settled",true,snap.estimated
+        return false,"filled"
+    end
+    if snap.wild>0 and cycle.wild_arrived and (cycle.wild_sent or 0)<num("base_invitation_wild_support_squads",2,0,4) then
+        local inflight=0;for _,r in ipairs(list) do if r.wave==2 then inflight=inflight+1 end end
+        if inflight<num("base_invitation_max_inflight",3,1,8) and choose(smart,cycle,function(c)
+            return c.kind~="human" and compatible(c.faction,cycle.wild_faction)
+        end,2,"wild_support") then return true end
+    end
+    if not cycle.human_arrived then return false,"waiting_for_humans" end
+    local patron=not wild_owner and snap.owner or cycle.first_human_faction
+    if not patron or wild_faction(patron) then return false,"owner_pending" end
+    local need=deficit(snap,patron)
+    local inflight=0
+    table.sort(list,function(a,b)
+        if a.wave~=b.wave then return a.wave<b.wave end
+        if (a.priority or 2)~=(b.priority or 2) then return (a.priority or 2)<(b.priority or 2) end
+        if (a.last_distance or math.huge)~=(b.last_distance or math.huge) then return (a.last_distance or math.huge)<(b.last_distance or math.huge) end
+        return a.squad_id<b.squad_id
+    end)
+    for _,r in ipairs(list) do
+        if r.kind=="human" and compatible(r.faction,patron) and peaceful_stationed(snap,r.faction) then
+            if r.wave==2 and need<=0 then release(r.squad_id,"base_invitation_excess",true)
+            else need=math.max(0,need-r.members);if r.wave==2 then inflight=inflight+1 end end
+        elseif r.wave==2 then inflight=inflight+1 end
+    end
+    if need<=0 and snap.wild==0 then return false,"supplied_waiting_for_jobs" end
+    if need>0 and inflight<num("base_invitation_max_inflight",3,1,8) then
+        if choose(smart,cycle,function(c)
+            return c.kind=="human" and compatible(c.faction,patron) and peaceful_stationed(snap,c.faction)
+        end,2,"human_support") then return true end
+    end
+    return false,"waiting_for_reinforcements"
+end
+
+function M.on_smart_update(smart)
+    local bases,svc=rawget(_G,"zhopa2_bases"),rawget(_G,"zhopa2_service_fillers")
+    if not enabled() or not (smart and smart.id and bases and svc) or not bases.is_base(smart)
+        or not svc.is_service_base(smart) then return end
+    local key=bases.key(smart)
+    if not M.pending[key] then M.pending[key]={smart_id=smart.id,next_check=0} end
+end
+local function cancel_all(reason)
+    local ids={};for id in pairs(M.reservations) do ids[#ids+1]=id end
+    for _,id in ipairs(ids) do release(id,reason,true) end
+    M.cycles,M.pending={},{}
+end
+function M.process_queue()
+    for i=1,8 do
+        local id,r=next(M.campers,camper_cursor)
+        if not id then camper_cursor=nil;break end
+        local q=object(id)
+        if not q or name(q)~=r.squad_name or (q.zhopa2_task~="BASE_CAMPING" and q.zhopa2_task~="NIGHT_REST") then
+            M.campers[id]=nil;camper_cursor=nil
+        else camper_cursor=id end
+    end
+    local active=enabled()
+    if not active then
+        if previous_enabled or next(M.reservations) then cancel_all("base_invitations_disabled") end
+        previous_enabled=false;return false
+    end
+    previous_enabled=true
+    if not (rawget(_G,"zhopa2_tasks") and rawget(_G,"zhopa2_index") and rawget(_G,"zhopa2_perception")
+        and rawget(_G,"zhopa2_bases") and rawget(_G,"zhopa2_service_fillers") and rawget(_G,"zhopa2_topology")) then return false end
+    local rt=rawget(_G,"zhopa2_runtime_patches")
+    if rt and rt.runtime_ready and not rt.runtime_ready("base_invitations") then return false end
+    if zhopa2_tasks.surge_active() then return false end
+    local keys={};for key in pairs(M.pending) do keys[#keys+1]=key end;table.sort(keys)
+    local start=1
+    for i,key in ipairs(keys) do if key==cursor then start=i%#keys+1;break end end
+    for offset=0,math.min(#keys,8)-1 do
+        local key=keys[(start+offset-1)%#keys+1];cursor=key
+        local entry=M.pending[key]
+        if (entry.next_check or 0)<=now() then
+            local smart=object(entry.smart_id)
+            local cycle=M.cycles[key]
+            if not smart or (cycle and (name(smart)~=cycle.anchor_name or zhopa2_bases.key(smart)~=key)) then
+                local ids={};for id,r in pairs(M.reservations) do if r.base==key then ids[#ids+1]=id end end
+                for _,id in ipairs(ids) do release(id,"base_invitation_base_gone",true) end
+                M.pending[key]=nil;M.cycles[key]=nil
+            else
+                entry.next_check=now()+num("base_invitation_interval_sec",15,5,120)*1000
+                local ok,assigned,reason=pcall(process_base,smart,key)
+                entry.reason=ok and reason or tostring(assigned)
+                if ok and assigned then entry.next_check=now()+500 end
+                if not ok and entry.error~=entry.reason then entry.error=entry.reason;log("error",entry.reason) end
+                return ok and assigned or false
+            end
+        end
+    end
+    return false
+end
+local function tick()
+    if ResetTimeEvent then ResetTimeEvent(TIMER,"cycle",0.5) end
+    local ok,err=pcall(M.process_queue)
+    if not ok then log("error",err) end
+    return false
+end
+function M.actor_on_first_update()
+    if not timer_started and CreateTimeEvent then CreateTimeEvent(TIMER,"cycle",0.5,tick);timer_started=true end
+    for _,node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do M.on_smart_update(node.smrt) end
+end
+local function save(data)
+    data[KEY]={version=1,cycles=M.cycles,reservations=M.reservations,capacities=M.capacities,campers=M.campers}
+end
+local function serial_table(value,depth)
+    if type(value)~="table" or depth<1 then return {} end
+    local out,count={},0
+    for key,v in pairs(value) do
+        if count>=MAX_RESERVATIONS then break end
+        if type(key)=="string" or (type(key)=="number" and key==key and key~=math.huge and key~=-math.huge) then
+            local t=type(v)
+            if t=="table" then out[key]=serial_table(v,depth-1)
+            elseif t=="string" or t=="boolean" or (t=="number" and v==v and v~=math.huge and v~=-math.huge) then out[key]=v end
+            count=count+1
+        end
+    end
+    return out
+end
+local function load(data)
+    local s=type(data[KEY])=="table" and data[KEY].version==1 and data[KEY] or {}
+    M.cycles,M.reservations,M.capacities,M.campers={},{},{},{}
+    for key,c in pairs(serial_table(s.cycles,4)) do
+        local id=type(c)=="table" and tonumber(c.anchor_id)
+        if type(key)=="string" and id and id>=0 and id<65535 and type(c.anchor_name)=="string" then
+            c.key=key;c.anchor_id=id;c.seq=math.max(1,math.floor(tonumber(c.seq) or 1));M.cycles[key]=c
+            if c.phase~="wave1" and c.phase~="supply" and c.phase~="settled" then c.phase="wave1" end
+            c.wild_sent=math.max(0,math.min(4,tonumber(c.wild_sent) or 0))
+            if type(c.failed)~="table" then c.failed={} end
+            local failures={}
+            for id,failed in pairs(c.failed) do
+                id=tonumber(id)
+                if id and id>0 and id<65535 and type(failed)=="table" and type(failed.name)=="string" then
+                    failures[id]={name=failed.name,expires=now()+num("base_invitation_route_timeout_sec",300,30,3600)*1000}
+                end
+            end
+            c.failed=failures
+            c.human_arrived=c.human_arrived==true;c.wild_arrived=c.wild_arrived==true;c.partial=c.partial==true
+            c.complete_human=c.complete_human==true;c.first_hostile_arrived=c.first_hostile_arrived==true
+            if type(c.first_human_faction)~="string" then c.first_human_faction=nil end
+            if type(c.wild_faction)~="string" then c.wild_faction=nil end
+        end
+    end
+    for id,r in pairs(serial_table(s.reservations,3)) do
+        id=tonumber(id)
+        local smart_id=type(r)=="table" and tonumber(r.smart_id)
+        if id and id>0 and id<65535 and type(r)=="table" and type(r.squad_name)=="string" and tonumber(r.smart_id)
+            and smart_id>=0 and smart_id<65535 and type(r.faction)=="string"
+            and (r.kind=="human" or r.kind=="mutant" or r.kind=="zombie")
+            and (r.slot=="first_human" or r.slot=="first_hostile" or r.slot=="human_support" or r.slot=="wild_support")
+            and type(r.base)=="string" and M.cycles[r.base] and r.seq==M.cycles[r.base].seq and (r.wave==1 or r.wave==2) then
+            r.squad_id=id;r.smart_id=smart_id;r.members=math.max(0,tonumber(r.members) or 0)
+            if type(r.origin_level)~="string" then r.origin_level=nil end
+            r.last_vertex=tonumber(r.last_vertex)
+            M.reservations[id]=r
+        end
+    end
+    for id,c in pairs(serial_table(s.capacities,4)) do
+        id=tonumber(id)
+        if id and id>=0 and id<65535 and type(c)=="table" then
+            c.guard_total=math.max(0,math.min(256,tonumber(c.guard_total) or 0));c.confirmed=c.confirmed==true
+            if type(c.guard_people)~="table" then c.guard_people={} end
+            local people={}
+            for _,v in pairs(c.guard_people) do
+                local pid=type(v)=="table" and tonumber(v.id)
+                if pid and pid>=0 and pid<65535 and type(v.name)=="string" then v.id=pid;people[#people+1]=v end
+            end
+            c.guard_people=people
+            local roles={}
+            for _,role in pairs(type(c.roles)=="table" and c.roles or {}) do
+                if role=="trader" or role=="tech" or role=="medic" or role=="barman" or role=="guide" then roles[#roles+1]=role end
+            end
+            c.roles=roles
+            M.capacities[id]=c
+        end
+    end
+    for id,c in pairs(serial_table(s.campers,2)) do
+        id=tonumber(id)
+        local target=type(c)=="table" and tonumber(c.smart_id)
+        if id and id>0 and id<65535 and type(c)=="table" and type(c.squad_name)=="string" and target and target>=0 and target<65535 then
+            c.smart_id=target;M.campers[id]=c
+        end
+    end
+    M.pending,cursor,camper_cursor={},nil,nil
+    timer_started,previous_enabled=false,false
+    if RemoveTimeEvent then RemoveTimeEvent(TIMER,"cycle") end
+    for key,c in pairs(M.cycles) do M.pending[key]={smart_id=c.anchor_id,next_check=0} end
+    for _,r in pairs(M.reservations) do r.last_progress=now();r.last_distance=nil end
+end
+local CALLBACKS={smart_terrain_on_update=M.on_smart_update,actor_on_first_update=M.actor_on_first_update,save_state=save,load_state=load}
+function M.on_game_start()
+    if rawget(_G,"zhopa2_runtime_disabled")==true then return end
+    for key,fn in pairs(CALLBACKS) do
+        if UnregisterScriptCallback then UnregisterScriptCallback(key,fn) end
+        if RegisterScriptCallback then RegisterScriptCallback(key,fn) end
+    end
+    if db and db.actor then M.actor_on_first_update() end
+end
+function M.on_master_disable()
+    cancel_all("base_invitations_master_disabled")
+    for key,fn in pairs(CALLBACKS) do if UnregisterScriptCallback then UnregisterScriptCallback(key,fn) end end
+    if RemoveTimeEvent then RemoveTimeEvent(TIMER,"cycle") end
+    timer_started,previous_enabled=false,false;camper_cursor=nil;M.capacities,M.campers={},{}
+    if alife_storage_manager and alife_storage_manager.get_state then alife_storage_manager.get_state()[KEY]=nil end
+    return true
+end
+function M.audit_level()
+    local seen={}
+    for _,node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do
+        local smart=node.smrt
+        if smart and zhopa2_perception.obj_level(smart)==level.name() and zhopa2_service_fillers.is_service_base(smart) then
+            local key=zhopa2_bases.key(smart)
+            if not seen[key] then
+                seen[key]=true
+                local c=M.cycles[key] or {}
+                local ok,snap=pcall(M.snapshot,smart)
+                printf("~ ZHOPA_INVITE | base=%s enabled=%s phase=%s owner=%s human=%s wild=%s guards=%s/%s services_missing=%s complete=%s estimated=%s wild_sent=%s reason=%s",
+                    key,tostring(enabled()),c.phase or "idle",tostring(ok and snap.owner),tostring(ok and snap.human),tostring(ok and snap.wild),
+                    tostring(ok and snap.guard_filled),tostring(ok and snap.guard_total),tostring(ok and snap.service_missing),
+                    tostring(ok and snap.complete),tostring(ok and snap.estimated),tostring(c.wild_sent or 0),tostring((M.pending[key] or {}).reason or (not ok and snap)))
+                for id,r in pairs(M.reservations) do
+                    if r.base==key then
+                        local q=object(id)
+                        local current=q and name(q)==r.squad_name and zhopa2_perception.obj_level(q)
+                        printf("~ ZHOPA_INVITE | reserved=%s slot=%s faction=%s members=%s from_level=%s current_level=%s target=%s",
+                            tostring(id),r.slot,r.faction,tostring(r.members),r.origin_level or "unknown",current or "unknown",tostring(r.smart_id))
+                    end
+                end
+            end
+        end
+    end
+end
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_base_invitations=M
+return M

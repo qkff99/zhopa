@@ -106,12 +106,12 @@ local function named_alive(post,smart)
         local raw=text(job,smart,job.section,"suitable") or ""
         for name in raw:gmatch("=check_npc_name%s*%(([%w_]+)%)") do
             local id=get_story_object_id and get_story_object_id(name)
-            if id and alive(id)~=false then return true end
+            if id and alive(id)~=false then return true,id end
         end
         for condition,name in raw:gmatch("=([%w_]+)%s*%(([%w_]+)%)") do
             if condition=="target_squad_name" or condition=="npc_squad_name" then
                 local group=get_story_squad and get_story_squad(name)
-                if group and group:npc_count()>0 then return true end
+                if group and group:npc_count()>0 then return true,type(group.commander_id)=="function" and group:commander_id() or nil end
             end
         end
     end
@@ -146,7 +146,8 @@ local function occupancy(post,smart,occupants)
     occupants=occupants or {}
     local reserved=claims[smart.id] and claims[smart.id][post.key]
     if reserved and (not object(reserved) or alive(reserved)~=false) then return "reserved",reserved end
-    if named_alive(post,smart) then return "native_present" end
+    local native,native_id=named_alive(post,smart)
+    if native then return "native_present",native_id end
     local id=next(occupants)
     if id then
         if next(occupants,id) then return "occupied" end

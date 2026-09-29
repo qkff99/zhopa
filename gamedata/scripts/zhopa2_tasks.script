@@ -4,6 +4,7 @@ M.TASK_REST = "REST"
 M.TASK_EXPLORE = "EXPLORE"
 M.TASK_FORCE_EXIT = "FORCE_EXIT"
 M.TASK_POPULATE = "POPULATE"
+M.TASK_DYNAMIC_BASE_POPULATE = "DYNAMIC_BASE_POPULATE"
 M.TASK_BASE_CAMPING = "BASE_CAMPING"
 M.TASK_PATROL = "PATROL"
 M.TASK_NIGHT_REST = "NIGHT_REST"
@@ -680,6 +681,7 @@ function M.task_enabled(squad, task)
 		if M.base_camping_cooldown_active(squad) then return false end
 		key = "base_camping_enabled"
 	elseif task == M.TASK_NIGHT_REST then key = "night_rest_enabled"
+	elseif task == M.TASK_DYNAMIC_BASE_POPULATE then key = "base_invitations_enabled"
 	elseif task == M.TASK_REVENGE then key = "revenge_enabled" end
 	if not key then return true end -- REST and safety/story actions are not weighted toggles.
 	if monster then return cfg_bool(key, true) end
@@ -798,6 +800,7 @@ local function assign_rest(squad, reason)
 	squad:zhopa2_assign_rest(reason)
 	return true
 end
+M.assign_rest = assign_rest
 
 local function mark_rest_trade_done(squad, result)
 	if not squad then
@@ -2091,7 +2094,7 @@ function M.assign_base_camping(squad, smart, reason, opts)
 		return true
 	end
 	local p = perception()
-	if not is_monster_squad(squad) and p and type(p.smart_settlement_capacity) == "function" then
+	if not opts.invitation and not is_monster_squad(squad) and p and type(p.smart_settlement_capacity) == "function" then
 		local capacity, free, resident = p.smart_settlement_capacity(squad, smart)
 		-- Taking a camping role in place does not add another squad to the base.
 		if capacity and (not free or free < 1) and not (capacity > 0 and resident) then return false end
@@ -2107,7 +2110,8 @@ function M.assign_base_camping(squad, smart, reason, opts)
 	end
 	local assign_reason = reason or "base_camping_empty_base"
 	local mem = memory_mod()
-	local return_task = mem and type(mem.capture_base_camping_return) == "function" and mem.capture_base_camping_return(squad) or nil
+	local return_task = squad.zhopa2_task ~= M.TASK_DYNAMIC_BASE_POPULATE and mem
+		and type(mem.capture_base_camping_return) == "function" and mem.capture_base_camping_return(squad) or nil
 	local duration = M.base_camping_duration_sec()
 	local assigned = M.interrupt_task(squad, M.TASK_BASE_CAMPING, smart.id, duration, assign_reason, nil, {
 		clear_reason = assign_reason,
@@ -3087,6 +3091,17 @@ function M.update_squad(squad, memory)
 		if quests and type_(quests.update_squad) == "function" then
 			pcall(quests.update_squad, squad)
 		end
+		update_debug(squad)
+		return true
+	end
+	if squad.zhopa2_task == M.TASK_DYNAMIC_BASE_POPULATE then
+		local invites = rawget(_G, "zhopa2_base_invitations")
+		if invites then
+			local handled = invites.update_task(squad)
+			update_debug(squad)
+			return handled
+		end
+		assign_rest(squad, "base_invitation_module_missing")
 		update_debug(squad)
 		return true
 	end

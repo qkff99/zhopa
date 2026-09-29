@@ -17,6 +17,7 @@ local ACTIVITY_KEYS = {
 	FORCE_EXIT = "ui_st_zhopa2_activity_force_exit",
 	POPULATE = "ui_st_zhopa2_activity_populate",
 	BASE_CAMPING = "ui_st_zhopa2_activity_base_camping",
+	DYNAMIC_BASE_POPULATE = "ui_st_zhopa2_activity_dynamic_base_populate",
 	PATROL = "ui_st_zhopa2_activity_patrol",
 	NIGHT_REST = "ui_st_zhopa2_activity_night_rest",
 	ARTEFACT = "ui_st_zhopa2_activity_artefact",

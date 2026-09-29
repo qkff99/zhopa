@@ -23,7 +23,7 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Bases and services | The addon tracks base vacancies and recruits existing local NPCs as traders, technicians, medics and cooks/barmen, without spawning new NPCs. |
 | Story events | Story mode enables psi zombification and northern migration after the Brain Scorcher shutdown. These systems do not run in freeplay. |
 
-Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `QUEST`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
+Current tasks: `REST`, `EXPLORE`, `FORCE_EXIT`, `POPULATE`, `DYNAMIC_BASE_POPULATE`, `BASE_CAMPING`, `PATROL`, `NIGHT_REST`, `ARTEFACT`, `TRADE`, `QUEST`, `HUNT`, `REVENGE`, `STORY_NORTH_MIGRATION`.
 
 ## Guard Refill
 
@@ -49,6 +49,16 @@ Roaming considers the population of each entire level: living stalkers of all fa
 A living local player counts as one member of their real faction at the nearest service-capable base within its arrival radius. Clear a base and wait for suitable squads: the filler separates existing members to fill service vacancies. An emission is no longer required. Leaving before the recruitment check removes the player's presence; disguises do not change ownership faction.
 
 Empty and sparsely occupied service bases gain weight for exploration, population and patrol routes. Night rest uses the bonus to adjust distance between equally crowded options. Empty bases admit any stalker faction, while occupied bases attract the owner's faction and non-hostile factions. Capacity includes incoming squads; ordinary base-tagged smarts without service jobs get no bonus. Together remote players are outside this feature's scope.
+
+### Base Invitations
+
+An empty service base also invites existing squads from its own level and all immediate neighboring levels. A compound base acts as one host. Service NPCs do not prevent an empty-base request; guards, regular stalkers, zombies and mutants count as residents. The player's true faction has priority over distance; selection uses faction relations without personal reputation or disguises.
+
+The first wave invites one human squad friendly or neutral to the player and one hostile squad when available. An invitation closes rest or an eligible roaming task and routes the squad through `DYNAMIC_BASE_POPULATE`, followed by normal `BASE_CAMPING`. Quests, companions, combat, surge sheltering, ordinary `POPULATE` and existing camping remain protected. The other first-wave squad keeps traveling after the first arrives.
+
+Reinforcements support the actual owner and remain peaceful with existing services and defenders. Demand accounts for living members and incoming squads; excess second-wave groups receive `REST`. Zombies and mutants participate in clashes and one finite support wave, but cannot take service or guard jobs; stalkers keep attempting to reclaim their bases. Partially depleted guards can also request help without a hostile first wave, at 40% occupancy or below by default.
+
+The MCM **Base Invitations** group enables the system by default and controls task interruption, the hostile wave, zombie/mutant participation, guard thresholds and reinforcement size. Target occupancy affects invitation budgeting; Guard Refill continues filling available posts normally. Offline population uses living server NPCs: unknown data is not emptiness, and guard capacity comes from a remembered catalog or a bounded estimate until the level is visited. Diagnostics: `zhopa2_base_invitations.audit_level()`; `from_level` and `current_level` show where each invited squad started and where it is now.
 
 ## NPC Squad Quests
 

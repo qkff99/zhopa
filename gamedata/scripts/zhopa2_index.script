@@ -787,27 +787,6 @@ local function add_count(counts, community, amount)
 	counts[community] = (counts[community] or 0) + (tonumber(amount) or 1)
 end
 
-local function unregistered_trader_count(squad, registered_ids)
-	local traders, pending = 0, false
-	local ok = pcall(function()
-		for member in squad:squad_members() do
-			local id = member and tonumber(member.id)
-			if not id or id < 0 or id >= 65535 then
-				pending = true
-			elseif not registered_ids[id] then
-				local npc = alife_object(id)
-				local community = npc and object_community(npc)
-				if type(community) ~= "string" or community == "" then
-					pending = true
-				elseif relation_faction(community) == "trader" then
-					traders = traders + 1
-				end
-			end
-		end
-	end)
-	return traders, pending or not ok
-end
-
 local function each_level(levels, fn)
 	if type(fn) ~= "function" then
 		return
@@ -2245,6 +2224,90 @@ local function physically_at_base(object, smart)
 	return ok and present == true
 end
 
+-- Live server roster, available on remote levels without online jobs or a warmed headcount cache.
+function M.base_population(smart, include_nearby)
+    local bases = rawget(_G, "zhopa2_bases")
+    local parts = bases and bases.members(smart) or {smart}
+    local result = {complete=true, counts={}, total=0, npcs={}, squads={}}
+    local seen_npcs, seen_groups = {}, {}
+    local function add_npc(npc, squad)
+        local id = npc and tonumber(npc.id)
+        if not id or id < 0 or id >= 65535 then result.complete=false; return end
+        if seen_npcs[id] then return end
+        seen_npcs[id] = true
+        local ok, live = false, false
+        if type(npc.alive)=="function" then ok, live=pcall(npc.alive,npc) end
+        if not ok then result.complete=false; return end
+        if not live then return end
+        local group_id=tonumber(npc.group_id)
+        squad=squad or (group_id and group_id<65535 and alife_object and alife_object(group_id))
+        local community = squad and is_monster_squad(squad) and object_community(squad) or object_community(npc)
+        if type(community)~="string" or community=="" then result.complete=false; return end
+        local faction=relation_faction(community)
+        result.npcs[#result.npcs+1]={id=id, object=npc, squad_id=group_id, faction=faction}
+        if squad and squad.id then result.squads[squad.id]=squad end
+        if faction~="trader" then add_count(result.counts,faction,1);result.total=result.total+1 end
+    end
+    for _,part in ipairs(parts) do
+        for _,info in pairs(part.npc_info or {}) do add_npc(info and info.se_obj) end
+        for id in pairs(part.load_info or {}) do
+            local key=tonumber(id)
+            if key and key>=0 and key<65535 then add_npc(alife_object(key)) else result.complete=false end
+        end
+        for id,value in pairs(part.arriving_npc or {}) do
+            local key=tonumber(id)
+            local npc=(type(value)=="table" or type(value)=="userdata") and value
+                or (key and key>=0 and key<65535 and alife_object(key))
+            if not npc or not npc.position then result.complete=false
+            elseif physically_at_base(npc,part) then add_npc(npc) end
+        end
+        if next(part.npc_to_register or {}) then result.complete=false end
+    end
+    local function add_group(squad, assigned)
+        if not squad then if assigned then result.complete=false end;return end
+        if seen_groups[squad.id] then return end
+        seen_groups[squad.id]=true
+        local present, known = false, false
+        for _,part in ipairs(parts) do
+            local ok, qlevel, blevel=pcall(function() return obj_level(squad),obj_level(part) end)
+            if ok and qlevel and blevel then
+                if qlevel~=blevel then known=true
+                elseif squad.position and part.position then
+                    local measured, distance=pcall(squad.position.distance_to_sqr,squad.position,part.position)
+                    if measured and type(distance)=="number" then
+                        known=true;present=present or distance<=(tonumber(part.arrive_dist) or BASE_PULL_RADIUS)^2
+                    end
+                end
+            end
+        end
+        if not known then result.complete=false;return end
+        if not present then return end
+        result.squads[squad.id]=squad
+        local iterated=0
+        local ok=pcall(function()
+            for member in squad:squad_members() do
+                iterated=iterated+1
+                local id=member and tonumber(member.id)
+                if not id or not seen_npcs[id] then
+                    add_npc(id and id>=0 and id<65535 and alife_object(id) or nil,squad)
+                end
+            end
+        end)
+        local size_ok,size=false,nil
+        if type(squad.npc_count)=="function" then size_ok,size=pcall(squad.npc_count,squad) end
+        if not ok or not size_ok or not tonumber(size) or iterated<tonumber(size) then result.complete=false end
+    end
+    for _,part in ipairs(parts) do
+        local node=SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[part.id]
+        for id in pairs(node and node.squads or {}) do add_group(alife_object(id),true) end
+    end
+    if include_nearby then
+        local level_name=obj_level(smart)
+        for _,squad in ipairs(level_name and M.squads_on_levels({level_name}) or {}) do add_group(squad,false) end
+    end
+    return result
+end
+
 function M.actor_service_base()
 	local scratch = current_frame_scratch()
 	if scratch.actor_service_base ~= nil then return scratch.actor_service_base or nil end
@@ -2283,59 +2346,13 @@ function M.update_base_ownership(smart)
     if not (smart and smart.id and smart_is_base(smart)) then return nil end
     local bases = rawget(_G, "zhopa2_bases")
     local members = bases and bases.members(smart) or {smart}
-    local counts, registered_by_squad, seen_npcs, registered_npc_ids = {}, {}, {}, {}
-    local total, population_pending = 0, false
-    -- Gather all registrations first, before subtracting them from squad headcounts.
-    for _, part in ipairs(members) do
-        for _, info in pairs(part.npc_info or {}) do
-            local npc = info and info.se_obj
-            if not npc or not npc.id then population_pending = true
-            elseif not seen_npcs[npc.id] then
-                seen_npcs[npc.id] = true
-                local valid, alive = false, false
-                if type(npc.alive) == "function" then valid, alive = pcall(npc.alive, npc) end
-                if not valid then population_pending = true end
-                local community = valid and alive and object_community(npc)
-                if community then
-                    local group = tonumber(npc.group_id)
-                    if group and group ~= 65535 then
-                        -- A living neutral trader still consumes its squad's registration slot.
-                        registered_by_squad[group] = (registered_by_squad[group] or 0) + 1
-                        registered_npc_ids[npc.id] = true
-                    end
-                    local faction = relation_faction(community)
-                    if faction ~= "trader" then
-                        add_count(counts, faction, 1)
-                        total = total + 1
-                    end
-                end
-            end
-        end
-    end
-    local seen_squads, seen_camping, zhopa2_count = {}, {}, 0
+    local population = M.base_population(smart)
+    local counts, total, population_pending = population.counts, population.total, not population.complete
+    local seen_camping, zhopa2_count = {}, 0
     for _, part in ipairs(members) do
         local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[part.id]
         for id in pairs(node and node.squads or {}) do
             local squad = alife_object(id)
-            if squad and not seen_squads[id] then
-                seen_squads[id] = true
-                local community, count = object_community(squad), squad_cached_npc_count(squad)
-                local present = false
-                for _, area in ipairs(members) do if physically_at_base(squad, area) then present = true; break end end
-                if community and count > 0 and present then
-                    local unregistered = math.max(0, count - (registered_by_squad[id] or 0))
-                    local faction = relation_faction(community)
-                    if faction ~= "trader" then
-                        if unregistered > 0 then
-                            local traders, pending = unregistered_trader_count(squad, registered_npc_ids)
-                            unregistered = math.max(0, unregistered - traders)
-                            if pending then population_pending = true end
-                        end
-                        add_count(counts, faction, unregistered)
-                        total = total + unregistered
-                    end
-                end
-            end
             if squad and not seen_camping[id] and squad_base_camping_at_smart(squad, part.id) then
                 seen_camping[id] = true
                 zhopa2_count = zhopa2_count + squad_cached_npc_count(squad)

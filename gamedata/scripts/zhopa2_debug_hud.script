@@ -65,6 +65,9 @@ local function safe_squad_spot_id(squad)
 	if not squad then
 		return nil
 	end
+	if squad.zhopa2_task == "DYNAMIC_BASE_POPULATE" then
+		return tonumber(squad.id)
+	end
 	if type(squad.squad_members) == "function" then
 		local ok, id = pcall(function()
 			for member in squad:squad_members() do

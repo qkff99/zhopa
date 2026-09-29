@@ -1,4 +1,10 @@
-# 2.3.1
+# 2.3.2
+
+### General
+- Added optional empty service-base invitations online and offline, enabled by default. Both single-smart and multi-smart service bases invite existing squads from their own and immediate neighboring levels; existing roaming weights remain in place.
+- The first wave invites one squad friendly or neutral to the player and one available hostile squad. The player's true faction outranks distance. Arrival starts normal BASE_CAMPING while the other first-wave squad keeps traveling.
+- The second wave restores services and guards for the actual owner, accounting for living donors and incoming reinforcements. Excess second-wave squads receive REST. Partial reinforcement triggers at 40% guard occupancy or below by default.
+- Zombies and mutants can participate in invitations and one finite support wave; stalkers keep attempting to reclaim their bases. Added LTX/MCM controls, Russian and English localization, and invitation diagnostics.
 
 ### Fixes
 - The neutral `trader` faction no longer contributes to base ownership, including NPCs whose smart registration has not been restored. Their service jobs remain accounted for, while other members of mixed squads retain their votes.

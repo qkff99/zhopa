@@ -861,6 +861,12 @@ local function native_provider_role(se_obj, smart, catalog)
 	return info and info.job and classify_job_role(info.job, smart) or nil
 end
 
+function M.npc_service_role(npc, smart)
+    if not (npc and smart) then return nil end
+    local catalog = provider_catalog(smart)
+    return catalog and native_provider_role(npc, smart, catalog) or nil
+end
+
 function M.invalidate_presence(smart)
 	local id = tonumber(smart and smart.id)
 	if id then
@@ -985,6 +991,11 @@ local function roles_from_set(set)
 		end
 	end
 	return out
+end
+
+function M.service_roles_at_smart(smart)
+	local catalog = smart and provider_catalog(smart)
+	return catalog and roles_from_set(catalog.allowed) or nil
 end
 
 local function missing_roles(allowed, existing)
