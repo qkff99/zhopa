@@ -1,5 +1,11 @@
 -- Manual snapshot: no task assignments, spawning, callbacks or save changes.
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function log(format, ...)
+    if not debug_print_enabled() then return end
     printf("%s", "~ ZHOPA2 camping diag | " .. string.format(format, ...))
 end
 

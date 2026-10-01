@@ -17,7 +17,7 @@ Z.H.O.P.A. makes life in the Zone more connected: squads receive purposeful task
 | Task balance | Valid task-target pairs are weighted by squad strength, local faction pressure, and optional faction preferences. Story and safety tasks remain outside this random selection. |
 | Hunt and revenge | Targets are tracked by their actual squad position, including level transitions. Actor revenge makes only the assigned squad hostile, not its entire faction. |
 | Dialogue and travel | A managed squad commander reports the current and previous task, including the NPC-quest type, and shows an area/smart destination card. If the squad is moving, the actor can travel to its actual destination with time advancement, optional payment, and Story Mode psi restrictions. |
-| Loot | Online logic extends vanilla pickup and prevents loops on rejected items. Offline loot is bounded virtual cargo and consumes no engine object IDs. |
+| Loot | Offline loot is bounded virtual cargo and consumes no engine object IDs. Online native loot can bypass global pack bans and optionally protect player/companion victims; ARTEFACT is independent. |
 | Economy | The leader trades for the whole squad, sells real and virtual goods, pools member money, and buys basic supplies. |
 | Artefacts | Real and virtual offline artefacts are supported, including smart assignment and online pickup by a selected NPC with detector animation. |
 | Bases and services | The addon tracks base vacancies and recruits existing local NPCs as traders, technicians, medics and cooks/barmen, without spawning new NPCs. |
@@ -68,7 +68,7 @@ Online, the commander physically approaches the trader and plays the service ani
 
 ## Looting
 
-Online looting uses vanilla pickup schemes whenever they can complete normally. ZHOPA adds targeted pickup, anti-stall handling, and memory cleanup after rejected or completed loot so an NPC cannot retry the same corpse or item forever.
+The old managed online looter has been replaced with a narrow native-scheme patch. `loot_enabled` bypasses global game/pack bans, the exclusion distance around the player and extra detection-radius caps. Search uses NPC visual memory; movement, animations and loot transfer remain native. `ARTEFACT` retains its separate targeted pickup with approach, animation and acquired-artifact accounting.
 
 After offline combat, loot is recorded in a bounded virtual ledger. It is sold through the economy or materialized only in a controlled scenario, such as an online NPC death. This prevents long playthroughs from exhausting the engine object-ID pool.
 
@@ -116,7 +116,9 @@ Squad dialogue and joint travel are controlled by `squad_dialogue_enabled`. Trav
 
 NPC squad quests are controlled by `npc_quests_enabled`; `stalker_quest_weight` sets their relative selection chance. Profiles, enabled types, slot counts, and reward ranges live in `zhopa2_npc_quests.ltx`; a trader smart can be excluded with `smart_name = disabled`.
 
-Online managed looting is experimental and disabled by default. Leave it disabled to use vanilla looting, the more predictable choice for large mod packs; artefact tasks continue to use their separate targeted pickup path. After updating the addon, use MCM's **Reset to defaults** before changing options so the current recommended defaults take effect.
+The MCM key `loot_enabled` enables native online loot and defaults to off. The separate `loot_protect_player_kills` prevents searches of player/companion victims, including mutants; it defaults to off and requires online loot. New kill marks persist with their objects through save/load and level changes. The rule protects corpse searches, not loose ground items. `ARTEFACT` task pickup and offline loot accounting work independently of its value. After updating the addon, use MCM's **Reset to defaults** before changing options so the current recommended defaults take effect.
+
+`debug_hud_enabled` controls all ZHOPA diagnostic prints and manual audits. With it off, only the readiness/warmup counter remains; no separate runtime-log files are created.
 
 ## Compatibility
 
@@ -125,11 +127,11 @@ Online managed looting is experimental and disabled by default. Leave it disable
 | Tested | Vanilla Anomaly 1.5.3, G.A.M.M.A. 0.9.4/0.9.5, Anthology 2.1 |
 | Compatible | ZCP, the REDONE family, New Levels |
 | Incompatible | Alife Plus |
-| Requires testing | Mods that fully replace `sim_squad_scripted`, `smart_terrain`, `sim_board`, `xr_gather_items`, `xr_corpse_detection`, `axr_trade_manager`, or related callbacks |
+| Requires testing | Mods that fully replace `sim_squad_scripted`, `smart_terrain`, `sim_board`, `xr_gather_items`, `axr_trade_manager`, or related callbacks |
 
 Additional notes:
 
-- NPC loot restrictions, including `NPC Loot Claim`, `NPC Stop Looting Dead Bodies`, and the Useful Idiots option that allows only companions to search bodies, reduce the amount of functioning economy. ZHOPA looting or economy can be disabled separately in MCM.
+- With `loot_enabled`, directly bound native checks bypass `NPC Stop Looting Dead Bodies`, Useful Idiots bans and external search wrappers. Our player-victim rule is controlled by `loot_protect_player_kills`. Complete script or planner-evaluator replacements require separate verification. Economy and offline loot accounting have separate MCM switches.
 - `xcvb's Guards Spawner` does not block the addon, but it may write log messages about squads after ZHOPA begins managing them.
 - Combat AI addons are usually safer as long as they do not replace SIMBOARD, smart terrain, or core lifecycle callbacks.
 

@@ -16,7 +16,13 @@ local trade_session_npc
 local TRADE_BALANCE = 1000000
 local upgrade_ini
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function log(event, detail)
+    if not debug_print_enabled() then return end
     if automatic and event ~= "complete" and event ~= "rollback_failed" then return end
     log_sequence = log_sequence + 1
     if printf then printf("~ ZHOPA_RECRUIT_PROBE | seq=%s time=%s | %s | %s", log_sequence,

@@ -1,12 +1,16 @@
 # 2.3.2
 
 ### General
+- Replaced the old managed online looter with a narrow native-scheme patch that bypasses global game/pack bans, player proximity exclusion and extra distance caps. `loot_enabled` retains visual memory, native actions and safety checks. Added optional protection of player/companion victims (`loot_protect_player_kills`, default off) with persistent kill marks. ARTEFACT and offline loot remain independent.
 - Added optional empty service-base invitations online and offline, enabled by default. Both single-smart and multi-smart service bases invite existing squads from their own and immediate neighboring levels; existing roaming weights remain in place.
 - The first wave invites one squad friendly or neutral to the player and one available hostile squad. The player's true faction outranks distance. Arrival starts normal BASE_CAMPING while the other first-wave squad keeps traveling.
 - The second wave restores services and guards for the actual owner, accounting for living donors and incoming reinforcements. Excess second-wave squads receive REST. Partial reinforcement triggers at 40% guard occupancy or below by default.
 - Zombies and mutants can participate in invitations and one finite support wave; stalkers keep attempting to reclaim their bases. Added LTX/MCM controls, Russian and English localization, and invitation diagnostics.
 
 ### Fixes
+- All ZHOPA diagnostic prints, including errors, trading, services and manual audits, now follow Debug HUD. With the flag off, only the initialization/warmup counter remains; legacy file logs and `zhopa.journal` routing have been removed.
+- Native loot binding now explicitly excludes the player by ID and actor classes: `IsStalker` includes actors, but the player has no NPC AI planner. Fixed the console error after applying settings.
+- Removed the stale call to missing `patch_state_mgr_trade_run()` from `ensure_all`, which could interrupt initialization.
 - The neutral `trader` faction no longer contributes to base ownership, including NPCs whose smart registration has not been restored. Their service jobs remain accounted for, while other members of mixed squads retain their votes.
 - Guard Refill no longer blocks the underlying action that adds an NPC to the actor's squad, so guide tasks and the debug command work; normal dialogue-based guard hiring remains disabled.
 

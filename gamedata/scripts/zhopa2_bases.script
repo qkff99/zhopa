@@ -3,6 +3,11 @@ local M = {}
 local definitions, by_name
 local CONFIG = "zhopa2_base_clusters.ltx"
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function name_of(smart)
     if not smart then return nil end
     if type(smart.name) == "string" then return smart.name end
@@ -31,7 +36,7 @@ local function load_config()
             if not conflict and #members > 0 then
                 definitions[key] = members
                 for _, name in ipairs(members) do by_name[name] = key end
-            elseif printf then printf("! ZHOPA2 bases | rejected invalid/overlapping group=%s", key) end
+            elseif printf and debug_print_enabled() then printf("! ZHOPA2 bases | rejected invalid/overlapping group=%s", key) end
         end
     end
 end

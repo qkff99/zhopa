@@ -235,6 +235,7 @@ local function contains_plain(haystack, needle)
 end
 
 function M.emit_trade_event_text(text)
+	if not debug_print_enabled() then return true end
 	if type(printf) == "function" then
 		local ok = pcall(printf, "%s", text)
 		if ok then
@@ -256,6 +257,7 @@ function M.emit_trade_event_text(text)
 end
 
 function M.queue_trade_event(text)
+	if not debug_print_enabled() then return end
 	if #M.trade_event_buffer >= M.TRADE_EVENT_BUFFER_MAX then
 		table.remove(M.trade_event_buffer, 1)
 	end
@@ -263,6 +265,7 @@ function M.queue_trade_event(text)
 end
 
 function M.flush_trade_events()
+	if not debug_print_enabled() then M.trade_event_buffer = {}; return true end
 	local i = 1
 	while i <= #M.trade_event_buffer do
 		if M.emit_trade_event_text(M.trade_event_buffer[i]) then
@@ -275,6 +278,7 @@ function M.flush_trade_events()
 end
 
 function M.print_trade_event(fmt, ...)
+	if not debug_print_enabled() then M.trade_event_buffer = {}; return end
 	local text = tostring(fmt or "")
 	if select("#", ...) > 0 then
 		local ok_fmt, formatted = pcall(string.format, fmt, ...)

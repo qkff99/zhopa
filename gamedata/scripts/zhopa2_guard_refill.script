@@ -3,6 +3,11 @@ local M = {pending={}}
 local catalogs, claims, cursor = {}, {}, nil
 local claims_revision = -1
 local KEY = "zhopa2_guard_vacancies_v1"
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function object(id)
     id=tonumber(id)
     return id and id>0 and id<65535 and alife_object and alife_object(id) or nil
@@ -359,6 +364,7 @@ function M.on_smart_unregister(smart)
     if smart then M.pending[smart.id],catalogs[smart.id],claims[smart.id]=nil,nil,nil end
 end
 function M.audit_level()
+    if not debug_print_enabled() then return false end
     if not (SIMBOARD and level and db and db.actor) then return false end
     for _,node in pairs(SIMBOARD.smarts or {}) do
         local smart=node.smrt

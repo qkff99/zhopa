@@ -3,7 +3,13 @@ local M = {}
 local DUMP_KEY = DIK_keys and DIK_keys.DIK_J or 36
 local MAX_SQUADS = 1000
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function log(fmt, ...)
+    if not debug_print_enabled() then return end
 	if type(printf) == "function" then
 		pcall(printf, "~ ZHOPA2 runtime hud diag | " .. fmt, ...)
 	elseif type(print) == "function" then

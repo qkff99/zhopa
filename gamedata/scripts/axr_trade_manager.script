@@ -10,7 +10,11 @@ This work is licensed under a Creative Commons Attribution-NonCommercial-ShareAl
 --]]
 
 local ini
-local enable_debug = false
+
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
 
 local enable_npc_trade = true
 local enable_npc_upgrade = true
@@ -714,62 +718,31 @@ local function mark_tech_item_intent(st, sec)
 end
 
 local function emit_prefixed_log(fmt, ...)
-	local argc = select("#", ...)
-	local text = ""
-	if argc > 0 then
-		local base = tostring(select(1, ...))
-		if argc > 1 then
-			local ok_fmt, formatted = pcall(string.format, ...)
-			text = ok_fmt and tostring(formatted) or base
-		else
-			text = base
-		end
-	end
-	text = DEBUG_PREFIX .. text
-	if type(printf) == "function" then
-		pcall(printf, "%s", text)
-	elseif type(log1) == "function" then
-		pcall(log1, text)
-	elseif type(Msg) == "function" then
-		pcall(Msg, text)
-	end
+    if not debug_print_enabled() then return end
+    local ok, text = pcall(string.format, tostring(fmt or ""), ...)
+    text = DEBUG_PREFIX .. (ok and text or tostring(fmt or ""))
+    if type(printf) == "function" then pcall(printf, "%s", text)
+    elseif type(log1) == "function" then pcall(log1, text)
+    elseif type(Msg) == "function" then pcall(Msg, text) end
 end
 
-local function emit_zhopa_axr_trade_log(level_name, fmt, ...)
-	if not (zhopa and zhopa.journal and zhopa.journal.record) then
-		return
-	end
-	local ok_fmt, formatted = pcall(string.format, tostring(fmt or ""), ...)
-	zhopa.journal.record("axr_trade_log", {
-		type = "axr_trade",
-		source = "axr_trade_manager",
-		level = tostring(level_name or "info"),
-		message = ok_fmt and formatted or tostring(fmt or ""),
-		status = "observed",
-	}, "axr_trade")
-end
-
-local function log_trade_info(fmt, ...)
-	emit_zhopa_axr_trade_log("info", fmt, ...)
-end
-
-local function log_trade_warn(fmt, ...)
-	emit_zhopa_axr_trade_log("warn", fmt, ...)
-end
+local function log_trade_info(fmt, ...) return emit_prefixed_log(fmt, ...) end
+local function log_trade_warn(fmt, ...) return emit_prefixed_log(fmt, ...) end
 
 print_debug = function(...)
-	if enable_debug then
+	if debug_print_enabled() then
 		emit_prefixed_log(...)
 	end
 end
 
 log_always = function(...)
-	if enable_debug then
+	if debug_print_enabled() then
 		emit_prefixed_log(...)
 	end
 end
 
 print_trade_event = function(...)
+	if not debug_print_enabled() then return end
 	if type(printf) == "function" then
 		local ok = pcall(printf, ...)
 		if ok then
@@ -944,7 +917,7 @@ function init_settings()
 		log_always("boot rev=%s ini=items\\trade\\gulag_job_trade_buy_sell.ltx", tostring(ZHOPA_AXR_PATCH_REV))
 	end
 	print_debug("override_loaded R3A debug=%s npc_trade=%s npc_upgrade=%s max_upgrades_per_visit=%s",
-		tostring(enable_debug), tostring(enable_npc_trade), tostring(enable_npc_upgrade), tostring(max_upgrades_per_visit))
+		tostring(debug_print_enabled()), tostring(enable_npc_trade), tostring(enable_npc_upgrade), tostring(max_upgrades_per_visit))
 end
 
 --------------------------------
@@ -2079,7 +2052,7 @@ function npc_tech_upgrade_sell(npc)
 	local picked = {}
 	local upgrades = utils_item.get_upgrades_tree(sec_wpn)
 	if not (upgrades and size_table(upgrades) > 0) then
-		printf("warning: axr_trade_manager.npc_tech_upgrade_sell(): no upgrades found for [%s]", sec_wpn)
+		if debug_print_enabled() then printf("warning: axr_trade_manager.npc_tech_upgrade_sell(): no upgrades found for [%s]", sec_wpn) end
 		finalize_service_session(npc, "tech", "done_no_upgrades_tree")
 		return
 	end

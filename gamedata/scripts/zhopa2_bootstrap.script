@@ -7,6 +7,7 @@ local MODULE_STOP_ORDER = {
 	"zhopa2_npc_quests",
 	"zhopa2_economy",
 	"zhopa2_artifacts",
+	"zhopa2_native_loot",
 	"zhopa2_loot",
 	"zhopa2_tasks",
 	"zhopa2_smart_service_slot_doctor",
@@ -50,6 +51,8 @@ local function configured_enabled()
 end
 
 local function log_line(fmt, ...)
+	local cfg = safe_require("zhopa2_cfg")
+	if not (cfg and cfg.get_bool and cfg.get_bool("debug_hud_enabled", false) == true) then return end
 	if type(printf) == "function" then
 		pcall(printf, fmt, ...)
 	end

@@ -1317,7 +1317,7 @@ local function reward_once(quest, squad, reason)
 		return false
 	end
 	quest.rewarded = true
-	if type(printf) == "function" then
+	if cfg_bool("debug_hud_enabled", false) == true and type(printf) == "function" then
 		pcall(
 			printf,
 			"~ ZHOPA2 npc quest | stage [reward_paid] squad [%s:%s] quest [%s] kind [%s] amount [%s] balance [%s] reason [%s]",

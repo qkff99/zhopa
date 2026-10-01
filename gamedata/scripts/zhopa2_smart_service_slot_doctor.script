@@ -7,7 +7,6 @@ local ipairs = _G.ipairs
 local tostring = _G.tostring
 local tonumber = _G.tonumber
 local time_global = _G.time_global
-local io = _G.io
 local math_floor = math.floor
 local table_sort = table.sort
 local RegisterScriptCallback = _G.RegisterScriptCallback
@@ -150,29 +149,6 @@ local function mark_runtime_ready()
     reset_runtime()
 end
 
-local function get_logger()
-    if not (zhopa and zhopa.journal and zhopa.journal.record) then
-        return nil
-    end
-    local function emit(level_name, tag, line)
-        zhopa.journal.record("service_doctor_log", {
-            type = tostring(tag or "SERVICE_DOCTOR"),
-            source = "zhopa2_smart_service_slot_doctor",
-            level = tostring(level_name or "info"),
-            message = tostring(line or ""),
-            status = "observed",
-        }, "service_doctor")
-    end
-    return {
-        info = function(tag, line)
-            emit("info", tag, line)
-        end,
-        warn = function(tag, line)
-            emit("warn", tag, line)
-        end,
-    }
-end
-
 local function current_level_name()
     if not (level and type(level.name) == "function") then
         return "-"
@@ -184,19 +160,9 @@ local function current_level_name()
     return "-"
 end
 
-local function append_fallback_log(level_name, line)
-    if not (io and io.open) then
-        return
-    end
-    local f = io.open("zhopa_runtime.log", "a")
-    if not f then
-        return
-    end
-    f:write(string.format("[%d][%s][SERVICE_DOCTOR] %s\n", now(), tostring(level_name or "INFO"), tostring(line or "")))
-    f:close()
-end
-
 local function log_with(level_name, fmt, ...)
+    local cfg = rawget(_G, "zhopa2_cfg")
+    if not (cfg and cfg.get_bool and cfg.get_bool("debug_hud_enabled", false) == true) then return end
     local line = nil
     if select("#", ...) > 0 then
         local ok_fmt, res = pcall(string.format, tostring(fmt), ...)
@@ -206,14 +172,6 @@ local function log_with(level_name, fmt, ...)
     end
     line = string.format("level=%s %s", tostring(current_level_name()), tostring(line))
 
-    local log = get_logger()
-    if log and type(log[level_name]) == "function" then
-        local ok = pcall(log[level_name], "SERVICE_DOCTOR", line)
-        if ok then
-            return
-        end
-    end
-    append_fallback_log(string.upper(tostring(level_name or "INFO")), line)
     if type(printf) == "function" then
         pcall(printf, "[SERVICE_DOCTOR] %s", line)
     end

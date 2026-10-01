@@ -7,11 +7,16 @@ local actor_dialog_ids = {}
 local native_mechanic_found = false
 local native_upgrade_menu = false
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function compatible_probe()
     local probe = rawget(_G, "zhopa2_service_recruitment")
     if type(probe) == "table" and type(probe.is_service_dialog) == "function"
         and type(probe.open_trade) == "function" then return probe end
-    if not mismatch_logged then
+    if debug_print_enabled() and not mismatch_logged then
         mismatch_logged = true
         printf("! ZHOPA_RECRUIT_PROBE | dialogue_version_mismatch | update ZHOPA recruitment core and DXML helper; check MO2 overrides")
     end

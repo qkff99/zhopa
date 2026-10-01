@@ -7,7 +7,6 @@ local TRACE_INTERVAL_MS = 5000
 local PREPARED_SCAN_INTERVAL_MS = 5000
 local TRACE_LIMIT_PER_TICK = 6
 local MAX_LOG_LINES = 360
-local REQUIRE_DEBUG_HUD = true
 
 local installed = false
 local scheduled = false
@@ -33,9 +32,6 @@ local function cfg_mod()
 end
 
 local function debug_print_enabled()
-	if REQUIRE_DEBUG_HUD ~= true then
-		return true
-	end
 	local cfg = cfg_mod()
 	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
 end

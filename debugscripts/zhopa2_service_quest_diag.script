@@ -1,5 +1,11 @@
 -- Manual, read-only snapshot. No startup hooks or quest mutations.
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function log(text)
+    if not debug_print_enabled() then return end
     printf("~ ZHOPA2 quest diag | %s", text)
 end
 

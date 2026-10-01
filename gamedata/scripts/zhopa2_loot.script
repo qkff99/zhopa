@@ -1,16 +1,9 @@
 local M = {}
 
-local STORE_CORPSE = "corpse"
-local STORE_ITEM = "item"
 local INVALID_ID = 65535
 local DEATH_INI_PATH = "items\\settings\\death_generic.ltx"
 local LOADOUT_INI_PATH = "items\\settings\\npc_loadouts\\npc_loadouts.ltx"
 
-local event_stores = {
-	corpse = { ids = {}, seen = {}, head = 1 },
-	ignored_corpse = { ids = {}, seen = {}, head = 1 },
-	item = { ids = {}, seen = {}, head = 1 },
-}
 local targeted_item_requests = {}
 local targeted_item_requests_by_item = {}
 local exclusive_item_reservations = {}
@@ -98,16 +91,8 @@ local function alife_sim()
 	return ok and sim or nil
 end
 
-function M.online_enabled()
-	return cfg_bool("enabled", true) == true and cfg_bool("loot_enabled", false) == true
-end
-
 function M.offline_enabled()
 	return cfg_bool("enabled", true) == true and cfg_bool("loot_offline_enabled", true) == true
-end
-
-function M.enabled()
-	return M.online_enabled()
 end
 
 local function valid_id(id)
@@ -440,10 +425,7 @@ local function squad_by_id(squad_id)
 	return valid_squad_object(squad)
 end
 
-local function managed_stalker_squad_for_looter(npc, require_loot_enabled)
-	if require_loot_enabled and not M.enabled() then
-		return nil
-	end
+local function managed_stalker_squad_for_looter(npc)
 	if not cfg_bool("enabled", true) then
 		return false
 	end
@@ -488,13 +470,6 @@ function M.trade_context_active(npc)
 		and st.zhopa2_trade_squad_id ~= nil
 		and st.zhopa2_trade_smart_id ~= nil
 		or false
-end
-
-function M.should_manage_looter(npc)
-	if M.trade_context_active(npc) then
-		return false
-	end
-	return managed_stalker_squad_for_looter(npc, true) ~= nil
 end
 
 local function section_is_quest(section)
@@ -1418,232 +1393,6 @@ function M.offline_loot_victim(attacker_squad, se_attacker, se_victim, reason)
 	return true
 end
 
-local function object_is_online_inventory_owner(obj)
-	if not obj then
-		return false
-	end
-	if type(obj.is_inventory_owner) == "function" then
-		local ok_owner, is_owner = pcall(obj.is_inventory_owner, obj)
-		if ok_owner then
-			return is_owner == true
-		end
-	end
-	if type(obj.cast_InventoryOwner) == "function" then
-		local ok_cast, owner = pcall(obj.cast_InventoryOwner, obj)
-		return ok_cast and owner ~= nil
-	end
-	return false
-end
-
-local function corpse_has_quest_item(corpse)
-	if not (corpse and type(corpse.iterate_inventory) == "function" and object_is_online_inventory_owner(corpse)) then
-		return false
-	end
-	local has_quest = false
-	local function inspect(owner, item)
-		if has_quest or not item then
-			return
-		end
-		if section_is_quest(object_section(item)) or object_is_story(item) then
-			has_quest = true
-		end
-	end
-	pcall(corpse.iterate_inventory, corpse, inspect, corpse)
-	return has_quest
-end
-
-function M.is_protected_corpse(corpse, corpse_id)
-	if cfg_bool("loot_protect_quest_items", true) ~= true then
-		return false
-	end
-	if object_is_story(corpse, corpse_id) then
-		return true
-	end
-	return corpse_has_quest_item(corpse)
-end
-
-local function store_for(kind)
-	return event_stores[kind]
-end
-
-local function compact_store(store)
-	local out = {}
-	local seen = {}
-	local ids = store.ids
-	for i = 1, #ids do
-		local id = ids[i]
-		local entry = store.seen[id]
-		if entry and not seen[id] then
-			out[#out + 1] = id
-			seen[id] = entry
-		end
-	end
-	store.ids = out
-	store.seen = seen
-	store.head = 1
-end
-
-local function cleanup_store(kind)
-	local store = store_for(kind)
-	if not store then
-		return
-	end
-	local ttl = math.max(1, cfg_num("loot_event_ttl_sec", 900)) * 1000
-	local now = now_ms()
-	local changed = false
-	for id, entry in pairs(store.seen) do
-		if (now - (entry.tg or 0)) > ttl then
-			store.seen[id] = nil
-			changed = true
-		end
-	end
-	if changed then
-		compact_store(store)
-	end
-end
-
-local function trim_total_cap()
-	local cap = math.max(1, cfg_num("loot_event_cap_total", 600))
-	local function count()
-		return #event_stores.corpse.ids + #event_stores.item.ids
-	end
-	while count() > cap do
-		local corpse = event_stores.corpse
-		local item = event_stores.item
-		local corpse_id = corpse.ids[1]
-		local item_id = item.ids[1]
-		local corpse_entry = corpse_id and corpse.seen[corpse_id] or nil
-		local item_entry = item_id and item.seen[item_id] or nil
-		if corpse_entry and (not item_entry or (corpse_entry.tg or 0) <= (item_entry.tg or 0)) then
-			corpse.seen[corpse_id] = nil
-			table.remove(corpse.ids, 1)
-		elseif item_entry then
-			item.seen[item_id] = nil
-			table.remove(item.ids, 1)
-		else
-			break
-		end
-	end
-end
-
-local function add_event(kind, id)
-	id = tonumber(id)
-	if not valid_id(id) then
-		return false
-	end
-	if kind == STORE_CORPSE and M.corpse_ignored(id) then
-		return false
-	end
-	if not M.enabled() then
-		return false
-	end
-	local store = store_for(kind)
-	if not store then
-		return false
-	end
-	cleanup_store(kind)
-	if not store.seen[id] then
-		store.ids[#store.ids + 1] = id
-	end
-	store.seen[id] = { tg = now_ms() }
-	trim_total_cap()
-	return true
-end
-
-local function remove_event(kind, id)
-	id = tonumber(id)
-	local store = store_for(kind)
-	if not (store and id) then
-		return
-	end
-	if store.seen[id] ~= nil then
-		store.seen[id] = nil
-		compact_store(store)
-	end
-end
-
-local function recent_ids(kind)
-	cleanup_store(kind)
-	local store = store_for(kind)
-	local out = {}
-	if not store then
-		return out
-	end
-	for i = 1, #store.ids do
-		local id = store.ids[i]
-		if store.seen[id] and not (kind == STORE_CORPSE and M.corpse_ignored(id)) then
-			out[#out + 1] = id
-		end
-	end
-	return out
-end
-
-function M.mark_corpse_ignored(id)
-	id = tonumber(id)
-	if not valid_id(id) then
-		return false
-	end
-	local store = store_for("ignored_corpse")
-	if not store then
-		return false
-	end
-	cleanup_store("ignored_corpse")
-	if not store.seen[id] then
-		store.ids[#store.ids + 1] = id
-	end
-	store.seen[id] = { tg = now_ms() }
-	while #store.ids > 512 do
-		local old_id = table.remove(store.ids, 1)
-		if old_id then
-			store.seen[old_id] = nil
-		end
-	end
-	return true
-end
-
-function M.corpse_ignored(id)
-	id = tonumber(id)
-	if not valid_id(id) then
-		return false
-	end
-	cleanup_store("ignored_corpse")
-	local store = store_for("ignored_corpse")
-	return store ~= nil and store.seen[id] ~= nil
-end
-
-function M.recent_corpse_ids()
-	return recent_ids(STORE_CORPSE)
-end
-
-function M.consume_corpse_event_id(id)
-	remove_event(STORE_CORPSE, id)
-end
-
-function M.forget_corpse_id(id)
-	remove_event(STORE_CORPSE, id)
-	M.mark_corpse_ignored(id)
-end
-
-function M.recent_item_ids()
-	return recent_ids(STORE_ITEM)
-end
-
-function M.has_recent_item_events()
-	cleanup_store(STORE_ITEM)
-	local store = event_stores.item
-	return store ~= nil and next(store.seen) ~= nil
-end
-
-function M.consume_item_event_id(id)
-	remove_event(STORE_ITEM, id)
-end
-
-function M.is_recent_item_id(id)
-	cleanup_store(STORE_ITEM)
-	id = tonumber(id)
-	return id ~= nil and event_stores.item.seen[id] ~= nil
-end
-
 function M.has_targeted_item_requests()
 	cleanup_targeted_item_requests()
 	return next(targeted_item_requests) ~= nil
@@ -1766,15 +1515,17 @@ function M.request_item_pickup(npc, item_id, reason)
 	if M.trade_context_active(npc) then
 		return false, "request_trade_active"
 	end
-	local squad = managed_stalker_squad_for_looter(npc, false)
+	local squad = managed_stalker_squad_for_looter(npc)
 	if not squad then
 		return false, "request_bad_looter"
 	end
+	if squad.zhopa2_task ~= "ARTEFACT" then return false, "request_not_artifact_task" end
 	local item = online_object_by_id(item_id)
 	local se_item = item and alife_object and alife_object(item_id) or nil
 	if not (item and (not se_item or tonumber(se_item.parent_id) == INVALID_ID)) then
 		return false, "request_no_online_item"
 	end
+	if not object_is_artifact(item) then return false, "request_not_artifact" end
 	if not M.can_take_section(object_section(item), item, npc) then
 		return false, "request_bad_section"
 	end
@@ -1807,23 +1558,29 @@ function M.request_item_pickup(npc, item_id, reason)
 	return true, "request_targeted_pickup"
 end
 
-function M.targeted_item_ids_for_npc(npc)
+-- Hooks still identify their owned request while smart jobs may switch to shelter/trade.
+function M.targeted_item_ids_for_npc(npc, include_blocked)
 	if not runtime_ready("loot_targeted_items") then
 		return nil
 	end
-	if surge_active() then
+	if include_blocked ~= true and surge_active() then
 		return nil
 	end
 	local npc_id = object_id(npc)
 	if not valid_id(npc_id) then
 		return nil
 	end
-	if M.trade_context_active(npc) then
+	if include_blocked ~= true and M.trade_context_active(npc) then
 		return nil
 	end
 	cleanup_targeted_item_requests()
 	local request = targeted_item_requests[npc_id]
 	if not (request and valid_id(request.item_id)) then
+		return nil
+	end
+	local squad = squad_by_id(request.squad_id)
+	if not (squad and squad.zhopa2_task == "ARTEFACT") then
+		forget_targeted_item_request(request.item_id)
 		return nil
 	end
 	return { request.item_id }
@@ -1877,6 +1634,23 @@ local function cleanup_vanilla_artifact_pickups()
 			vanilla_artifact_pickups[npc_id] = nil
 		end
 	end
+end
+
+local function object_is_online_inventory_owner(obj)
+	if not obj then
+		return false
+	end
+	if type(obj.is_inventory_owner) == "function" then
+		local ok_owner, is_owner = pcall(obj.is_inventory_owner, obj)
+		if ok_owner then
+			return is_owner == true
+		end
+	end
+	if type(obj.cast_InventoryOwner) == "function" then
+		local ok_cast, owner = pcall(obj.cast_InventoryOwner, obj)
+		return ok_cast and owner ~= nil
+	end
+	return false
 end
 
 local function inventory_section_count(owner, section)
@@ -2156,16 +1930,6 @@ function M.recover_pending_vanilla_artifact_pickup(squad, artifact_id)
 	return recover_task_artifact_from_squad_inventory(squad, artifact_id, "artifact_inventory_recover")
 end
 
-function M.corpse_detect_dist_sqr()
-	local dist = math.max(1, cfg_num("loot_corpse_detect_dist_m", 80))
-	return dist * dist
-end
-
-function M.item_detect_dist_sqr()
-	local dist = math.max(1, cfg_num("loot_item_detect_dist_m", 50))
-	return dist * dist
-end
-
 function M.record_loot(npc, source, item, value, reason)
 	if not runtime_ready("loot_record") then
 		return false, "runtime_not_ready"
@@ -2177,25 +1941,7 @@ function M.record_loot(npc, source, item, value, reason)
 	if reason == "ground_artefact_loot" and record_task_artifact_pickup(npc, item, reason) then
 		return true
 	end
-	if not M.enabled() then
-		return false
-	end
-	local squad = looter_squad(npc)
-	if not (squad and squad.zhopa2_managed == true) then
-		return false
-	end
-	local mem = memory_mod()
-	local amount = tonumber(value) or item_cost(item)
-	if item and object_is_artifact(item) then
-		mark_artifact_cargo_for_squad(squad, item, object_section(item), amount, object_id(item), reason or "online_artifact_loot")
-	elseif mem and type(mem.add_loot_value) == "function" then
-		mem.add_loot_value(squad, amount, reason or "online_loot")
-	else
-		squad.zhopa2_loot_count = (tonumber(squad.zhopa2_loot_count) or 0) + 1
-		squad.zhopa2_loot_value = (tonumber(squad.zhopa2_loot_value) or 0) + math.max(0, amount)
-	end
-	squad.zhopa2_last_result = reason or "online_loot"
-	return true
+	return false
 end
 
 function M.record_offline_combat_loot(squad, target, killed_count, reason)
@@ -2300,34 +2046,6 @@ local function on_npc_death(npc, who)
 	end
 	if npc then
 		materialize_virtual_loot_to_npc(npc, "npc_death")
-		add_event(STORE_CORPSE, object_id(npc))
-	end
-end
-
-local function on_monster_death(obj, who)
-	if not runtime_ready("loot_monster_death") then
-		return false, "runtime_not_ready"
-	end
-	if obj then
-		add_event(STORE_CORPSE, object_id(obj))
-	end
-end
-
-local function on_npc_item_drop(npc, item)
-	if not runtime_ready("loot_npc_item_drop") then
-		return false, "runtime_not_ready"
-	end
-	if item then
-		add_event(STORE_ITEM, object_id(item))
-	end
-end
-
-local function on_actor_item_drop(item)
-	if not runtime_ready("loot_actor_item_drop") then
-		return false, "runtime_not_ready"
-	end
-	if item then
-		add_event(STORE_ITEM, object_id(item))
 	end
 end
 
@@ -2347,23 +2065,10 @@ local function on_item_take(npc, item)
 		elseif object_is_artifact(item) then
 			record_task_artifact_pickup(npc, item, "artifact_item_take")
 		end
-		remove_event(STORE_ITEM, object_id(item))
-	end
-end
-
-local function on_actor_item_take(item)
-	if not runtime_ready("loot_actor_item_take") then
-		return false, "runtime_not_ready"
-	end
-	if item then
-		remove_event(STORE_ITEM, object_id(item))
 	end
 end
 
 function M.on_game_load()
-	event_stores.corpse = { ids = {}, seen = {}, head = 1 }
-	event_stores.ignored_corpse = { ids = {}, seen = {}, head = 1 }
-	event_stores.item = { ids = {}, seen = {}, head = 1 }
 	targeted_item_requests = {}
 	targeted_item_requests_by_item = {}
 	exclusive_item_reservations = {}
@@ -2379,30 +2084,18 @@ function M.on_game_start()
 	end
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "npc_on_death_callback", on_npc_death)
-		pcall(UnregisterScriptCallback, "monster_on_death_callback", on_monster_death)
-		pcall(UnregisterScriptCallback, "npc_on_item_drop", on_npc_item_drop)
-		pcall(UnregisterScriptCallback, "actor_on_item_drop", on_actor_item_drop)
 		pcall(UnregisterScriptCallback, "npc_on_item_take", on_item_take)
-		pcall(UnregisterScriptCallback, "actor_on_item_take", on_actor_item_take)
 		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
 	end
 	RegisterScriptCallback("npc_on_death_callback", on_npc_death)
-	RegisterScriptCallback("monster_on_death_callback", on_monster_death)
-	RegisterScriptCallback("npc_on_item_drop", on_npc_item_drop)
-	RegisterScriptCallback("actor_on_item_drop", on_actor_item_drop)
 	RegisterScriptCallback("npc_on_item_take", on_item_take)
-	RegisterScriptCallback("actor_on_item_take", on_actor_item_take)
 	RegisterScriptCallback("on_game_load", M.on_game_load)
 end
 
 function M.on_master_disable()
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "npc_on_death_callback", on_npc_death)
-		pcall(UnregisterScriptCallback, "monster_on_death_callback", on_monster_death)
-		pcall(UnregisterScriptCallback, "npc_on_item_drop", on_npc_item_drop)
-		pcall(UnregisterScriptCallback, "actor_on_item_drop", on_actor_item_drop)
 		pcall(UnregisterScriptCallback, "npc_on_item_take", on_item_take)
-		pcall(UnregisterScriptCallback, "actor_on_item_take", on_actor_item_take)
 		pcall(UnregisterScriptCallback, "on_game_load", M.on_game_load)
 	end
 	M.on_game_load()

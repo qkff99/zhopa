@@ -733,7 +733,7 @@ local function replacement_provider_suitable(npc_info, job, smart)
 	local ok, result = pcall(logic.pick_section_from_condlist, db and db.actor, npc_info.se_obj, adapted)
 	if not ok and not job.zhopa2_service_condition_error then
 		job.zhopa2_service_condition_error = true
-		if printf then printf("! ZHOPA2 service suitable | job=%s error=%s", tostring(job.section), tostring(result)) end
+		debug_service_guard("! ZHOPA2 service suitable | job=%s error=%s", tostring(job.section), tostring(result))
 	end
 	return ok and result == "true"
 end
@@ -1231,12 +1231,12 @@ local function migrate_one(core)
             local ok, result = pcall(SIMBOARD.remove_squad, SIMBOARD, squad)
             if not ok or result == false then
                 migration_failed = true
-                if printf then printf("! ZHOPA2 service migration | squad=%s removal_failed=%s", id, tostring(result)) end
+                debug_service_guard("! ZHOPA2 service migration | squad=%s removal_failed=%s", id, tostring(result))
                 -- Retry on the next load/registration, never loop over a rejected removal.
             else
                 M.invalidate_presence(smart)
                 enqueue(smart, "legacy_removed")
-                if printf then printf("~ ZHOPA2 service migration | removed old spawned squad=%s", id) end
+                debug_service_guard("~ ZHOPA2 service migration | removed old spawned squad=%s", id)
             end
             return -- at most one squad removal per timer tick
         end
@@ -1282,7 +1282,7 @@ function M.process_queue()
             local current = M.marked_smarts[id]
             if not ok then
                 entry.reason, entry.next_check = tostring(needs), now + 60000
-                if printf then printf("! ZHOPA2 service queue | smart=%s error=%s", id, tostring(needs)) end
+                debug_service_guard("! ZHOPA2 service queue | smart=%s error=%s", id, tostring(needs))
                 return false
             end
             if not current then return false end
@@ -1306,7 +1306,7 @@ end
 local function timer_step()
     local ok, done = pcall(M.process_queue)
     if ResetTimeEvent then ResetTimeEvent(TIMER_ID, "queue", 0.5) end
-    if not ok and printf then printf("! ZHOPA2 service queue | timer_error=%s", tostring(done)) end
+    if not ok then debug_service_guard("! ZHOPA2 service queue | timer_error=%s", tostring(done)) end
     return ok and done == true
 end
 

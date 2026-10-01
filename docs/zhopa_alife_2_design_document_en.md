@@ -6,7 +6,7 @@ Full name: **Z.H.O.P.A. ALIFE 2.3 — Zone Hostile Operations & Population AI**.
 
 This document follows the old ZHOPA design document format: it is an engineering map, not a player-facing README. It describes the current ZHOPA ALIFE 2.3 architecture after the migration from full-file overrides to chain-friendly runtime patches.
 
-> Document status: current development baseline as of September 28, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
+> Document status: current development baseline as of September 30, 2026. The current Lua source and the [generated function reference](zhopa_alife_2_function_reference_en.md) remain authoritative for exact callable contracts.
 
 | Layer | Primary files | Responsibility |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ This document follows the old ZHOPA design document format: it is an engineering
 | Simulation | `zhopa2_tasks`, `zhopa2_task_scoring`, `zhopa2_perception`, `zhopa2_memory` | Task FSM, bounded task-target scoring, target selection, and serializable squad state |
 | Interaction | `zhopa2_npc_quests`, `zhopa2_squad_dialogue`, `modxml_zhopa2_squad_dialogue` | Trader contracts, commander dialogue, destination cards, and joint travel |
 | Economy | `zhopa2_economy`, `axr_trade_manager`, `zhopa2_smart_service_slot_doctor` | Online/offline trade, customer jobs, and post-service recovery |
-| Items | `zhopa2_loot`, `zhopa2_artifacts` | Online pickup, virtual offline cargo, and artifact flow |
+| Items | `zhopa2_loot`, `zhopa2_native_loot`, `zhopa2_artifacts` | ARTEFACT targeted pickup, virtual offline cargo, and artifact flow |
 | World and story | `zhopa2_bases`, `zhopa2_service_fillers`, `zhopa2_service_recruitment`, `zhopa2_guard_refill`, `zhopa2_service_quests`, `zhopa2_revenge`, `zhopa2_story_*` | Base ownership, services, revenge, and story events |
 
 ## 1. Purpose
@@ -65,6 +65,7 @@ Runtime modules:
 - `zhopa2_topology`
 - `zhopa2_task_scoring`
 - `zhopa2_loot`
+- `zhopa2_native_loot`
 - `zhopa2_economy`
 - `zhopa2_smart_service_slot_doctor`
 - `zhopa2_revenge`
@@ -91,7 +92,6 @@ Runtime patches:
 - `bind_monster`
 - `xr_reach_task`
 - `xr_gather_items`
-- `xr_corpse_detection`
 - `sim_offline_combat`
 
 ### 2.2 Master disable lifecycle
@@ -134,7 +134,7 @@ Main events:
 - `on_option_change`
 - `squad_on_after_level_change`
 - smart update / enter / leave / reach target through patched vanilla anchors
-- item gather / corpse detection / item take through `xr_gather_items` and `xr_corpse_detection`
+- ARTEFACT pickup through `xr_gather_items`, item receipt through `npc_on_item_take`, and offline deaths through server on_death
 
 Callback registration must be idempotent. Re-registration must not duplicate handlers, and missing optional subsystems must not crash the game.
 
@@ -193,7 +193,8 @@ Each module owns its own temporary state:
 
 - `zhopa2_economy` - trade queues, customer-job preparation and routing, cooldowns, sell/buy rules, and offline execution;
 - `zhopa2_smart_service_slot_doctor` - trade/tech customer-job observation and a deferred vanilla smart-job reselection queue;
-- `zhopa2_loot` — targeted pickups, anti-loop corpse marks, offline loot effects;
+- `zhopa2_loot` - ARTEFACT requests, inventory confirmation, and offline loot effects;
+- `zhopa2_native_loot` - protected native evaluators, isolated search limits and player/companion kill marks;
 - `zhopa2_artifacts` — artifact pickup stages, virtual artifact collection, detector animation flow;
 - `zhopa2_story_north_migration` — story event selection/status;
 - `zhopa2_story_psy_watchdog` — conversion queues and pending reconciliation.
@@ -297,8 +298,7 @@ Current patch anchors:
 - `sim_board` — squad/smart registration facts and safety wrappers;
 - `smart_terrain` — smart update, arrival facts, ownership, service filler hooks;
 - `bind_anomaly_zone` — artifact spawn/take/destroy registration;
-- `xr_gather_items` — online loot, targeted gather, artifact pickup bridge;
-- `xr_corpse_detection` — corpse target filtering and anti-loop cleanup;
+- `xr_gather_items` - ARTEFACT task pickup only; other calls retain the original chain;
 - `sim_offline_combat` — offline combat consequences;
 - `xr_reach_task` — targeted reach/pickup compatibility;
 - `bind_monster` — mutant identity/lifecycle hooks;
@@ -496,23 +496,29 @@ Offline trade:
 
 ## 8. Loot Subsystem
 
-`zhopa2_loot` extends vanilla loot without replacing vanilla behavior wholesale.
+`zhopa2_loot` retains offline loot and ARTEFACT task pickup. The old managed online looter is replaced by `zhopa2_native_loot`, controlled by `loot_enabled` (default off). Retained ARTEFACT/offline paths remain independent.
 
-Online loot:
+The module resolves original vanilla Lua functions through bounded wrapper chains once. Private closures retain shared memory/reservation tables while isolating distance restrictions in upvalues and their environment. Native evaluators bind under the existing property IDs; actions and their preconditions remain original. Search uses NPC visual memory and retains combat, danger, overweight and job prohibitions. The original initializer prepares disabled gather through a local INI proxy; game and pack settings are never written.
 
-- respects feature toggle;
-- avoids stealing artifact task pickups from the selected artifact gatherer;
-- records loot count/value;
-- prevents NPC loops on corpses that cannot be fully looted;
-- cleans memory/queues after corpse rejection or completed loot.
+`loot_protect_player_kills` (MCM/LTX, default off) protects corpses killed by the actor or companions, including mutants. The `zhopa2_player_kill` mark uses native server-object storage; new kills are recorded even with the rule off, survive saves and level transitions, and disappear with their objects. `can_loot_target` filters selected/new corpses through native valuable-loot lookup and runs before transfer. Loose ground items are not protected.
+
+Load, first update and option changes refresh private closures. Already-online NPCs are adopted in batches of 32 only on lifecycle events; there are no ongoing world scans or loot-search queues. Disabling restores pack behavior. ARTEFACT delegates to its retained targeted path before checking the online option.
+
+Online ARTEFACT flow:
+
+- keeps selected NPC/artifact requests and reservations independently of `loot_enabled`;
+- retains approach, detector animation, pickup, inventory confirmation, cancellation and request recovery after load;
+- limits gather evaluator/actions and smart-job intervention to a live ARTEFACT request;
+- permits native surge sheltering and pauses targeted pickup during active trade;
+- ordinary items use the original pack path or the new module's private native pickup when `loot_enabled` is on;
 
 Offline loot:
 
 - after offline combat, the winner receives bounded virtual cargo instead of mass-creating server-side items;
-- value, count and section summaries are recorded for future trade and debug HUD;
-- real items are created only during controlled materialization, for example when an online NPC death needs visible loot.
+- value, count and section summaries remain available for future trade;
+- real items are created only during controlled materialization, such as an online NPC death.
 
-Important rule: when ZHOPA rejects an item or corpse, it must not leave that target in vanilla memory in a way that makes vanilla retry it forever.
+The module's own callbacks are `npc_on_death_callback` for offline cargo materialization, `npc_on_item_take` for ARTEFACT and `on_game_load` for transient request reset. Generic corpse/item event queues and their actor recovery watchers are removed. Squad serialization and legacy `zhopa2_loot_count/value` fields remain compatible; virtual loot and artifact cargo still feed the economy. Removing old planner interventions requires a game restart rather than hot reload.
 
 ## 9. Artifact Subsystem
 
@@ -640,7 +646,7 @@ Cleanup covers ZHOPA tasks and fields, the global NPC-quest pool, temporary serv
 
 ## 14. Debug and Diagnostics
 
-Normal logging should stay quiet. Success spam is allowed only where explicitly useful, such as trade/loot/artifact test feedback, and should be debug-gated where practical.
+With `debug_hud_enabled = false`, all ZHOPA console diagnostics are muted: successes, errors, trades, invitations, recruitment and manual audits. The sole exception is the initialization readiness/warmup counter. Enabling restores diagnostics; disabling clears queued trade messages so old records cannot print later. No separate runtime-log files or legacy `zhopa.journal` diagnostic routing remain.
 
 Debug tools:
 
@@ -712,7 +718,7 @@ The system is healthy when:
 - blacklists affect all task stages;
 - `HUNT` follows moving squad targets;
 - `ARTEFACT` chooses the right smart/artifact and completes online/offline;
-- `LOOT` does not cause corpse/item loops;
+- the online patch retains native memory, actions and safety gates while ARTEFACT stays independent of `loot_enabled`;
 - online/offline trade performs bounded, visible deals;
 - all five NPC-quest kinds complete online/offline without duplicate rewards or a stuck customer job;
 - joint travel keeps actor and squad together, computes time/price correctly, and restores state on failure;

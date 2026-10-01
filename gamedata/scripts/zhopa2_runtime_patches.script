@@ -17,6 +17,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_topology",
 	"zhopa2_task_scoring",
 	"zhopa2_loot",
+	"zhopa2_native_loot",
 	"zhopa2_economy",
 	"zhopa2_smart_service_slot_doctor",
 	"zhopa2_revenge",
@@ -44,7 +45,7 @@ local ZHOPA2_RUNTIME_PATCHES = {
 	{ name = "bind_monster", fn = "patch_bind_monster" },
 	{ name = "xr_reach_task", fn = "patch_xr_reach_task" },
 	{ name = "xr_gather_items", fn = "patch_xr_gather_items" },
-	{ name = "xr_corpse_detection", fn = "patch_xr_corpse_detection" },
+	{ name = "native_loot", fn = "patch_native_loot" },
 	{ name = "sim_offline_combat", fn = "patch_sim_offline_combat" },
 }
 
@@ -387,6 +388,8 @@ local function runtime_time_ms()
 end
 
 local function runtime_log(fmt, ...)
+	if fmt ~= "~ ZHOPA2 runtime ready | progress [%s/%s] stage [%s] item [%s]"
+		and cfg_bool("debug_hud_enabled", false) ~= true then return end
 	local ok, text = pcall(string.format, fmt, ...)
 	text = ok and text or tostring(fmt)
 	if type(printf) == "function" then
@@ -3381,7 +3384,7 @@ function M.patch_sim_offline_combat()
 	return stalker_ok == true and monster_ok == true
 end
 
--- xr_gather_items / xr_corpse_detection -------------------------------------
+-- ARTEFACT targeted pickup through xr_gather_items -------------------------
 
 local ART = {
 	PICKUP_DIST = 10,
@@ -3400,10 +3403,6 @@ end
 
 local function gather_mod()
 	return safe_require("xr_gather_items")
-end
-
-local function corpse_mod()
-	return safe_require("xr_corpse_detection")
 end
 
 local function module_member(mod, name)
@@ -3481,87 +3480,9 @@ local function zhopa2_loot_mod()
 	return safe_require("zhopa2_loot")
 end
 
-function M.zhopa2_has_recent_item_events()
-	local mod = zhopa2_loot_mod()
-	return mod and type(mod.has_recent_item_events) == "function" and mod.has_recent_item_events() == true
-end
-
 function M.zhopa2_has_targeted_item_requests()
 	local mod = zhopa2_loot_mod()
 	return mod and type(mod.has_targeted_item_requests) == "function" and mod.has_targeted_item_requests() == true
-end
-
-local function zhopa2_loot_active(npc)
-	local mod = zhopa2_loot_mod()
-	return mod and type(mod.should_manage_looter) == "function" and mod.should_manage_looter(npc) == true
-end
-
-local function zhopa2_loot_globally_enabled()
-	local mod = zhopa2_loot_mod()
-	return mod and type(mod.enabled) == "function" and mod.enabled() == true
-end
-
-function M.zhopa2_sync_gather_runtime_state()
-	if not zhopa2_loot_globally_enabled() then
-		return false
-	end
-	local mod = gather_mod()
-	local ini = nil
-	if ini_file then
-		local ok, result = pcall(ini_file, "ai_tweaks\\xr_gather_items.ltx")
-		ini = ok and result or nil
-	end
-	if not gather_upvalue("Items") then
-		set_gather_upvalue("Items", {})
-	end
-	set_gather_upvalue("Enable", true)
-	if gather_upvalue("StateWalk") == nil then
-		set_gather_upvalue("StateWalk", (ini and ini:r_string_ex("settings", "state_walk")) or "patrol")
-	end
-	if gather_upvalue("StateRun") == nil then
-		set_gather_upvalue("StateRun", (ini and ini:r_string_ex("settings", "state_run")) or "rush")
-	end
-	if gather_upvalue("RunDist") == nil then
-		set_gather_upvalue("RunDist", (ini and ini:r_float_ex("settings", "run_dist")) or 3)
-	end
-	if gather_upvalue("MaxDetectDistance") == nil then
-		set_gather_upvalue("MaxDetectDistance", (ini and ini:r_float_ex("settings", "max_detect_dist")) or 900)
-	end
-	local use_corpse_table = ini and ini:r_bool_ex("settings", "use_xr_corpse_detection_loot_table", false) or false
-	if gather_upvalue("UseCorpseLootTable") == nil then
-		set_gather_upvalue("UseCorpseLootTable", use_corpse_table)
-	end
-	if use_corpse_table ~= true and not gather_upvalue("LootTable") then
-		if utils_data and type(utils_data.collect_section) == "function" and ini then
-			set_gather_upvalue("LootTable", utils_data.collect_section(ini, "lootable", true))
-		else
-			set_gather_upvalue("LootTable", {})
-		end
-	end
-	local artifact_detection = ini and ini:r_bool_ex("settings", "allow_artifact_detection", false) or false
-	local artifact_search_timer = ini and ini:r_float_ex("settings", "artifact_search_time") or 60000
-	local artifact_communities = utils_data and type(utils_data.collect_section) == "function" and ini and utils_data.collect_section(ini, "artifact_communities", true) or {}
-	if mod then
-		if mod.ArtifactDectection == nil then
-			mod.ArtifactDectection = artifact_detection
-		end
-		if mod.ArtifactSearchTimer == nil then
-			mod.ArtifactSearchTimer = artifact_search_timer
-		end
-		if mod.ArtifactCommunities == nil then
-			mod.ArtifactCommunities = artifact_communities
-		end
-	end
-	if rawget(_G, "ArtifactDectection") == nil then
-		_G.ArtifactDectection = artifact_detection
-	end
-	if rawget(_G, "ArtifactSearchTimer") == nil then
-		_G.ArtifactSearchTimer = artifact_search_timer
-	end
-	if rawget(_G, "ArtifactCommunities") == nil then
-		_G.ArtifactCommunities = artifact_communities
-	end
-	return true
 end
 
 local function zhopa2_can_take_section(npc, item, section)
@@ -3572,25 +3493,10 @@ local function zhopa2_can_take_section(npc, item, section)
 	return mod.can_take_section(section, item, npc) == true
 end
 
-local function zhopa2_event_item_ids()
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.recent_item_ids) == "function" then
-		return mod.recent_item_ids()
-	end
-	return nil
-end
-
-local function zhopa2_consume_item_event_id(item_id)
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.consume_item_event_id) == "function" then
-		mod.consume_item_event_id(item_id)
-	end
-end
-
-local function zhopa2_targeted_item_ids(npc)
+local function zhopa2_targeted_item_ids(npc, include_blocked)
 	local mod = zhopa2_loot_mod()
 	if mod and type(mod.targeted_item_ids_for_npc) == "function" then
-		return mod.targeted_item_ids_for_npc(npc)
+		return mod.targeted_item_ids_for_npc(npc, include_blocked)
 	end
 	return nil
 end
@@ -3598,11 +3504,7 @@ end
 local function zhopa2_item_targeted_for_npc(npc, item_id, ids)
 	local tonum = tonumber
 	item_id = tonum(item_id)
-	local st = npc and db and db.storage and db.storage[npc:id()] and db.storage[npc:id()].gather_items or nil
-	if st and tonum(st.zhopa2_targeted_item_id) and (not item_id or tonum(st.zhopa2_targeted_item_id) == item_id) then
-		return true
-	end
-	ids = ids or zhopa2_targeted_item_ids(npc)
+	ids = ids or zhopa2_targeted_item_ids(npc, true)
 	if not ids then
 		return false
 	end
@@ -3633,14 +3535,6 @@ local function zhopa2_item_clsid(item)
 	return ok and cls or nil
 end
 
-local function zhopa2_item_detect_dist_sqr()
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.item_detect_dist_sqr) == "function" then
-		return mod.item_detect_dist_sqr()
-	end
-	return 2500
-end
-
 local function zhopa2_record_loot(npc, item, reason)
 	local mod = zhopa2_loot_mod()
 	if mod and type(mod.record_loot) == "function" then
@@ -3656,14 +3550,6 @@ function M.zhopa2_note_vanilla_artifact_pickup(npc, artifact_id, section)
 		return ok and result == true
 	end
 	return false
-end
-
-local function zhopa2_should_skip_overweight(npc)
-	return not zhopa2_loot_active(npc)
-end
-
-local function zhopa2_should_skip_condlist(npc)
-	return not zhopa2_loot_active(npc)
 end
 
 local function zhopa2_item_reserved_by(item_id)
@@ -3908,48 +3794,6 @@ local function zhopa2_artifact_approach_progress_ok(npc, st)
 	st.zhopa2_approach_check_time = now + ART.APPROACH_CHECK_MS
 	st.zhopa2_approach_last_dist_sqr = dist
 	return (tonumber(st.zhopa2_approach_bad_ticks) or 0) < ART.APPROACH_BAD_TICKS
-end
-
-function M.zhopa2_gather_stalled(npc, st, item_id, target_pos)
-	local tonum = tonumber
-	if not (npc and st and target_pos and time_global) then
-		return false
-	end
-	item_id = tonum(item_id)
-	if not item_id then
-		return false
-	end
-	local pos = npc:position()
-	if not pos then
-		return false
-	end
-	local now = time_global()
-	if tonum(st.zhopa2_gather_stall_item_id) ~= item_id then
-		st.zhopa2_gather_stall_item_id = item_id
-		st.zhopa2_gather_stall_next = now + ART.APPROACH_CHECK_MS
-		st.zhopa2_gather_stall_x = pos.x
-		st.zhopa2_gather_stall_y = pos.y
-		st.zhopa2_gather_stall_z = pos.z
-		st.zhopa2_gather_stall_bad_ticks = 0
-		return false
-	end
-	if st.zhopa2_gather_stall_next and now < st.zhopa2_gather_stall_next then
-		return false
-	end
-	local dx = pos.x - (tonum(st.zhopa2_gather_stall_x) or pos.x)
-	local dy = pos.y - (tonum(st.zhopa2_gather_stall_y) or pos.y)
-	local dz = pos.z - (tonum(st.zhopa2_gather_stall_z) or pos.z)
-	local moved_sqr = dx * dx + dy * dy + dz * dz
-	if moved_sqr > ART.APPROACH_PROGRESS_EPS_SQR then
-		st.zhopa2_gather_stall_bad_ticks = 0
-		st.zhopa2_gather_stall_x = pos.x
-		st.zhopa2_gather_stall_y = pos.y
-		st.zhopa2_gather_stall_z = pos.z
-	else
-		st.zhopa2_gather_stall_bad_ticks = (tonum(st.zhopa2_gather_stall_bad_ticks) or 0) + 1
-	end
-	st.zhopa2_gather_stall_next = now + ART.APPROACH_CHECK_MS
-	return (tonum(st.zhopa2_gather_stall_bad_ticks) or 0) >= ART.APPROACH_BAD_TICKS
 end
 
 local function zhopa2_prepare_next_artifact_approach(npc, st, item, item_pos, reason)
@@ -4226,301 +4070,7 @@ local function zhopa2_reset_gather_state(st)
 	st.zhopa2_gather_precondition_time = nil
 	st.zhopa2_artifact_force_pickup = nil
 	st.zhopa2_pickup_fail_logged = nil
-	st.zhopa2_gather_stall_item_id = nil
-	st.zhopa2_gather_stall_next = nil
-	st.zhopa2_gather_stall_x = nil
-	st.zhopa2_gather_stall_y = nil
-	st.zhopa2_gather_stall_z = nil
-	st.zhopa2_gather_stall_bad_ticks = nil
 	zhopa2_reset_artifact_approach(st)
-end
-
-function M.zhopa2_mark_ground_gather_release(npc, item_id, reason)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false
-	end
-	M.ground_gather_release_pending = M.ground_gather_release_pending or {}
-	M.ground_gather_release_pending[npc_id] = {
-		item_id = tonumber(item_id),
-		reason = reason or "ground_item_loot",
-		due = (time_global and time_global() or 0) + 100,
-		watch_due = (time_global and time_global() or 0) + 3000,
-		expires = (time_global and time_global() or 0) + 15000,
-	}
-	return true
-end
-
-function M.zhopa2_peek_ground_gather_release(npc)
-	local npc_id = object_id(npc)
-	local pending = M.ground_gather_release_pending
-	if not (npc_id and type(pending) == "table") then
-		return nil
-	end
-	return pending[npc_id]
-end
-
-function M.zhopa2_ground_gather_settling(npc)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false
-	end
-	local pending = M.ground_gather_release_pending
-	if type(pending) == "table" and pending[npc_id] ~= nil then
-		return true
-	end
-	local meet_pending = M.ground_gather_meet_refresh_pending
-	return type(meet_pending) == "table" and meet_pending[npc_id] ~= nil
-end
-
-function M.zhopa2_take_ground_gather_release(npc)
-	local npc_id = object_id(npc)
-	local pending = M.ground_gather_release_pending
-	if not (npc_id and type(pending) == "table") then
-		return nil
-	end
-	local entry = pending[npc_id]
-	pending[npc_id] = nil
-	return entry
-end
-
-function M.zhopa2_ground_gather_release_ready(npc, st, entry)
-	if not entry then
-		return false
-	end
-	local now = time_global and time_global() or 0
-	if now > 0 and tonumber(entry.due or 0) > now then
-		return false
-	end
-	local item_id = tonumber(entry.item_id)
-	local selected_id = st and tonumber(st.selected_id) or nil
-	if item_id and selected_id and selected_id ~= item_id then
-		return true
-	end
-	if not item_id then
-		return selected_id == nil
-	end
-	local se_itm = alife_object and alife_object(item_id) or nil
-	return selected_id == nil or not se_itm or tonumber(se_itm.parent_id) ~= 65535
-end
-
-function M.zhopa2_watch_ground_gather_release()
-	local pending = M.ground_gather_release_pending
-	if type(pending) ~= "table" or next(pending) == nil then
-		return
-	end
-	local now = time_global and time_global() or 0
-	for npc_id, entry in pairs(pending) do
-		local npc = M.zhopa2_online_object_by_id(npc_id)
-		local alive = npc ~= nil
-		if alive and type(npc.alive) == "function" then
-			local ok_alive, is_alive = pcall(npc.alive, npc)
-			alive = ok_alive and is_alive == true
-		end
-		if not alive then
-			pending[npc_id] = nil
-		elseif now > 0 and tonumber(entry.expires or 0) > 0 and now > tonumber(entry.expires) then
-			pending[npc_id] = nil
-		else
-			local st = db and db.storage and db.storage[npc_id] and db.storage[npc_id].gather_items or nil
-			local watch_due = tonumber(entry.watch_due or 0)
-			if (watch_due <= 0 or now >= watch_due) and M.zhopa2_ground_gather_release_ready(npc, st, entry) then
-				pending[npc_id] = nil
-				M.zhopa2_release_ground_gather_npc(npc, entry.reason)
-			end
-		end
-	end
-end
-
-function M.zhopa2_smart_for_online_npc(npc)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return nil, nil
-	end
-	if xr_gulag and type(xr_gulag.get_npc_smart) == "function" then
-		local ok, smart = pcall(xr_gulag.get_npc_smart, npc)
-		if ok and smart and smart.npc_info and smart.npc_info[npc_id] then
-			return smart, nil
-		end
-	end
-	local se_obj = server_object(npc_id)
-	local group_id = tonumber(se_obj and se_obj.group_id)
-	local squad = group_id and group_id > 0 and group_id < 65535 and server_object(group_id) or nil
-	local smart_id = tonumber(squad and squad.smart_id)
-		or tonumber(squad and squad.current_target_id)
-		or tonumber(squad and squad.assigned_target_id)
-	local smart = smart_id and server_object(smart_id) or nil
-	return smart, squad
-end
-
-function M.zhopa2_reapply_current_smart_job(npc)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false
-	end
-	local smart = M.zhopa2_smart_for_online_npc(npc)
-	local info = smart and smart.npc_info and smart.npc_info[npc_id] or nil
-	if not (smart and info and info.job and type(smart.setup_logic) == "function") then
-		return false
-	end
-	info.begin_job = true
-	local offline_state = db and db.offline_objects and db.offline_objects[npc_id] or nil
-	if type(offline_state) == "table" then
-		for key in pairs(offline_state) do
-			offline_state[key] = nil
-		end
-	end
-	local ok = pcall(smart.setup_logic, smart, npc)
-	return ok == true
-end
-
-function M.zhopa2_clear_pickup_state(npc)
-	return M.zhopa2_reapply_current_smart_job(npc)
-end
-
-function M.zhopa2_refresh_npc_meet(npc)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false, false
-	end
-	local root = db and db.storage and db.storage[npc_id] or nil
-	local meet = root and root.meet or nil
-	local manager = meet and meet.meet_manager or nil
-	if not manager then
-		return false, false
-	end
-	pcall(function()
-		manager.__stimer = nil
-		manager.use = nil
-	end)
-	if type(manager.set_start_distance) == "function" then
-		pcall(manager.set_start_distance, manager)
-	end
-	if type(manager.update) == "function" then
-		pcall(manager.update, manager)
-	end
-	local xr_meet_mod = safe_require("xr_meet")
-	if xr_meet_mod and type(xr_meet_mod.process_npc_usability) == "function" then
-		pcall(xr_meet_mod.process_npc_usability, npc)
-	end
-	local talk_enabled = false
-	pcall(function()
-		talk_enabled = npc:is_talk_enabled() == true
-	end)
-	return true, talk_enabled
-end
-
-function M.zhopa2_refresh_meet_after_pickup(npc)
-	return M.zhopa2_refresh_npc_meet(npc)
-end
-
-function M.zhopa2_mark_service_logic_refresh(npc, reason)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false
-	end
-	local now = time_global and time_global() or 0
-	M.service_logic_refresh_pending = M.service_logic_refresh_pending or {}
-	M.service_logic_refresh_pending[npc_id] = {
-		reason = reason or "service_completed",
-		expires = now > 0 and (now + 10000) or 0,
-		next_check = 0,
-		attempts = 0,
-		logic_applied = false,
-	}
-	return true
-end
-
-function M.zhopa2_watch_service_logic_refresh()
-	local pending = M.service_logic_refresh_pending
-	if type(pending) ~= "table" or next(pending) == nil then
-		return
-	end
-	local now = time_global and time_global() or 0
-	for npc_id, entry in pairs(pending) do
-		local npc = M.zhopa2_online_object_by_id(npc_id)
-		local alive = npc ~= nil
-		if alive and type(npc.alive) == "function" then
-			local ok_alive, is_alive = pcall(npc.alive, npc)
-			alive = ok_alive and is_alive == true
-		end
-		if not alive then
-			pending[npc_id] = nil
-		elseif now > 0 and tonumber(entry.expires or 0) > 0 and now > tonumber(entry.expires) then
-			pending[npc_id] = nil
-		elseif now <= 0 or now >= tonumber(entry.next_check or 0) then
-			entry.next_check = now > 0 and (now + 500) or 0
-			entry.attempts = (tonumber(entry.attempts) or 0) + 1
-			if entry.logic_applied ~= true then
-				entry.logic_applied = M.zhopa2_reapply_current_smart_job(npc) == true
-			end
-			local refreshed, talk_enabled = M.zhopa2_refresh_npc_meet(npc)
-			if talk_enabled or (entry.logic_applied and not refreshed) or entry.attempts >= 20 then
-				pending[npc_id] = nil
-			end
-		end
-	end
-end
-
-function M.zhopa2_mark_ground_gather_meet_refresh(npc)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false
-	end
-	local now = time_global and time_global() or 0
-	M.ground_gather_meet_refresh_pending = M.ground_gather_meet_refresh_pending or {}
-	M.ground_gather_meet_refresh_pending[npc_id] = {
-		expires = now > 0 and (now + 10000) or 0,
-		next_check = 0,
-		attempts = 0,
-	}
-	M.zhopa2_refresh_meet_after_pickup(npc)
-	return true
-end
-
-function M.zhopa2_watch_ground_gather_meet_refresh()
-	local pending = M.ground_gather_meet_refresh_pending
-	if type(pending) ~= "table" or next(pending) == nil then
-		return
-	end
-	local now = time_global and time_global() or 0
-	for npc_id, entry in pairs(pending) do
-		local npc = M.zhopa2_online_object_by_id(npc_id)
-		local alive = npc ~= nil
-		if alive and type(npc.alive) == "function" then
-			local ok_alive, is_alive = pcall(npc.alive, npc)
-			alive = ok_alive and is_alive == true
-		end
-		if not alive then
-			pending[npc_id] = nil
-		elseif now > 0 and tonumber(entry.expires or 0) > 0 and now > tonumber(entry.expires) then
-			pending[npc_id] = nil
-		elseif now <= 0 or now >= tonumber(entry.next_check or 0) then
-			entry.next_check = now > 0 and (now + 500) or 0
-			entry.attempts = (tonumber(entry.attempts) or 0) + 1
-			local refreshed, talk_enabled = M.zhopa2_refresh_meet_after_pickup(npc)
-			if not refreshed or talk_enabled or entry.attempts >= 20 then
-				pending[npc_id] = nil
-			end
-		end
-	end
-end
-
-function M.zhopa2_release_ground_gather_npc(npc, reason)
-	local npc_id = object_id(npc)
-	if not npc_id then
-		return false, "missing_npc"
-	end
-	local st = db and db.storage and db.storage[npc_id] or nil
-	local gather = st and st.gather_items or nil
-	if gather then
-		zhopa2_reset_gather_state(gather)
-	end
-	M.zhopa2_mark_ground_gather_meet_refresh(npc)
-	if st and type(st.beh) == "table" then
-		st.beh.desired_target = nil
-	end
-	return true, reason or "ground_gather_release"
 end
 
 local function zhopa2_item_reservation_owner_impl(item_id)
@@ -4554,7 +4104,7 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	if not (npc and item_id and db and db.storage and level and alife_object) then
 		return false, "force_bad_args"
 	end
-	local targeted = targeted ~= false
+	if targeted == false or not zhopa2_item_targeted_for_npc(npc, item_id) then return false, "force_not_artifact_task" end
 	local npc_id = npc:id()
 	local st = db.storage[npc_id] and db.storage[npc_id].gather_items
 	if not st then
@@ -4566,20 +4116,11 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	if not (itm and (not se_itm or se_itm.parent_id == 65535)) then
 		return false, "force_no_online_item"
 	end
+	local cls = zhopa2_item_clsid(se_itm or itm)
+	if not (cls and IsArtefact and IsArtefact(nil, cls)) then return false, "force_not_artifact" end
 	if not zhopa2_can_take_section(npc, itm, itm:section()) then
 		return false, "force_bad_section"
 	end
-	if targeted then
-		zhopa2_suspend_active_scheme_for_targeted_gather(npc, st)
-		st = db.storage[npc_id] and db.storage[npc_id].gather_items
-		if not st then
-			return false, "force_no_storage"
-		end
-	end
-	st.memory = st.memory or {}
-	st.memory[1] = item_id
-	st.index = 1
-	st.__dtimer = 0
 	local items = gather_items_table()
 	local reserved_by = zhopa2_item_reserved_by(item_id)
 	if reserved_by and reserved_by ~= npc_id then
@@ -4589,28 +4130,15 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 		items[item_id] = nil
 	end
 	local pos = itm:position()
-	local item_cls = zhopa2_item_clsid(se_itm or itm)
-	local targeted_artifact = targeted and IsArtefact and IsArtefact(nil, item_cls) == true
-	local vid, approach_index, approach_pos, approach_final
-	if targeted_artifact then
-		vid, approach_index, approach_pos, approach_final = zhopa2_select_artifact_approach(npc, itm, pos, 1)
-		if not zhopa2_valid_accessible_vertex(npc, vid) then
-			return false, "force_no_pickup_route"
-		end
-	else
-		vid = level.vertex_id(pos)
-		local ok_vpos, vertex_pos = pcall(level.vertex_position, vid)
-		if not (ok_vpos and vertex_pos and vertex_pos:distance_to_sqr(pos) <= 16) then
-			vid = itm:level_vertex_id()
-		end
-		if not zhopa2_valid_accessible_vertex(npc, vid) then
-			local nearest = zhopa2_nearest_accessible_vertex(npc, pos)
-			vid = nearest or vid
-		end
-		if not zhopa2_valid_accessible_vertex(npc, vid) then
-			return false, "force_inaccessible"
-		end
-	end
+	local vid, approach_index, approach_pos, approach_final = zhopa2_select_artifact_approach(npc, itm, pos, 1)
+	if not zhopa2_valid_accessible_vertex(npc, vid) then return false, "force_no_pickup_route" end
+	zhopa2_suspend_active_scheme_for_targeted_gather(npc, st)
+	st = db.storage[npc_id] and db.storage[npc_id].gather_items
+	if not st then return false, "force_no_storage" end
+	st.memory = st.memory or {}
+	st.memory[1] = item_id
+	st.index = 1
+	st.__dtimer = 0
 	st.selected_id = item_id
 	st.vid = vid
 	st.vid_pos = approach_pos or pos
@@ -4622,7 +4150,7 @@ function zhopa2_force_gather_item(npc, item_id, targeted)
 	st.artifact_timer = nil
 	st.__stimer = nil
 	st.state = "rush"
-	st.zhopa2_targeted_item_id = targeted and item_id or nil
+	st.zhopa2_targeted_item_id = item_id
 	st.zhopa2_approach_index = approach_index
 	st.zhopa2_approach_pos = approach_pos
 	st.zhopa2_approach_final = approach_final == true
@@ -4663,94 +4191,12 @@ function M.zhopa2_trade_context_active(npc)
 end
 
 function M.zhopa2_trade_gather_blocked(npc, st)
-	if not M.zhopa2_trade_context_active(npc) then
-		return false
-	end
-	if st then
-		local selected_id = tonumber(st.selected_id)
-		if selected_id then
-			zhopa2_clear_gather_item(npc, selected_id, "trade_active")
-		else
-			zhopa2_reset_gather_state(st)
-		end
-		if M.zhopa2_reset_corpse_detection_state then
-			M.zhopa2_reset_corpse_detection_state(st)
-		end
-	end
+	if not M.zhopa2_trade_context_active(npc) then return false end
+	local ids = zhopa2_targeted_item_ids(npc, true)
+	if not ids then return false end
+	local id = tonumber(ids[1])
+	if id then zhopa2_clear_gather_item(npc, id, "trade_active") end
 	return true
-end
-
-function M.patch_state_mgr_trade_run()
-	return false
-end
-
-function M.zhopa2_try_force_online_gather_item(npc, st)
-	if zhopa2_surge_active() then
-		return false
-	end
-    if st then
-        local tg = time_global()
-        if st.next_zhopa_gather_time and tg < st.next_zhopa_gather_time then
-            return false
-        end
-        st.next_zhopa_gather_time = tg + 500
-    end
-	if not (npc and st and zhopa2_loot_active(npc) and alife_object) then
-		return false
-	end
-	local item_ids = zhopa2_event_item_ids()
-	if not (item_ids and #item_ids > 0) then
-		return false
-	end
-	local best_id = nil
-	local best_dist = nil
-	local seen = {}
-	local max_dist = zhopa2_item_detect_dist_sqr()
-	local function consider(item_id)
-		item_id = tonumber(item_id)
-		if not item_id or seen[item_id] then
-			return
-		end
-		seen[item_id] = true
-		local obj = M.zhopa2_online_object_by_id(item_id)
-		if not obj then
-			return
-		end
-		local se_obj = alife_object(item_id)
-		if not (se_obj and se_obj.parent_id == 65535) then
-			return
-		end
-		if get_object_story_id and get_object_story_id(item_id) then
-			return
-		end
-		if not zhopa2_can_take_section(npc, obj, obj:section()) then
-			return
-		end
-		if npc:best_enemy() and IsWeapon and not IsWeapon(obj) then
-			return
-		end
-		local dist = npc:position():distance_to_sqr(obj:position())
-		if dist <= max_dist and (best_dist == nil or dist < best_dist) then
-			best_id = item_id
-			best_dist = dist
-		end
-	end
-	for i = 1, #item_ids do
-		consider(item_ids[i])
-	end
-	if type(npc.memory_visible_objects) == "function" then
-		for o in npc:memory_visible_objects() do
-			local obj = o and o:object()
-			if obj then
-				consider(obj:id())
-			end
-		end
-	end
-	if best_id then
-		local ok = zhopa2_force_gather_item(npc, best_id, false)
-		return ok == true
-	end
-	return false
 end
 
 function M.zhopa2_gather_item_active(npc, item_id)
@@ -4830,156 +4276,63 @@ local function zhopa2_gather_item_debug_status_impl(npc, item_id)
 	)
 end
 
-function M.zhopa2_debug_force_pickup(npc, st, item, reason)
-	if cfg_bool("debug_hud_enabled", false) ~= true then
-		return
-	end
-	local npc_pos = nil
-	if npc and type(npc.position) == "function" then
-		local ok, pos = pcall(npc.position, npc)
-		npc_pos = ok and pos or nil
-	end
-	local item_pos = nil
-	if item and type(item.position) == "function" then
-		local ok, pos = pcall(item.position, item)
-		item_pos = ok and pos or nil
-	end
-	local dist = npc_pos and item_pos and npc_pos:distance_to(item_pos) or nil
-	local state = nil
-	if state_mgr and type(state_mgr.get_state) == "function" then
-		local ok, value = pcall(state_mgr.get_state, npc)
-		state = ok and value or nil
-	end
-	zhopa2_debug_printf(
-		"~ ZHOPA2 loot force pickup | reason [%s] npc [%s:%s] item [%s:%s] distance [%s] state [%s] selected [%s] stage [%s]",
-		tostring(reason or "-"),
-		tostring(object_debug_name(npc)),
-		tostring(object_id(npc) or "-"),
-		tostring(object_debug_name(item)),
-		tostring(object_id(item) or "-"),
-		tostring(dist and math.floor(dist * 100) / 100 or "-"),
-		tostring(state or "-"),
-		tostring(st and st.selected_id or "-"),
-		tostring(st and st.stage or "-")
-	)
-end
-
-local function zhopa2_gather_item_replacement(original, force_selected, force_reason)
+local function zhopa2_gather_item_replacement(original)
 	return function(npc, ...)
-		if not M.master_enabled() then
-			if original then
-				return original(npc, ...)
+		if not M.master_enabled() then return original(npc, ...) end
+		local id = npc and object_id(npc)
+		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items
+		if M.zhopa2_trade_gather_blocked(npc, st) then return end
+		local item_id = st and tonumber(st.selected_id)
+		local item = item_id and M.zhopa2_online_object_by_id(item_id)
+		local targeted = item_id and zhopa2_item_targeted_for_npc(npc, item_id)
+		if not targeted then
+			local se_item = item_id and alife_object and alife_object(item_id)
+			local cls = se_item and zhopa2_item_clsid(se_item)
+			if item and cls and IsArtefact and IsArtefact(nil, cls) then
+				M.zhopa2_note_vanilla_artifact_pickup(npc, item_id, item:section())
 			end
-			return
-		end
-		if zhopa2_surge_active() then
-			return
-		end
-		local id = npc and npc.id and npc:id() or nil
-		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items or nil
-		local selected_id = st and tonumber(st.selected_id) or nil
-		local zhopa2_was_targeted = st and st.zhopa2_targeted_item_id ~= nil
-		local itm = selected_id and M.zhopa2_online_object_by_id(selected_id) or nil
-		local se_itm = selected_id and alife_object and alife_object(selected_id) or nil
-		local zhopa2_active = zhopa2_loot_active(npc)
-		local force_pickup = force_selected == true
-		if st and selected_id and zhopa2_item_reserved_for_other(npc, selected_id) then
-			local items = gather_items_table()
-			items[selected_id] = nil
-			zhopa2_reset_gather_state(st)
-			return
-		end
-		if not (st and selected_id and itm and se_itm and (force_pickup or zhopa2_active or zhopa2_was_targeted)) then
-			if original then
-				local fallback_cls = se_itm and zhopa2_item_clsid(se_itm) or nil
-				if selected_id and itm and fallback_cls and IsArtefact and IsArtefact(nil, fallback_cls) == true then
-					M.zhopa2_note_vanilla_artifact_pickup(npc, selected_id, itm:section())
-				end
-				return original(npc, ...)
+			local native = rawget(_G, "zhopa2_native_loot")
+			if native and type(native.online_enabled) == "function" and native.online_enabled() then
+				return native.gather_item(npc)
 			end
-			if force_pickup and st then
-				zhopa2_reset_gather_state(st)
-			end
-			return
+			return original(npc, ...)
 		end
-		if force_pickup and tonumber(se_itm.parent_id) ~= 65535 then
-			zhopa2_reset_gather_state(st)
-			return
-		end
-		if not force_pickup and not zhopa2_can_take_section(npc, itm, itm:section()) then
-			if original then
-				return original(npc, ...)
-			end
-			return
-		end
-		local cls = zhopa2_item_clsid(se_itm or itm)
-		local is_artifact = IsArtefact and IsArtefact(nil, cls) == true
-		local release_after_finalize = not zhopa2_was_targeted
-		if release_after_finalize then
-			M.zhopa2_mark_ground_gather_release(npc, selected_id, is_artifact and "ground_artefact_loot" or "ground_item_loot")
-		end
-		if is_artifact
-			and zhopa2_was_targeted
-			and force_pickup ~= true
-			and st.zhopa2_artifact_force_pickup ~= true
-			and not zhopa2_artifact_pickup_ready(npc, st)
-			and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, itm)
+		if zhopa2_surge_active() then return end
+		local se_item = item_id and alife_object and alife_object(item_id)
+		local cls = item and zhopa2_item_clsid(se_item or item)
+		if not (item and se_item and tonumber(se_item.parent_id) == 65535
+			and cls and IsArtefact and IsArtefact(nil, cls))
+			or zhopa2_item_reserved_for_other(npc, item_id)
 		then
-			st.stage = 1
-			st.__stimer = nil
-			if state_mgr then
-				state_mgr.set_state(npc, st.state or "rush")
-			end
+			zhopa2_clear_gather_item(npc, item_id, "artifact_target_invalid")
 			return
 		end
-		if force_pickup or (zhopa2_active and not is_artifact) or st.zhopa2_artifact_force_pickup == true then
-			M.zhopa2_debug_force_pickup(npc, st, itm, force_reason or (force_pickup and "force_selected" or "managed_pickup"))
+		if st.zhopa2_artifact_force_pickup ~= true and not zhopa2_artifact_pickup_ready(npc, st)
+			and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, item)
+		then
+			st.stage = 1; st.__stimer = nil
+			if state_mgr then state_mgr.set_state(npc, st.state or "rush") end
+			return
 		end
-		local items = gather_items_table()
-		items[selected_id] = nil
+		zhopa2_record_loot(npc, item, "ground_artefact_loot")
+		gather_items_table()[item_id] = nil
 		zhopa2_reset_gather_state(st)
-		if is_artifact then
-			zhopa2_record_loot(npc, itm, "ground_artefact_loot")
-			local anomal_zone = bind_anomaly_zone and bind_anomaly_zone.parent_zones_by_artefact_id and bind_anomaly_zone.parent_zones_by_artefact_id[selected_id]
-			if anomal_zone and type(anomal_zone.on_artefact_take) == "function" then
-				anomal_zone:on_artefact_take(itm)
-			elseif bind_anomaly_zone and bind_anomaly_zone.artefact_ways_by_id then
-				bind_anomaly_zone.artefact_ways_by_id[selected_id] = nil
-			end
-			local artefact = itm.get_artefact and itm:get_artefact()
-			if artefact and artefact.FollowByPath and vector then
-				pcall(function()
-					artefact:FollowByPath("NULL", 0, vector():set(500, 500, 500))
-				end)
-			end
-			if dynamic_news_manager and ui_options and ui_options.get and ui_options.get("alife/dynamic_news/found_artifact_news") then
-				pcall(function()
-					dynamic_news_manager.get_dynamic_news():FoundArtefact(npc, itm)
-				end)
-			end
-			if game_statistics then
-				pcall(game_statistics.increment_npc_statistic, npc, "artefacts_found")
-			end
-		elseif IsWeapon and IsWeapon(itm) and alife_clone_weapon then
-			zhopa2_record_loot(npc, itm, "ground_weapon_loot")
-			if release_after_finalize then
-				M.zhopa2_mark_ground_gather_release(npc, selected_id, "ground_weapon_loot")
-			end
-			alife_clone_weapon(se_itm, nil, id)
-			zhopa2_consume_item_event_id(selected_id)
-			zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
-			return
+		local zone = bind_anomaly_zone and bind_anomaly_zone.parent_zones_by_artefact_id
+			and bind_anomaly_zone.parent_zones_by_artefact_id[item_id]
+		if zone and type(zone.on_artefact_take) == "function" then zone:on_artefact_take(item)
+		elseif bind_anomaly_zone and bind_anomaly_zone.artefact_ways_by_id then
+			bind_anomaly_zone.artefact_ways_by_id[item_id] = nil
 		end
-		if not is_artifact then
-			zhopa2_record_loot(npc, itm, "ground_item_loot")
+		local artifact = item.get_artefact and item:get_artefact()
+		if artifact and artifact.FollowByPath and vector then
+			pcall(function() artifact:FollowByPath("NULL", 0, vector():set(500, 500, 500)) end)
 		end
-		if alife_create_item then
-			alife_create_item(itm:section(), npc)
+		if dynamic_news_manager and ui_options and ui_options.get and ui_options.get("alife/dynamic_news/found_artifact_news") then
+			pcall(function() dynamic_news_manager.get_dynamic_news():FoundArtefact(npc, item) end)
 		end
-		if alife_release then
-			alife_release(se_itm)
-		end
-		zhopa2_consume_item_event_id(selected_id)
+		if game_statistics then pcall(game_statistics.increment_npc_statistic, npc, "artefacts_found") end
+		if alife_create_item then alife_create_item(item:section(), npc) end
+		if alife_release then alife_release(se_item) end
 		zhopa2_restore_active_scheme_after_targeted_gather(npc, st)
 	end
 end
@@ -4988,349 +4341,120 @@ local function patch_gather_classes(mod)
 	local eva = module_member(mod, "eva_gather_itm")
 	if eva then
 		M.patch_method(eva, "find_valid_item", PATCH_ID .. "_gather_find", function(original)
-			return function(self, ...)
-				if zhopa2_surge_active() then
-					return original(self, ...)
-				end
-				local tonum = tonumber
-				local npc = self.object
-				local st = self.st
-				if M.zhopa2_trade_gather_blocked(npc, st) then
-					return false
-				end
-				local selected_id = st and tonum(st.selected_id) or nil
-				local selected_targeted = st and tonum(st.zhopa2_targeted_item_id) or nil
-				local has_targeted_requests = selected_targeted ~= nil or M.zhopa2_has_targeted_item_requests()
-				local has_item_events = M.zhopa2_has_recent_item_events()
-				if not (selected_targeted or has_targeted_requests or has_item_events) then
-					return original(self, ...)
-				end
-				local active = has_item_events and zhopa2_loot_active(npc) or false
-				if selected_id then
-					if zhopa2_item_reserved_for_other(npc, selected_id) then
-						local items = gather_items_table()
-						items[selected_id] = nil
-						st.selected_id = nil
-						zhopa2_reset_artifact_approach(st)
-						return false
-					end
-					local itm = M.zhopa2_online_object_by_id(selected_id)
-					local se_itm = alife_object and alife_object(selected_id) or nil
-					if itm and (not se_itm or se_itm.parent_id == 65535) and (zhopa2_item_targeted_for_npc(npc, selected_id) or (active and zhopa2_can_take_section(npc, itm, itm:section())) or (mod.near_actor and not mod.near_actor(itm, npc))) then
-						return true
-					end
-					local items = gather_items_table()
-					items[selected_id] = nil
-					st.selected_id = nil
-					zhopa2_reset_artifact_approach(st)
-				end
-				local targeted_ids = has_targeted_requests and zhopa2_targeted_item_ids(npc) or nil
-				local has_targeted_request = false
-				if targeted_ids then
-					for i = 1, #targeted_ids do
-						local item_id = tonum(targeted_ids[i])
-						if item_id then
-							has_targeted_request = true
-							local ok = zhopa2_force_gather_item(npc, item_id)
-							if ok then
-								return true
-							end
-						end
-					end
-				end
-				if has_targeted_request then
-					return false
-				end
-				if active and st then
-					st.memory = st.memory or {}
-					local seen = {}
-					for i = 1, #st.memory do
-						seen[st.memory[i]] = true
-					end
-					local item_ids = zhopa2_event_item_ids()
-					local max_dist = zhopa2_item_detect_dist_sqr()
-					if item_ids then
-						for i = 1, #item_ids do
-							local item_id = tonum(item_ids[i])
-							local obj = item_id and M.zhopa2_online_object_by_id(item_id)
-							local se_obj = item_id and alife_object and alife_object(item_id)
-							if item_id and not seen[item_id] and obj and se_obj and se_obj.parent_id == 65535 and zhopa2_can_take_section(npc, obj, obj:section()) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
-								st.memory[#st.memory + 1] = item_id
-								seen[item_id] = true
-							end
-						end
-					end
-				end
-				if mod then
-					mod.zhopa2_current_gather_npc = npc
-				end
-				local ok_original, original_result = pcall(original, self, ...)
-				if mod then
-					mod.zhopa2_current_gather_npc = nil
-				end
-				if not ok_original then
-					error(original_result)
-				end
-				if original_result then
-					local original_selected = st and tonum(st.selected_id) or nil
-					if original_selected and zhopa2_item_reserved_for_other(npc, original_selected) then
-						local items = gather_items_table()
-						items[original_selected] = nil
-						st.selected_id = nil
-						zhopa2_reset_artifact_approach(st)
-						return false
-					end
-					return original_result
-				end
-				if active and not zhopa2_surge_active() and M.zhopa2_try_force_online_gather_item(npc, st) then
+			M.artifact_gather_find = function(self, ...)
+				local npc, st = self.object, self.st
+				if M.zhopa2_trade_gather_blocked(npc, st) then return false end
+				local ids = zhopa2_targeted_item_ids(npc, true)
+				if not ids then return original(self, ...) end
+				if zhopa2_surge_active() or M.zhopa2_trade_gather_blocked(npc, st) then return false end
+				local item_id = tonumber(ids[1])
+				local selected = st and tonumber(st.selected_id)
+				local item = item_id and M.zhopa2_online_object_by_id(item_id)
+				local se_item = item_id and alife_object and alife_object(item_id)
+				if selected == item_id and item and (not se_item or se_item.parent_id == 65535)
+					and not zhopa2_item_reserved_for_other(npc, item_id) then return true end
+				return zhopa2_force_gather_item(npc, item_id) == true
+			end
+			return M.artifact_gather_find
+		end)
+		M.patch_method(eva, "evaluate", PATCH_ID .. "_gather_eval", function(original)
+			M.artifact_gather_evaluate = function(self, ...)
+				local npc, st = self.object, self.st
+				if M.zhopa2_trade_gather_blocked(npc, st) then return false end
+				if not zhopa2_targeted_item_ids(npc, true) then return original(self, ...) end
+				if not runtime_object_alive(npc) or IsWounded(npc)
+					or (npc:best_enemy() and IsWeapon(npc:active_item()))
+					or xr_danger.has_danger(npc) or zhopa2_surge_active() then return false end
+				if self:find_valid_item() then
+					zhopa2_apply_job_preconditions(npc, st)
 					return true
 				end
 				return false
 			end
-		end)
-		M.patch_method(eva, "evaluate", PATCH_ID .. "_gather_eval", function(original)
-			return function(self, ...)
-				if zhopa2_surge_active() then
-					return original(self, ...)
-				end
-				local npc = self.object
-				local st = self.st
-				if M.zhopa2_trade_gather_blocked(npc, st) then
-					return false
-				end
-				local has_targeted_requests = (st and st.zhopa2_targeted_item_id ~= nil) or M.zhopa2_has_targeted_item_requests()
-				local has_item_events = M.zhopa2_has_recent_item_events()
-				if not (has_targeted_requests or has_item_events) then
-					return original(self, ...)
-				end
-				local targeted_ids = has_targeted_requests and zhopa2_targeted_item_ids(npc) or nil
-				local active = (not targeted_ids and has_item_events) and zhopa2_loot_active(npc) or false
-				if targeted_ids or active then
-					if not runtime_object_alive(npc) or IsWounded(npc) then
-						return false
-					end
-					if npc:best_enemy() and IsWeapon(npc:active_item()) then
-						return false
-					end
-					if xr_danger.has_danger(npc) or xr_conditions.surge_started() then
-						return false
-					end
-					if not targeted_ids and zhopa2_should_skip_condlist(npc) and db and db.actor and xr_logic.pick_section_from_condlist(db.actor, npc, self.st.gather_items_enabled) == "false" then
-						return false
-					end
-					if not targeted_ids and zhopa2_should_skip_overweight(npc) and utils_item.is_overweight(npc) then
-						return false
-					end
-					if self:find_valid_item() then
-						zhopa2_apply_job_preconditions(npc, self.st)
-						return true
-					end
-				end
-				return original(self, ...)
-			end
+			return M.artifact_gather_evaluate
 		end)
 	end
 	local act = module_member(mod, "act_gather_itm")
-	if act then
-		M.patch_method(act, "initialize", PATCH_ID .. "_gather_init", function(original)
-			return function(self, ...)
-				local result = { original(self, ...) }
-				if self.st and self.st.zhopa2_targeted_item_id then
-					zhopa2_send_to_artifact_vertex(self.object, self.st, "approach_invalid_start_vid")
-				end
-				return unpack(result)
+	if not act then return end
+	M.patch_method(act, "initialize", PATCH_ID .. "_gather_init", function(original)
+		return function(self, ...)
+			local result = { original(self, ...) }
+			if not zhopa2_surge_active() and self.st and self.st.zhopa2_targeted_item_id and zhopa2_targeted_item_ids(self.object, true) then
+				zhopa2_send_to_artifact_vertex(self.object, self.st, "approach_invalid_start_vid")
 			end
-		end)
-		M.patch_method(act, "execute", PATCH_ID .. "_gather_execute", function(original)
-			return function(self, ...)
-				local tostr = tostring
-				local st = self.st
-				local npc = self.object
-				if zhopa2_surge_active() then
-					return
-				end
-				local release = M.zhopa2_peek_ground_gather_release(npc)
-				local now = time_global and time_global() or 0
-				local release_watch_due = release and tonumber(release.watch_due or 0) or 0
-				if release and (release_watch_due <= 0 or now >= release_watch_due) and M.zhopa2_ground_gather_release_ready(npc, st, release) then
-					M.zhopa2_take_ground_gather_release(npc)
-					M.zhopa2_release_ground_gather_npc(npc, release.reason)
-					return
-				end
-				if M.zhopa2_trade_gather_blocked(npc, st) then
-					return
-				end
-				local item_id = st and tonumber(st.selected_id) or nil
-				local itm = item_id and M.zhopa2_online_object_by_id(item_id)
-				local se_itm = item_id and alife_object and alife_object(item_id)
-				local active_looter = zhopa2_loot_active(npc)
-				local active_selected = itm and active_looter and zhopa2_can_take_section(npc, itm, itm:section())
-				local item_cls = itm and zhopa2_item_clsid(se_itm or itm) or nil
-				local is_artifact = item_cls and IsArtefact and IsArtefact(nil, item_cls) == true
-				local targeted_artifact = itm and zhopa2_item_targeted_for_npc(npc, item_id) and is_artifact
-				local vanilla_selected = itm and not is_artifact and not targeted_artifact and not active_selected and se_itm and se_itm.parent_id == 65535
-				if item_id and zhopa2_item_reserved_for_other(npc, item_id) then
-					local items = gather_items_table()
-					items[item_id] = nil
-					zhopa2_reset_gather_state(st)
-					return
-				end
-				local item_pos = itm and itm:position() or nil
-				if not (targeted_artifact or active_selected) then
-					if vanilla_selected and M.zhopa2_gather_stalled(npc, st, item_id, st.vid_pos or item_pos) then
-						zhopa2_gather_item_replacement(nil, true, "vanilla_stall")(npc)
-						return
-					end
-					if active_looter and st and state_mgr and state_mgr.get_state(npc) == "pickup_crouch" and not item_id then
-						st.__stimer = nil
-						st.stage = 0
-						state_mgr.set_state(npc, st.state or "rush")
-						return
-					end
-					return original(self, ...)
-				end
-				st.nearest_id = item_id
-				st.nearest_pos = item_pos
-				if action_base and action_base.execute then
-					action_base.execute(self)
-				end
-				if state_mgr and state_mgr.get_state(npc) == "pickup_crouch" then
-					if st.zhopa2_artifact_force_pickup ~= true
-						and targeted_artifact
-						and not zhopa2_artifact_pickup_ready(npc, st)
-						and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, itm)
-					then
-						st.__stimer = nil
-						st.stage = 1
-						state_mgr.set_state(npc, st.state or "rush")
-						return
-					end
-					local pickup_delay = (st.zhopa2_targeted_item_id or active_selected) and 2500 or 15000
-					st.__stimer = st.__stimer or now + pickup_delay
-					if now > st.__stimer then
-						st.__stimer = nil
-						if active_selected and not targeted_artifact then
-							zhopa2_gather_item_replacement(nil, false, "pickup_crouch_delay")(npc)
-						else
-							local fn = (gather_mod() and gather_mod().gather_item) or rawget(_G, "gather_item")
-							if fn then
-								fn(npc)
-							elseif st.zhopa2_pickup_fail_logged ~= item_id then
-								st.zhopa2_pickup_fail_logged = item_id
-								zhopa2_debug_printf("~ ZHOPA2 loot error | reason [gather_pickup_no_function] npc [%s] item [%s:%s]", tostr(npc and npc.id and npc:id() or "-"), tostr(item_id or "-"), tostr(itm and itm:section() or "-"))
-							end
-						end
-						local after_se = item_id and alife_object and alife_object(item_id) or nil
-						if active_selected and after_se and after_se.parent_id == 65535 and st.zhopa2_pickup_fail_logged ~= item_id then
-							st.zhopa2_pickup_fail_logged = item_id
-							zhopa2_debug_printf("~ ZHOPA2 loot error | reason [online_gather_pickup_failed] npc [%s] item [%s:%s] parent [%s] selected [%s]", tostr(npc and npc.id and npc:id() or "-"), tostr(item_id or "-"), tostr(itm and itm:section() or "-"), tostr(after_se.parent_id or "-"), tostr(st and st.selected_id or "-"))
-						end
-					end
-					return
-				end
-				if not targeted_artifact then
-					if npc:level_vertex_id() == st.vid then
-						if state_mgr then
-							state_mgr.set_state(npc, "pickup_crouch")
-						end
-					else
-						if M.zhopa2_gather_stalled(npc, st, item_id, st.vid_pos or item_pos) then
-							zhopa2_gather_item_replacement(nil, false, "active_stall")(npc)
-							return
-						end
-						if npc:path_type() ~= game_object.level_path then
-							npc:set_path_type(game_object.level_path)
-						end
-						if state_mgr then
-							state_mgr.set_state(npc, st.state or "rush", nil, nil, { look_position = st.nearest_pos })
-						end
-						if utils_obj and type(utils_obj.send_to_nearest_accessible_vertex) == "function" then
-							st.vid = utils_obj.send_to_nearest_accessible_vertex(npc, st.vid, "gather_items")
-						end
-					end
-					return
-				end
-				if zhopa2_update_artifact_scan(npc, st, itm, now) then
-					return
-				end
-				if zhopa2_artifact_pickup_ready(npc, st) then
-					zhopa2_begin_artifact_pickup(npc, st, itm, now, false)
-					return
-				end
-				if not zhopa2_artifact_approach_progress_ok(npc, st) then
-					M.zhopa2_try_artifact_force_pickup(npc, st, itm, now, "approach_stalled")
-					return
-				end
-				if zhopa2_artifact_approach_reached(npc, st) then
-					M.zhopa2_try_artifact_force_pickup(npc, st, itm, now, "approach_waypoint_reached")
-					return
-				end
-				if npc:path_type() ~= game_object.level_path then
-					npc:set_path_type(game_object.level_path)
-				end
-				local look_pos = zhopa2_safe_look_position(npc, st.nearest_pos or st.vid_pos)
-				if state_mgr then
-					state_mgr.set_state(npc, st.state or "rush", nil, nil, look_pos and { look_position = look_pos } or nil)
-				end
-				zhopa2_send_to_artifact_vertex(npc, st, "approach_invalid_execute_vid")
+			return unpack(result)
+		end
+	end)
+	M.patch_method(act, "execute", PATCH_ID .. "_gather_execute", function(original)
+		return function(self, ...)
+			local npc, st = self.object, self.st
+			if M.zhopa2_trade_gather_blocked(npc, st) then return end
+			if not zhopa2_targeted_item_ids(npc, true) then return original(self, ...) end
+			if zhopa2_surge_active() or M.zhopa2_trade_gather_blocked(npc, st) then return end
+			local item_id = st and tonumber(st.selected_id)
+			local item = item_id and M.zhopa2_online_object_by_id(item_id)
+			local se_item = item_id and alife_object and alife_object(item_id)
+			local cls = item and zhopa2_item_clsid(se_item or item)
+			if not (item and cls and IsArtefact and IsArtefact(nil, cls)
+				and (not se_item or se_item.parent_id == 65535)) or zhopa2_item_reserved_for_other(npc, item_id) then
+				if item_id then zhopa2_clear_gather_item(npc, item_id, "artifact_target_invalid") end
+				return
 			end
-		end)
-		M.patch_method(act, "finalize", PATCH_ID .. "_gather_finalize", function(original)
-			return function(self, ...)
-				local st = self.st
-				local was_targeted = st and st.zhopa2_targeted_item_id ~= nil
-				if was_targeted then
-					local item_id = tonumber(st.selected_id)
-					local items = gather_items_table()
-					if item_id then
-						items[item_id] = nil
-					end
-					zhopa2_reset_gather_state(st)
-					zhopa2_restore_active_scheme_after_targeted_gather(self.object, st)
+			st.nearest_id, st.nearest_pos = item_id, item:position()
+			if action_base and action_base.execute then action_base.execute(self) end
+			local now = time_global and time_global() or 0
+			if state_mgr and state_mgr.get_state(npc) == "pickup_crouch" then
+				if st.zhopa2_artifact_force_pickup ~= true and not zhopa2_artifact_pickup_ready(npc, st)
+					and not M.zhopa2_artifact_vanilla_pickup_reachable(npc, st, item) then
+					st.__stimer = nil; st.stage = 1
+					state_mgr.set_state(npc, st.state or "rush")
+					return
 				end
-				local result = { original(self, ...) }
-				local release = M.zhopa2_take_ground_gather_release(self.object)
-				if release then
-					M.zhopa2_release_ground_gather_npc(self.object, release.reason)
+				st.__stimer = st.__stimer or now + 2500
+				if now > st.__stimer then
+					st.__stimer = nil
+					local fn = (gather_mod() and gather_mod().gather_item) or rawget(_G, "gather_item")
+					if fn then fn(npc) end
 				end
-				return unpack(result)
+				return
 			end
-		end)
-	end
+			if zhopa2_update_artifact_scan(npc, st, item, now) then return end
+			if zhopa2_artifact_pickup_ready(npc, st) then
+				zhopa2_begin_artifact_pickup(npc, st, item, now, false); return
+			end
+			if not zhopa2_artifact_approach_progress_ok(npc, st) then
+				M.zhopa2_try_artifact_force_pickup(npc, st, item, now, "approach_stalled"); return
+			end
+			if zhopa2_artifact_approach_reached(npc, st) then
+				M.zhopa2_try_artifact_force_pickup(npc, st, item, now, "approach_waypoint_reached"); return
+			end
+			if npc:path_type() ~= game_object.level_path then npc:set_path_type(game_object.level_path) end
+			local look = zhopa2_safe_look_position(npc, st.nearest_pos or st.vid_pos)
+			if state_mgr then state_mgr.set_state(npc, st.state or "rush", nil, nil, look and {look_position=look} or nil) end
+			zhopa2_send_to_artifact_vertex(npc, st, "approach_invalid_execute_vid")
+		end
+	end)
+	M.patch_method(act, "finalize", PATCH_ID .. "_gather_finalize", function(original)
+		return function(self, ...)
+			local st = self.st
+			if st and st.zhopa2_targeted_item_id then
+				local id = tonumber(st.selected_id)
+				if id then gather_items_table()[id] = nil end
+				zhopa2_reset_gather_state(st)
+				zhopa2_restore_active_scheme_after_targeted_gather(self.object, st)
+			end
+			return original(self, ...)
+		end
+	end)
 end
 
 function M.patch_xr_gather_items()
 	local mod = gather_mod()
-	if not mod then
-		return false
-	end
-	M.patch_state_mgr_trade_run()
-	M.patch_method(mod, "on_game_start", PATCH_ID .. "_gather_start", function(original)
-		return function(...)
-			local result = { original(...) }
-			M.zhopa2_sync_gather_runtime_state()
-			return unpack(result)
-		end
-	end)
-	M.zhopa2_sync_gather_runtime_state()
-	local original_gather = gather_original_func(mod, "gather_item")
-	if type(original_gather) == "function" and mod.gather_item ~= mod.zhopa2_wrapped_gather_item then
-		mod.zhopa2_wrapped_gather_item = zhopa2_gather_item_replacement(original_gather)
+	if not mod then return false end
+	local original = gather_original_func(mod, "gather_item")
+	if type(original) == "function" and mod.gather_item ~= mod.zhopa2_wrapped_gather_item then
+		mod.zhopa2_wrapped_gather_item = zhopa2_gather_item_replacement(original)
 		export_script_function(mod, "gather_item", mod.zhopa2_wrapped_gather_item)
-	end
-	local original_near_actor = gather_original_func(mod, "near_actor")
-	if type(original_near_actor) == "function" and mod.near_actor ~= mod.zhopa2_wrapped_near_actor then
-		mod.zhopa2_wrapped_near_actor = function(obj, npc, ...)
-			if not M.master_enabled() then
-				return original_near_actor(obj, npc, ...)
-			end
-			npc = npc or mod.zhopa2_current_gather_npc
-			if npc and zhopa2_loot_active(npc) then
-				return false
-			end
-			return original_near_actor(obj, npc, ...)
-		end
-		export_script_function(mod, "near_actor", mod.zhopa2_wrapped_near_actor)
 	end
 	export_script_function(mod, "zhopa2_item_reservation_owner", zhopa2_item_reservation_owner_impl)
 	export_script_function(mod, "zhopa2_prepare_targeted_gather", zhopa2_prepare_targeted_gather_impl)
@@ -5343,546 +4467,9 @@ function M.patch_xr_gather_items()
 	return true
 end
 
-local function zhopa2_is_protected_corpse(corpse, corpse_id)
-	local mod = zhopa2_loot_mod()
-	if not (mod and type(mod.is_protected_corpse) == "function") then
-		return false
-	end
-	return mod.is_protected_corpse(corpse, corpse_id) == true
-end
-
-local function zhopa2_event_corpse_ids()
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.recent_corpse_ids) == "function" then
-		return mod.recent_corpse_ids()
-	end
-	return nil
-end
-
-local function zhopa2_forget_corpse_id(corpse_id, consume_only)
-	local mod = zhopa2_loot_mod()
-	if consume_only == true and mod and type(mod.consume_corpse_event_id) == "function" then
-		mod.consume_corpse_event_id(corpse_id)
-	elseif mod and type(mod.forget_corpse_id) == "function" then
-		mod.forget_corpse_id(corpse_id)
-	end
-end
-
-local function zhopa2_mark_corpse_checked(corpse_id)
-	corpse_id = tonumber(corpse_id)
-	if corpse_id then
-		zhopa2_forget_corpse_id(corpse_id)
-	end
-end
-
-function M.zhopa2_mark_corpse_exhausted(corpse_id)
-	corpse_id = tonumber(corpse_id)
-	if not corpse_id then
-		return
-	end
-	local cache = M.zhopa2_exhausted_corpses
-	if type(cache) ~= "table" then
-		cache = { ids = {}, seen = {} }
-		M.zhopa2_exhausted_corpses = cache
-	end
-	if cache.seen[corpse_id] == true then
-		return
-	end
-	cache.seen[corpse_id] = true
-	cache.ids[#cache.ids + 1] = corpse_id
-	while #cache.ids > 512 do
-		local old_id = table.remove(cache.ids, 1)
-		if old_id then
-			cache.seen[old_id] = nil
-		end
-	end
-end
-
-function M.zhopa2_corpse_exhausted(corpse_id)
-	corpse_id = tonumber(corpse_id)
-	local cache = M.zhopa2_exhausted_corpses
-	return corpse_id ~= nil and type(cache) == "table" and type(cache.seen) == "table" and cache.seen[corpse_id] == true
-end
-
-local function zhopa2_reject_corpse_candidate(mod, st, corpse_id)
-	local tonum = tonumber
-	corpse_id = tonum(corpse_id)
-	if not corpse_id then
-		return
-	end
-	if db and db.storage and db.storage[corpse_id] then
-		db.storage[corpse_id].corpse_already_selected = nil
-	end
-	if st then
-		if type(st.memory) == "table" then
-			local write = 1
-			local removed = false
-			for read = 1, #st.memory do
-				local id = st.memory[read]
-				if tonum(id) == corpse_id then
-					removed = true
-				else
-					if write ~= read then
-						st.memory[write] = id
-					end
-					write = write + 1
-				end
-			end
-			if removed then
-				for i = write, #st.memory do
-					st.memory[i] = nil
-				end
-				st.index = 1
-			end
-		end
-		if tonum(st.selected_corpse_id) == corpse_id then
-			st.selected_corpse_id = nil
-			st.vertex_id = nil
-			st.vertex_position = nil
-			st.state = nil
-			st.index = 1
-		end
-		if tonum(st.nearest_id) == corpse_id then
-			st.nearest_id = nil
-			st.nearest_corpse_dist = nil
-			st.nearest_corpse_vertex = nil
-			st.nearest_corpse_position = nil
-		end
-	end
-	zhopa2_mark_corpse_checked(corpse_id)
-	M.zhopa2_mark_corpse_exhausted(corpse_id)
-	if mod and type(mod.set_valuable_loot) == "function" then
-		pcall(mod.set_valuable_loot, corpse_id, false)
-	end
-end
-
-function M.zhopa2_reset_corpse_detection_state(st)
-	if not st then
-		return
-	end
-	local corpse_id = tonumber(st.selected_corpse_id)
-	if corpse_id and db and db.storage and db.storage[corpse_id] then
-		db.storage[corpse_id].corpse_already_selected = nil
-	end
-	st.selected_corpse_id = nil
-	st.nearest_id = nil
-	st.nearest_corpse_dist = nil
-	st.nearest_corpse_vertex = nil
-	st.nearest_corpse_position = nil
-	st.vertex_id = nil
-	st.vertex_position = nil
-	st.state = nil
-	st.__stimer = nil
-	st.index = 1
-end
-
-local function zhopa2_corpse_detect_dist_sqr()
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.corpse_detect_dist_sqr) == "function" then
-		return mod.corpse_detect_dist_sqr()
-	end
-	return 6400
-end
-
-local function zhopa2_corpse_already_looted(corpse)
-	if not (corpse and se_load_var and type(corpse.id) == "function" and type(corpse.name) == "function") then
-		return false
-	end
-	return se_load_var(corpse:id(), corpse:name(), "looted") == "true"
-end
-
-local function zhopa2_is_inventory_owner(obj)
-	if not obj then
-		return false
-	end
-	if type(obj.is_inventory_owner) == "function" then
-		local ok, result = pcall(obj.is_inventory_owner, obj)
-		if ok then
-			return result == true
-		end
-	end
-	if type(obj.cast_InventoryOwner) == "function" then
-		local ok, result = pcall(obj.cast_InventoryOwner, obj)
-		return ok and result ~= nil
-	end
-	return false
-end
-
-local function zhopa2_corpse_has_money(corpse)
-	if not (item_money and corpse and type(corpse.money) == "function") then
-		return false
-	end
-	local ok, money = pcall(corpse.money, corpse)
-	money = ok and tonumber(money) or nil
-	return money ~= nil and money > 0 and money < 10000
-end
-
-function M.zhopa2_corpse_can_take_item(npc, item, section)
-	section = section or (item and item.section and item:section())
-	if type(section) ~= "string" or section == "" then
-		return false
-	end
-	local mod = corpse_mod()
-	local lootable_table = mod and mod.lootable_table
-	if lootable_table and lootable_table[section] ~= nil then
-		return true
-	end
-	return zhopa2_can_take_section(npc, item, section) == true
-end
-
-local function zhopa2_corpse_has_takeable_item(npc, corpse, active)
-	if not (corpse and zhopa2_is_inventory_owner(corpse) and type(corpse.iterate_inventory) == "function") then
-		return false
-	end
-	local lootable_table = nil
-	if not active then
-		local mod = corpse_mod()
-		lootable_table = mod and mod.lootable_table
-	end
-	local has_item = false
-	local function check_item(owner, item)
-		if has_item or not item then
-			return
-		end
-		local section = item:section()
-		if active then
-			has_item = M.zhopa2_corpse_can_take_item(npc, item, section) == true
-		elseif lootable_table and lootable_table[section] ~= nil then
-			has_item = true
-		end
-	end
-	pcall(corpse.iterate_inventory, corpse, check_item, corpse)
-	return has_item
-end
-
-local function zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active)
-	if active and M.zhopa2_corpse_exhausted(corpse_id) then
-		return false
-	end
-	if not active then
-		local mod = corpse_mod()
-		return mod and type(mod.has_valuable_loot) == "function" and mod.has_valuable_loot(corpse) == true
-	end
-	if not corpse then
-		return false
-	end
-	if IsMonster and IsMonster(corpse) then
-		return ui_mutant_loot ~= nil and not zhopa2_corpse_already_looted(corpse)
-	end
-	if IsStalker and IsStalker(corpse) then
-		return zhopa2_corpse_has_takeable_item(npc, corpse, active) or zhopa2_corpse_has_money(corpse)
-	end
-	return false
-end
-
-local function zhopa2_corpse_record_loot(npc, corpse, item, value, reason)
-	local mod = zhopa2_loot_mod()
-	if mod and type(mod.record_loot) == "function" then
-		return mod.record_loot(npc, corpse, item, value, reason)
-	end
-	return false
-end
-
-local function zhopa2_item_value(section)
-	if not (section and ini_sys and type(ini_sys.r_float_ex) == "function") then
-		return 0
-	end
-	return math.max(0, tonumber(ini_sys:r_float_ex(section, "cost")) or 0)
-end
-
-local function corpse_original_func(mod, name)
-	if not mod then
-		return rawget(_G, name)
-	end
-	local key = "zhopa2_original_" .. name
-	if not mod[key] then
-		mod[key] = mod[name] or rawget(_G, name)
-	end
-	return mod[key]
-end
-
-local function zhopa2_get_all_from_corpse_replacement(original)
-	return function(npc, ...)
-		if not M.master_enabled() then
-			if original then
-				return original(npc, ...)
-			end
-			return
-		end
-		local id = npc and npc.id and npc:id() or nil
-		local st = id and db and db.storage and db.storage[id] and db.storage[id].corpse_detection or nil
-		local corpse_id = st and tonumber(st.selected_corpse_id) or nil
-		local corpse = corpse_id and M.zhopa2_online_object_by_id(corpse_id) or nil
-		local active = zhopa2_loot_active(npc)
-		if corpse_id and corpse and runtime_object_dead(corpse) and zhopa2_is_protected_corpse(corpse, corpse_id) then
-			zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
-			return
-		end
-		if not (active and corpse_id and corpse and runtime_object_dead(corpse)) then
-			if original then
-				return original(npc, ...)
-			end
-			return
-		end
-		st.__stimer = nil
-		st.mutant_analysed = nil
-		st.vertex_id = nil
-		st.vertex_position = nil
-		st.selected_corpse_id = nil
-		st.state = nil
-		st.index = 1
-		st.nearest_corpse_dist = nil
-		st.nearest_corpse_vertex = nil
-		st.nearest_corpse_position = nil
-		st.nearest_id = nil
-		if IsMonster and IsMonster(corpse) then
-			if ui_mutant_loot and not zhopa2_corpse_already_looted(corpse) then
-				local loot = {}
-				ui_mutant_loot.loot_mutant(corpse:section(), corpse:clsid(), loot, npc, nil, corpse)
-				local has_loot = false
-				for _ in pairs(loot) do
-					has_loot = true
-					break
-				end
-				if has_loot and xr_sound then
-					xr_sound.set_sound_play(id, "corpse_loot_good")
-					zhopa2_corpse_record_loot(npc, corpse, nil, 25, "mutant_corpse_loot")
-				elseif xr_sound then
-					xr_sound.set_sound_play(id, "corpse_loot_bad")
-				end
-				if se_save_var then
-					se_save_var(corpse:id(), corpse:name(), "looted", "true")
-				end
-				if game_statistics then
-					pcall(game_statistics.increment_npc_statistic, npc, "field_dressings")
-				end
-			end
-			zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
-			return
-		end
-		local items_value = 0
-		local function get_item(owner, item)
-			local section = item and item:section()
-			local allowed = M.zhopa2_corpse_can_take_item(npc, item, section)
-			if SendScriptCallback then
-				SendScriptCallback("npc_on_get_all_from_corpse", npc, corpse, item, allowed)
-			end
-			if allowed then
-				local value = zhopa2_item_value(section)
-				if items_value < 100 then
-					items_value = items_value + value / 30
-				end
-				zhopa2_corpse_record_loot(npc, corpse, item, value, "corpse_item_loot")
-				corpse:transfer_item(item, npc)
-			end
-		end
-		if corpse.iterate_inventory then
-			corpse:iterate_inventory(get_item, corpse)
-		end
-		if item_money then
-			item_money.npc_on_loot_money(npc, corpse)
-		end
-		if xr_sound then
-			if items_value >= 100 then
-				xr_sound.set_sound_play(id, "corpse_loot_good")
-			elseif items_value > 0 and (math.random(1, 100) / 100) < 0.5 then
-				xr_sound.set_sound_play(id, "corpse_loot_bad")
-			end
-		end
-		if save_var and load_var then
-			local count = load_var(npc, "s_loot_count") or 0
-			if count >= 255 then
-				count = 254
-			end
-			save_var(npc, "s_loot_count", count + 1)
-		end
-		zhopa2_reject_corpse_candidate(corpse_mod(), st, corpse_id)
-		if game_statistics then
-			pcall(game_statistics.increment_npc_statistic, npc, "corpse_looted")
-		end
-	end
-end
-
-local function patch_corpse_classes(mod)
-	local function corpse_object(corpse_id)
-		corpse_id = tonumber(corpse_id)
-		if not corpse_id then
-			return nil
-		end
-		return M.zhopa2_online_object_by_id(corpse_id)
-	end
-	local function reject_if_protected(st, corpse_id)
-		corpse_id = tonumber(corpse_id)
-		local corpse = corpse_object(corpse_id)
-		if corpse and zhopa2_is_protected_corpse(corpse, corpse_id) then
-			zhopa2_reject_corpse_candidate(mod, st, corpse_id)
-			return true
-		end
-		return false
-	end
-	local function cleanup_protected_state(st)
-		if not st then
-			return false
-		end
-		local rejected = false
-		if reject_if_protected(st, st.selected_corpse_id) then
-			rejected = true
-		end
-		if reject_if_protected(st, st.nearest_id) then
-			rejected = true
-		end
-		if type(st.memory) == "table" then
-			local ids = {}
-			for i = 1, #st.memory do
-				local id = tonumber(st.memory[i])
-				if id then
-					ids[#ids + 1] = id
-				end
-			end
-			for i = 1, #ids do
-				if reject_if_protected(st, ids[i]) then
-					rejected = true
-				end
-			end
-		end
-		return rejected
-	end
-	local eva = module_member(mod, "evaluator_corpse")
-	if eva then
-		M.patch_method(eva, "find_valid_target", PATCH_ID .. "_corpse_find", function(original)
-			return function(self, ...)
-				local npc = self.object
-				if M.zhopa2_trade_gather_blocked(npc, self.a) then
-					return false
-				end
-				if self.a and cleanup_protected_state(self.a) then
-					return false
-				end
-				local active = zhopa2_loot_active(npc)
-				if active and self.a then
-					if self.a.selected_corpse_id then
-						local corpse_id = tonumber(self.a.selected_corpse_id)
-						local corpse = corpse_object(corpse_id)
-						if corpse and zhopa2_is_protected_corpse(corpse, corpse_id) then
-							zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
-						elseif corpse and zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active) then
-							return true
-						end
-					end
-					self.a.memory = self.a.memory or {}
-					local seen = {}
-					for i = 1, #self.a.memory do
-						seen[self.a.memory[i]] = true
-					end
-					local corpse_ids = zhopa2_event_corpse_ids()
-					local max_dist = zhopa2_corpse_detect_dist_sqr()
-					if corpse_ids then
-						for i = 1, #corpse_ids do
-							local corpse_id = tonumber(corpse_ids[i])
-							local obj = corpse_object(corpse_id)
-							if corpse_id and not seen[corpse_id] and obj and runtime_object_dead(obj) then
-								if zhopa2_is_protected_corpse(obj, corpse_id) then
-									zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
-									seen[corpse_id] = true
-								elseif zhopa2_corpse_has_candidate_loot(npc, obj, corpse_id, active) and npc:position():distance_to_sqr(obj:position()) <= max_dist then
-									self.a.memory[#self.a.memory + 1] = corpse_id
-									seen[corpse_id] = true
-									zhopa2_forget_corpse_id(corpse_id, true)
-									if mod and type(mod.set_valuable_loot) == "function" then
-										mod.set_valuable_loot(corpse_id, true)
-									end
-								end
-							end
-						end
-					end
-				end
-				local result = original(self, ...)
-				if active and self.a and self.a.selected_corpse_id then
-					local corpse_id = tonumber(self.a.selected_corpse_id)
-					local corpse = corpse_object(corpse_id)
-					if corpse
-						and (zhopa2_is_protected_corpse(corpse, corpse_id)
-							or not zhopa2_corpse_has_candidate_loot(npc, corpse, corpse_id, active))
-					then
-						zhopa2_reject_corpse_candidate(mod, self.a, corpse_id)
-						return false
-					end
-				end
-				if self.a and cleanup_protected_state(self.a) then
-					return false
-				end
-				return result
-			end
-		end)
-		M.patch_method(eva, "evaluate", PATCH_ID .. "_corpse_eval", function(original)
-			return function(self, ...)
-				local npc = self.object
-				if M.zhopa2_trade_gather_blocked(npc, self.a) then
-					return false
-				end
-				if not zhopa2_loot_active(npc) then
-					return original(self, ...)
-				end
-				if not runtime_object_alive(npc) or xr_danger.has_danger(npc) or xr_conditions.surge_started() or IsWounded(npc) or npc:best_enemy() then
-					return false
-				end
-				local st = db and db.storage and db.storage[npc:id()]
-				if st and ((st.active_scheme == "camper") or (st.help_wounded and st.help_wounded.selected_id ~= nil) or (st.gather_items and st.gather_items.selected_id ~= nil)) then
-					return false
-				end
-				self.a.analse_mode = "true"
-				self.a.enabled = "true"
-				if self:find_valid_target() then
-					return true
-				end
-				return false
-			end
-		end)
-	end
-	local action = module_member(mod, "action_search_corpse")
-	if action then
-		M.patch_method(action, "execute", PATCH_ID .. "_corpse_execute", function(original)
-			return function(self, ...)
-				if zhopa2_surge_active() then
-					return
-				end
-				if M.zhopa2_trade_gather_blocked(self.object, self.a) then
-					return
-				end
-				if self.a and cleanup_protected_state(self.a) then
-					return
-				end
-				return original(self, ...)
-			end
-		end)
-	end
-end
-
-function M.patch_xr_corpse_detection()
-	local mod = corpse_mod()
-	if not mod then
-		return false
-	end
-	local original_get_all = corpse_original_func(mod, "get_all_from_corpse")
-	if type(original_get_all) == "function" and mod.get_all_from_corpse ~= mod.zhopa2_wrapped_get_all_from_corpse then
-		mod.zhopa2_wrapped_get_all_from_corpse = zhopa2_get_all_from_corpse_replacement(original_get_all)
-		export_script_function(mod, "get_all_from_corpse", mod.zhopa2_wrapped_get_all_from_corpse)
-	end
-	local original_near_actor = corpse_original_func(mod, "near_actor")
-	if type(original_near_actor) == "function" and mod.near_actor ~= mod.zhopa2_wrapped_near_actor then
-		mod.zhopa2_wrapped_near_actor = function(obj, npc, ...)
-			if not M.master_enabled() then
-				return original_near_actor(obj, npc, ...)
-			end
-			if npc and zhopa2_loot_active(npc) then
-				return false
-			end
-			return original_near_actor(obj, npc, ...)
-		end
-		export_script_function(mod, "near_actor", mod.zhopa2_wrapped_near_actor)
-	end
-	patch_corpse_classes(mod)
-	return true
+function M.patch_native_loot()
+	local mod = safe_require("zhopa2_native_loot")
+	return mod and type(mod.install) == "function" and mod.install(M) == true or false
 end
 
 -- se_level_changer is now covered by zhopa2_topology server_entity callbacks.
@@ -6098,7 +4685,6 @@ function M.ensure_all(reason)
 	local prev_patch_reason = current_patch_reason
 	current_patch_reason = reason
 	M.ensure_zhopa_modules()
-	M.patch_state_mgr_trade_run()
 	for i = 1, #ZHOPA2_RUNTIME_PATCHES do
 		run_runtime_patch(ZHOPA2_RUNTIME_PATCHES[i])
 	end
@@ -6112,9 +4698,6 @@ function M._on_game_load()
 	if not M.master_enabled() then
 		return
 	end
-	M.ground_gather_release_pending = {}
-	M.ground_gather_meet_refresh_pending = {}
-	M.service_logic_refresh_pending = {}
 	local task_module = tasks()
 	if task_module then
 		task_module.task_update_budget = {}
@@ -6143,9 +4726,6 @@ function M._actor_on_update()
 	if M._runtime_recheck_due("actor_on_update") then
 		M.ensure_all("actor_on_update")
 	end
-	M.zhopa2_watch_ground_gather_release()
-	M.zhopa2_watch_ground_gather_meet_refresh()
-	M.zhopa2_watch_service_logic_refresh()
 end
 
 function M._runtime_recheck_due(reason)
@@ -6209,9 +4789,6 @@ end
 
 function M.on_master_disable()
 	M.unregister_runtime_callbacks()
-	M.ground_gather_release_pending = {}
-	M.ground_gather_meet_refresh_pending = {}
-	M.service_logic_refresh_pending = {}
 	local ok, detail = M.purge_runtime_state()
 	M.restore_runtime_patches()
 	M.reset_runtime_ready_state()

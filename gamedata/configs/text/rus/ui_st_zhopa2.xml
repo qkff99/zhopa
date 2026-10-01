@@ -25,7 +25,7 @@
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled"><text>Управлять отрядами мутантов</text></string>
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled_desc"><text>Разрешает ZHOPA управлять перемещением мутантов и выдавать им задачи блуждания, охоты, патруля и отдыха.</text></string>
 	<string id="ui_mcm_zhopa2_general_debug_hud_enabled"><text>Отладочный HUD и логи</text></string>
-	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Показывает состояние отрядов ZHOPA на маркерах карты и включает дополнительные диагностические сообщения в консоли.</text></string>
+	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Показывает состояние отрядов на карте и включает все диагностические сообщения ZHOPA в консоли, включая ручные аудиты. При выключении может печататься только счётчик готовности и прогрева инициализации. Отдельный лог-файл ZHOPA не создаётся.</text></string>
 	<string id="ui_mcm_zhopa2_general_npc_quests_enabled"><text>Задания для отрядов NPC</text></string>
 	<string id="ui_mcm_zhopa2_general_npc_quests_enabled_desc"><text>Разрешает управляемым отрядам сталкеров приходить к торговцам, брать доступные задания для отрядов, выполнять их и получать виртуальные деньги. При отключении активные задания безопасно отменяются.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled"><text>Заполнять сервисные места существующими NPC</text></string>
@@ -34,8 +34,8 @@
 	<string id="ui_mcm_zhopa2_general_guard_refill_enabled_desc"><text>После заполнения торговцев, техников, медиков и поваров/барменов всей базы назначает пришедших NPC на свободные охранные посты. NPC навсегда отделяется в постоянный охранный отряд: не уходит в роум и не занимает квоту BASE_CAMPING. Учитываются штатная охрана и занятые физические точки. Отключение прекращает новые назначения, сохраняя уже назначенных охранников.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_interval_sec"><text>Интервал проверки сервисных мест, сек.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_interval_sec_desc"><text>Минимальная пауза между проверками одного смарта в реальных секундах. Очередь обрабатывается порциями; отсутствие подходящего отряда оставляет место в ожидании.</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Экспериментальный управляемый онлайн-лутинг</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Позволяет NPC на загруженной локации лутать трупы и предметы по правилам ZHOPA. По умолчанию выключен: для более предсказуемого поведения в больших сборках оставьте его выключенным и используйте ванильный лутинг. На подбор артефактов по задачам не влияет.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Штатный лутинг NPC</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Разрешает штатный подбор предметов и обыск трупов независимо от общих запретов игры и сборки и дополнительных ограничений дистанции. Проверки боя, опасности, jobs и безопасности предметов сохраняются. ARTEFACT и оффлайн-лут независимы.</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled"><text>Учет лута в оффлайне</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled_desc"><text>Позволяет отрядам, которые сражаются или лутают вне загруженной локации, получать добычу и стоимость добычи в оффлайн-симуляции.</text></string>
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled"><text>Виртуальные артефакты для оффлайна</text></string>
@@ -276,4 +276,10 @@
 	<string id="ui_mcm_zhopa2_general_base_invitation_max_inflight_desc"><text>Лимит отрядов второй волны для одной базы. Подкрепления идут порциями. Два отряда первой волны учитываются отдельно; лишние подкрепления отправляются в REST.</text></string>
 	<string id="ui_mcm_zhopa2_general_base_invitation_wild_support_squads"><text>Подкреплений зомби/мутантов за цикл</text></string>
 	<string id="ui_mcm_zhopa2_general_base_invitation_wild_support_squads_desc"><text>Одна конечная дополнительная волна для зомбированных или мутантов. После неё новых подкреплений им не отправляют; сталкеров продолжают приглашать до отбития базы. 0 отключает эту волну.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_protect_player_kills">
+		<text>NPC не лутают жертв игрока</text>
+	</string>
+	<string id="ui_mcm_zhopa2_general_loot_protect_player_kills_desc">
+		<text>Запрещает NPC обыскивать трупы, убитые игроком или его спутниками. Требует штатного лутинга NPC. Работает со сталкерами и мутантами; метки новых убийств сохраняются при save/load и смене уровня. По умолчанию выключено.</text>
+	</string>
 </string_table>

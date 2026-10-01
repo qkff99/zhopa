@@ -1,8 +1,13 @@
 -- One-shot debug helper. Load from the Debug Executor; this file registers no hooks.
 local M = {}
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function fail(reason)
-    if printf then printf("~ ZHOPA_GUARD_GUIDE | failed | %s", tostring(reason)) end
+    if debug_print_enabled() and printf then printf("~ ZHOPA_GUARD_GUIDE | failed | %s", tostring(reason)) end
     return false, reason
 end
 
@@ -85,7 +90,7 @@ function M.force_from_looked_at_npc()
 
     local check_ok, offered = pcall(guide.prec_1, db.actor, npc)
     if not (check_ok and offered) then return fail("vanilla generator did not publish the guard's offer") end
-    if printf then printf("~ ZHOPA_GUARD_GUIDE | vanilla offer created | npc=%s", npc:character_name()) end
+    if debug_print_enabled() and printf then printf("~ ZHOPA_GUARD_GUIDE | vanilla offer created | npc=%s", npc:character_name()) end
     return true
 end
 

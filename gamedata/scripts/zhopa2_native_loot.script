@@ -1,0 +1,354 @@
+local M = {}
+local enabled, protect_player_kills = false, false
+local MARK = "zhopa2_player_kill"
+local contexts = {}
+local runtime
+local adopt_ids, adopt_index
+
+local function cfg_bool(key, default)
+	local cfg = rawget(_G, "zhopa2_cfg")
+	return cfg and type(cfg.get_bool) == "function" and cfg.get_bool(key, default) == true or (not cfg and default == true)
+end
+
+local function object_id(obj)
+	if type(obj) == "number" then return obj end
+	if not obj then return nil end
+	if type(obj.id) == "function" then return tonumber(obj:id()) end
+	return tonumber(obj.id)
+end
+
+local function is_loot_npc(npc)
+	if not (npc and IsStalker and IsStalker(npc)) then return false end
+	local id = object_id(npc)
+	if not id or id == (AC_ID or 0) or (db and db.actor and id == object_id(db.actor)) then return false end
+	if clsid and type(npc.clsid) == "function" then
+		local class_id = npc:clsid()
+		if class_id == clsid.actor or class_id == clsid.script_actor then return false end
+	end
+	return npc:alive() and character_community(npc) ~= "zombied" and npc:section() ~= "actor_visual_stalker"
+end
+
+function M.can_loot_target(npc, target)
+	if not protect_player_kills then return true end
+	local id = object_id(target)
+	if not id or not se_load_var then return true end
+	local se = alife_object and alife_object(id)
+	return not (se and se_load_var(id, se:name(), MARK) == true)
+end
+
+local function mark_player_kill(victim, killer)
+	if not (victim and killer and db and db.actor and se_save_var) then return end
+	local actor_kill = object_id(killer) == object_id(db.actor)
+	local companion_kill = IsStalker and IsStalker(killer) and type(killer.has_info) == "function"
+		and killer:has_info("npcx_is_companion")
+	if actor_kill or companion_kill then
+		local id = object_id(victim)
+		if id and alife_object and alife_object(id) then se_save_var(id, victim:name(), MARK, true) end
+	end
+end
+
+-- Resolve the vanilla body once through bounded wrapper chains, never in NPC updates.
+local function native_function(fn, script, depth, seen)
+	if type(fn) ~= "function" or depth <= 0 or not (debug and debug.getinfo and debug.getupvalue) then return nil end
+	seen = seen or {}
+	if seen[fn] then return nil end
+	seen[fn] = true
+	local info = debug.getinfo(fn, "S")
+	local source = info and tostring(info.source):gsub("\\", "/"):gsub("^@", "")
+	if source and source:match("([^/]+)$") == script then return fn end
+	for i = 1, 32 do
+		local name, value = debug.getupvalue(fn, i)
+		if not name then break end
+		local found = type(value) == "function" and native_function(value, script, depth - 1, seen)
+		if found then return found end
+	end
+end
+
+local function upvalue(fn, key, replacement, write)
+	for i = 1, 80 do
+		local name, value = debug.getupvalue(fn, i)
+		if not name then break end
+		if name == key then
+			if write then debug.setupvalue(fn, i, replacement) end
+			return value, true
+		end
+	end
+	local env = getfenv(fn)
+	local value = env[key]
+	if write then env[key] = replacement end
+	return value, false
+end
+
+-- Private closures retain native reservation tables, with only our policy values isolated.
+local function copy_body(fn, overrides)
+	local copy = assert(loadstring(string.dump(fn)))
+	for i = 1, 80 do
+		local name, value = debug.getupvalue(fn, i)
+		if not name then break end
+		if overrides[name] ~= nil then value = overrides[name] end
+		assert(debug.setupvalue(copy, i, value), "native loot upvalue mismatch")
+	end
+	local env = getfenv(fn)
+	setfenv(copy, setmetatable(overrides, { __index = env, __newindex = env }))
+	return copy
+end
+
+local function initialize_gather(ctx)
+	if upvalue(ctx.find, "StateWalk") ~= nil then return end
+	local env = getfenv(ctx.init)
+	local old_items = upvalue(ctx.find, "Items")
+	local ini_factory = env.ini_file
+	local proxy = setmetatable({ ini_file = function(path)
+		local ini = ini_factory(path)
+		return setmetatable({ r_bool_ex = function(_, section, key, default)
+			if section == "settings" and key == "enable" then return true end
+			return ini:r_bool_ex(section, key, default)
+		end }, { __index = function(_, key)
+			local value = ini[key]
+			if type(value) == "function" then return function(_, ...) return value(ini, ...) end end
+			return value
+		end })
+	end }, { __index = env, __newindex = env })
+	setfenv(ctx.init, proxy)
+	local ok, err = pcall(ctx.init)
+	setfenv(ctx.init, env)
+	if not ok then error(err) end
+	if type(old_items) == "table" then upvalue(ctx.init, "Items", old_items, true) end
+end
+
+local function rebuild(ctx)
+	if ctx.kind == "gather" and enabled then initialize_gather(ctx) end
+	local overrides = { near_actor = function() return false end }
+	if ctx.kind == "gather" then
+		overrides.MaxDetectDistance = math.huge
+		overrides.UseCorpseLootTable = true
+		overrides.ArtifactDectection = true
+		overrides.ArtifactCommunities = setmetatable({}, { __index = function() return true end })
+	else
+		overrides.AlwaysDetectDistance = math.huge
+		overrides.MonsterLootCommunities = setmetatable({}, { __index = function() return true end })
+		local valuable = upvalue(ctx.find, "HasValuableLoot")
+		if type(valuable) ~= "table" then error("native corpse loot table unavailable") end
+		overrides.HasValuableLoot = setmetatable({}, { __index = function(_, id)
+			local value = valuable[id]
+			if not value and level and level.object_by_id then
+				local obj = level.object_by_id(id)
+				if obj and IsMonster and IsMonster(obj) and not obj:alive() and se_load_var then
+					value = se_load_var(id, obj:name(), "looted") ~= "true"
+				end
+			end
+			return value and M.can_loot_target(nil, id) or nil
+		end })
+	end
+	ctx.evaluate_body = copy_body(ctx.evaluate, {})
+	ctx.find_body = copy_body(ctx.find, overrides)
+	if ctx.kind == "gather" then ctx.pickup_body = copy_body(ctx.pickup, { UseCorpseLootTable = true }) end
+end
+
+function M.online_enabled()
+	return enabled and contexts.gather and contexts.gather.pickup_body ~= nil
+		and contexts.corpse and contexts.corpse.find_body ~= nil or false
+end
+
+function M.gather_item(npc)
+	local ctx = contexts.gather
+	if ctx and ctx.pickup_body then return ctx.pickup_body(npc) end
+end
+
+local function artifact_request(npc)
+	local loot = rawget(_G, "zhopa2_loot")
+	return loot and type(loot.targeted_item_ids_for_npc) == "function" and loot.targeted_item_ids_for_npc(npc, true)
+end
+
+function M.evaluate(self, kind)
+	local ctx = contexts[kind]
+	if not ctx then return false end
+	if kind == "gather" and artifact_request(self.object) and runtime and runtime.artifact_gather_evaluate then
+		return runtime.artifact_gather_evaluate(self)
+	end
+	if not enabled then
+		if kind == "gather" and ctx.config_disabled then return false end
+		return ctx.class.evaluate(self)
+	end
+	return ctx.evaluate_body and ctx.evaluate_body(self) or false
+end
+
+function M.find(self, kind)
+	local ctx = contexts[kind]
+	if not ctx then return false end
+	if kind == "gather" and artifact_request(self.object) and runtime and runtime.artifact_gather_find then
+		return runtime.artifact_gather_find(self)
+	end
+	if not enabled then return ctx.class[ctx.find_name](self) end
+	return ctx.find_body and ctx.find_body(self) or false
+end
+
+if class and property_evaluator and not rawget(_G, "zhopa2_native_gather_evaluator") then
+	class "zhopa2_native_gather_evaluator" (property_evaluator)
+	function zhopa2_native_gather_evaluator:__init(name, storage) super(nil, name)
+		self.st = storage
+		self.st.stage = self.st.stage or 0
+	end
+	function zhopa2_native_gather_evaluator:evaluate() return M.evaluate(self, "gather") end
+	function zhopa2_native_gather_evaluator:find_valid_item() return M.find(self, "gather") end
+	class "zhopa2_native_corpse_evaluator" (property_evaluator)
+	function zhopa2_native_corpse_evaluator:__init(name, storage) super(nil, name)
+		self.a = storage
+	end
+	function zhopa2_native_corpse_evaluator:evaluate() return M.evaluate(self, "corpse") end
+	function zhopa2_native_corpse_evaluator:find_valid_target() return M.find(self, "corpse") end
+	_G.zhopa2_native_gather_evaluator = zhopa2_native_gather_evaluator
+	_G.zhopa2_native_corpse_evaluator = zhopa2_native_corpse_evaluator
+end
+
+local function attach_evaluator(ctx, npc, storage)
+	if not is_loot_npc(npc) then return end
+	local manager = npc:motivation_action_manager()
+	local evaluator = rawget(_G, ctx.evaluator)
+	local id = ctx.kind == "gather" and ctx.mod.evaid or xr_evaluators_id.corpse_exist
+	if not (manager and evaluator and id and type(manager.remove_evaluator) == "function") then return end
+	local root = db.storage[object_id(npc)]
+	if not root then return end
+	root.zhopa2_native_loot_bound = root.zhopa2_native_loot_bound or {}
+	if root.zhopa2_native_loot_bound[ctx.kind] then return end
+	manager:remove_evaluator(id)
+	manager:add_evaluator(id, evaluator("zhopa2_native_loot", storage))
+	root.zhopa2_native_loot_bound[ctx.kind] = true
+end
+
+local function bind(ctx, rt)
+	return rt.patch_method(ctx.mod, "add_to_binder", "zhopa2_native_loot_" .. ctx.kind, function(original)
+		return function(npc, ini, scheme, section, storage, temp, ...)
+			local result = { original(npc, ini, scheme, section, storage, temp, ...) }
+			if temp and temp.action and is_loot_npc(npc) then
+				local root = db.storage[object_id(npc)]
+				if root and root.zhopa2_native_loot_bound then root.zhopa2_native_loot_bound[ctx.kind] = nil end
+				attach_evaluator(ctx, npc, storage)
+			end
+			return unpack(result)
+		end
+	end)
+end
+
+-- One lifecycle migration for already-online NPCs; no world scan or ongoing loot queue.
+local function adopt_step()
+	if not adopt_ids or rawget(_G, "zhopa2_runtime_disabled") == true then return true end
+	for _ = 1, 32 do
+		local key = adopt_ids[adopt_index]
+		adopt_index = adopt_index + 1
+		if not key then adopt_ids, adopt_index = nil, nil; return true end
+		local root = db.storage[key]
+		local npc = root and root.object
+		if is_loot_npc(npc) then
+			local manager = npc:motivation_action_manager()
+			for kind, ctx in pairs(contexts) do
+				local storage = root[kind == "gather" and "gather_items" or "corpse_detection"]
+				local id = kind == "gather" and ctx.mod.actid or xr_actions_id.corpse_exist
+				if storage and manager and manager:action(id) then attach_evaluator(ctx, npc, storage) end
+			end
+		end
+	end
+	return false
+end
+
+local function adopt_existing()
+	if not (db and db.actor and db.storage) then return end
+	adopt_ids, adopt_index = {}, 1
+	for id in pairs(db.storage) do adopt_ids[#adopt_ids + 1] = id end
+	if CreateTimeEvent then CreateTimeEvent("zhopa2_native_loot", "bind", 0, adopt_step)
+	else while not adopt_step() do end end
+end
+
+local function clear_corpse_target(npc, st)
+	local corpse_st = st.selected_corpse_id and db.storage[st.selected_corpse_id]
+	if corpse_st and corpse_st.corpse_already_selected == object_id(npc) then corpse_st.corpse_already_selected = nil end
+	st.selected_corpse_id, st.vertex_id, st.vertex_position, st.nearest_id = nil, nil, nil, nil
+	st.__stimer, st.state = nil, nil
+end
+
+local function install_context(rt, kind, mod, class_name, find_name, evaluator)
+	if not (mod and mod[class_name] and type(mod.add_to_binder) == "function") then return false end
+	local ctx = contexts[kind]
+	if not ctx then
+		local script = kind == "gather" and "xr_gather_items.script" or "xr_corpse_detection.script"
+		local cls = mod[class_name]
+		ctx = { kind = kind, mod = mod, class = cls, find_name = find_name, evaluator = evaluator,
+			evaluate = native_function(cls.evaluate, script, 12), find = native_function(cls[find_name], script, 12),
+			init = native_function(mod.on_game_start, script, 12) }
+		if not (ctx.evaluate and ctx.find and ctx.init) then return false end
+		if kind == "gather" then
+			ctx.pickup = native_function(mod.gather_item, script, 12)
+			if not ctx.pickup then return false end
+			local ini = ini_file("ai_tweaks\\xr_gather_items.ltx")
+			ctx.config_disabled = ini:r_bool_ex("settings", "enable", false) ~= true
+		end
+		contexts[kind] = ctx
+		rebuild(ctx)
+	end
+	return bind(ctx, rt)
+end
+
+function M.install(rt)
+	runtime = rt
+	if not (debug and debug.getupvalue and debug.setupvalue and string.dump and loadstring) then return false end
+	if not (rawget(_G, "zhopa2_native_gather_evaluator") and rawget(_G, "zhopa2_native_corpse_evaluator")) then return false end
+	local gather = rawget(_G, "xr_gather_items")
+	local corpse = rawget(_G, "xr_corpse_detection")
+	local a = install_context(rt, "gather", gather, "eva_gather_itm", "find_valid_item", "zhopa2_native_gather_evaluator")
+	local b = install_context(rt, "corpse", corpse, "evaluator_corpse", "find_valid_target", "zhopa2_native_corpse_evaluator")
+	if b then
+		rt.patch_method(corpse, "get_all_from_corpse", "zhopa2_native_loot_claim", function(original)
+			return function(npc, ...)
+				local id = object_id(npc)
+				local st = id and db and db.storage and db.storage[id] and db.storage[id].corpse_detection
+				if st and st.selected_corpse_id and not M.can_loot_target(npc, st.selected_corpse_id) then
+					clear_corpse_target(npc, st)
+					return
+				end
+				return original(npc, ...)
+			end
+		end)
+	end
+	if a == true and b == true then adopt_existing(); return true end
+	return false
+end
+
+function M.refresh_options()
+	enabled = rawget(_G, "zhopa2_runtime_disabled") ~= true and cfg_bool("enabled", true) and cfg_bool("loot_enabled", false)
+	protect_player_kills = enabled and cfg_bool("loot_protect_player_kills", false)
+	for _, ctx in pairs(contexts) do
+		local ok, err = pcall(rebuild, ctx)
+		if not ok then
+			enabled, protect_player_kills = false, false
+			if cfg_bool("debug_hud_enabled", false) and printf and ctx.last_error ~= tostring(err) then printf("~ ZHOPA2 native loot unavailable | %s", tostring(err)) end
+			ctx.last_error = tostring(err)
+		end
+	end
+	if next(contexts) then adopt_existing() end
+end
+
+local callbacks = { npc_on_death_callback = mark_player_kill, monster_on_death_callback = mark_player_kill,
+	on_option_change = M.refresh_options, on_game_load = M.refresh_options, actor_on_first_update = M.refresh_options }
+
+function M.on_game_start()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then return M.on_master_disable() end
+	M.refresh_options()
+	if RegisterScriptCallback then
+		for name, fn in pairs(callbacks) do
+			if UnregisterScriptCallback then UnregisterScriptCallback(name, fn) end
+			RegisterScriptCallback(name, fn)
+		end
+	end
+end
+
+function M.on_master_disable()
+	enabled, protect_player_kills = false, false
+	adopt_ids, adopt_index = nil, nil
+	if RemoveTimeEvent then RemoveTimeEvent("zhopa2_native_loot", "bind") end
+	if UnregisterScriptCallback then for name, fn in pairs(callbacks) do UnregisterScriptCallback(name, fn) end end
+	return true
+end
+
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_native_loot = M
+return M

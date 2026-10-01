@@ -4,6 +4,11 @@ local patches = {}
 local active = false
 local generation = 0
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function service_squad(npc)
     if not active or rawget(_G, "zhopa2_runtime_disabled") == true
         or not (npc and db and db.actor and get_object_squad) then
@@ -90,7 +95,7 @@ function M.install()
     if not (manager and type(manager.generate_available_tasks) == "function"
         and type(manager.get_first_finished_task) == "function"
         and type(manager.generate_ongoing_tasks) == "function") then
-        if printf then printf("! ZHOPA2 service quests | task manager unavailable") end
+        if debug_print_enabled() and printf then printf("! ZHOPA2 service quests | task manager unavailable") end
         return
     end
     generation = generation + 1

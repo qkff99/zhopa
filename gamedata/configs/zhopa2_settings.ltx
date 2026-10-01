@@ -89,13 +89,12 @@ base_invitation_wild_support_squads = 2
 base_invitation_interval_sec = 15
 base_invitation_route_timeout_sec = 300
 service_filler_interval_sec = 15
-; Experimental online ground/corpse looting. Disabled by default; artifact task pickup remains independent.
+; Native online loot without global game/modpack bans or extra distance caps. ARTEFACT is independent.
 loot_enabled = false
-loot_corpse_detect_dist_m = 80
-loot_item_detect_dist_m = 50
+; Protect corpses killed by the actor or actor companions; requires loot_enabled.
+loot_protect_player_kills = false
+; Targeted ARTEFACT request/reservation lifetime, real seconds.
 loot_event_ttl_sec = 900
-loot_event_cap_total = 600
-loot_protect_quest_items = true
 loot_offline_enabled = true
 
 trade_enabled = true

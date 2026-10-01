@@ -31,8 +31,13 @@ local function name(obj)
     local ok,value=pcall(function() return obj:name() end)
     return ok and value or nil
 end
+local function debug_print_enabled()
+    local c=rawget(_G,"zhopa2_cfg")
+    if c and c.get_bool then return c.get_bool("debug_hud_enabled",false)==true end
+    return cfg("debug_hud_enabled",false)==true
+end
 local function log(event, detail)
-    if printf and (event=="error" or cfg("debug_hud_enabled",false)) then
+    if printf and debug_print_enabled() then
         printf("~ ZHOPA_INVITE | %s | %s",event,tostring(detail or ""))
     end
 end
@@ -676,6 +681,7 @@ function M.on_master_disable()
     return true
 end
 function M.audit_level()
+    if not debug_print_enabled() then return end
     local seen={}
     for _,node in pairs(SIMBOARD and SIMBOARD.smarts or {}) do
         local smart=node.smrt

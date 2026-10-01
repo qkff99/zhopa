@@ -6,7 +6,13 @@ local MAX_SQUADS = 60
 local log_lines = 0
 local log_truncated = false
 
+local function debug_print_enabled()
+    local cfg = rawget(_G, "zhopa2_cfg")
+    return cfg and type(cfg.get_bool) == "function" and cfg.get_bool("debug_hud_enabled", false) == true
+end
+
 local function log(fmt, ...)
+    if not debug_print_enabled() then return end
 	if log_lines >= MAX_LOG_LINES then
 		if not log_truncated then
 			log_truncated = true

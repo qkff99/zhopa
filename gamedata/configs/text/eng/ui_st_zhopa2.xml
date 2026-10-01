@@ -25,7 +25,7 @@
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled"><text>Manage mutant squads</text></string>
 	<string id="ui_mcm_zhopa2_general_mutant_movement_enabled_desc"><text>Allows ZHOPA to control mutant squad movement and assign mutant tasks such as roaming, hunting, patrol, and rest.</text></string>
 	<string id="ui_mcm_zhopa2_general_debug_hud_enabled"><text>Debug map HUD and logs</text></string>
-	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Shows ZHOPA squad state on map markers and enables extra diagnostic console messages for debugging simulation behavior.</text></string>
+	<string id="ui_mcm_zhopa2_general_debug_hud_enabled_desc"><text>Shows squad state on map markers and enables all ZHOPA console diagnostics, including manual audits. When off, only the initialization readiness/warmup counter may print. No separate ZHOPA log file is created.</text></string>
 	<string id="ui_mcm_zhopa2_general_npc_quests_enabled"><text>NPC squad quests</text></string>
 	<string id="ui_mcm_zhopa2_general_npc_quests_enabled_desc"><text>Allows managed stalker squads to visit traders, take available squad quests, complete them, and receive virtual money rewards. Turning it off safely cancels active quest work.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_enabled"><text>Fill service jobs with existing NPCs</text></string>
@@ -34,8 +34,8 @@
 	<string id="ui_mcm_zhopa2_general_guard_refill_enabled_desc"><text>After all trader, technician, medic and cook/barman roles across the base are filled, recruits arriving NPCs for vacant defensive posts. Each NPC permanently leaves its donor squad, stops roaming and does not consume BASE_CAMPING squad capacity. Native guards and occupied physical posts are respected. Disabling stops new assignments while retaining existing guards.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_interval_sec"><text>Service job check interval, sec.</text></string>
 	<string id="ui_mcm_zhopa2_general_service_filler_interval_sec_desc"><text>Minimum time between checks of the same smart terrain, in real seconds. The queue is processed in small batches; vacancies wait when no suitable squad is available.</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Experimental online managed looting</text></string>
-	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Lets online NPCs use ZHOPA looting rules for corpses and loose items. Disabled by default: leave it off to use vanilla looting, the more predictable choice for large mod packs. Artefact task pickup is unaffected.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled"><text>Native NPC looting</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_enabled_desc"><text>Enable native item pickup and corpse searches regardless of game/modpack loot bans and extra distance caps. Native combat, danger, job and item safety checks remain. ARTEFACT and offline loot are independent.</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled"><text>Offline loot accounting</text></string>
 	<string id="ui_mcm_zhopa2_general_loot_offline_enabled_desc"><text>Allows squads that fight or loot outside the loaded level to gain loot value and loot cargo in the offline simulation.</text></string>
 	<string id="ui_mcm_zhopa2_general_artefact_offline_enabled"><text>Virtual artefacts for offline squads</text></string>
@@ -276,4 +276,10 @@
 	<string id="ui_mcm_zhopa2_general_base_invitation_max_inflight_desc"><text>Second-wave squad limit per base. Reinforcements travel in batches. The two first-wave squads are separate; excess reinforcements are sent to REST.</text></string>
 	<string id="ui_mcm_zhopa2_general_base_invitation_wild_support_squads"><text>Wild reinforcement squads per cycle</text></string>
 	<string id="ui_mcm_zhopa2_general_base_invitation_wild_support_squads_desc"><text>One finite support wave for zombies or mutants. After it, no further wild reinforcements are sent; stalkers continue being invited until reclamation. 0 disables wild support.</text></string>
+	<string id="ui_mcm_zhopa2_general_loot_protect_player_kills">
+		<text>NPCs do not loot player victims</text>
+	</string>
+	<string id="ui_mcm_zhopa2_general_loot_protect_player_kills_desc">
+		<text>Protect corpses killed by the player or their companions from NPC searches. Requires native NPC looting. Applies to stalkers and mutants; recorded kills persist through save/load and level changes. Default: off.</text>
+	</string>
 </string_table>
