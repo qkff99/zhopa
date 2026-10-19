@@ -2718,44 +2718,11 @@ function M.service_job_check_relevant(npc_info)
 end
 
 local function try_service_fallback_job(smart, npc_info)
-	if not (smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then
-		return false
-	end
-	local jobs = smart.stalker_jobs
-	if type(jobs) ~= "table" then
-		return false
-	end
-	local tonum = tonumber
-	local npc_id = tonum(npc_info.se_obj.id) or npc_info.se_obj.id
-	for i = 1, #jobs do
-		local job = jobs[i]
-		local owner = smart.npc_by_job_section and smart.npc_by_job_section[job.section] or nil
-		local owner_id = tonum(owner) or owner
-		if owner and not (smart.npc_info and smart.npc_info[owner_id]) then
-			smart.npc_by_job_section[job.section] = nil
-			owner = nil
-			owner_id = nil
-		end
-		if (owner == nil or owner_id == npc_id) and service_job_fallback(npc_info, job, smart) then
-			if smart.npc_by_job_section then
-				for sec, npcid in pairs(smart.npc_by_job_section) do
-					if tonum(npcid) == npc_id and sec ~= job.section then
-						smart.npc_by_job_section[sec] = nil
-					end
-				end
-				smart.npc_by_job_section[job.section] = npc_info.se_obj.id
-			end
-			npc_info.job = job
-			npc_info.begin_job = false
-			npc_info.current_index = 1
-			local st = smart.online and db and db.storage and db.storage[npc_info.se_obj.id]
-			if st and st.object then
-				if npc_info.begin_job ~= true or st.section_logic ~= job.section then
-					npc_info.begin_job = true
-					empty_table(db.offline_objects[npc_info.se_obj.id])
-					smart:setup_logic(st.object)
-				end
-			end
+	local svc = service_fillers()
+	if not (svc and svc.assign_job and smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then return false end
+	for _, job in ipairs(smart.stalker_jobs or {}) do
+		-- Never clean unrelated jobs, or infer death from missing smart registration.
+		if service_job_fallback(npc_info, job, smart) and svc.assign_job(smart, npc_info, job) then
 			debug_service_job(smart, npc_info, job, "fallback")
 			return true
 		end
@@ -2764,26 +2731,12 @@ local function try_service_fallback_job(smart, npc_info)
 end
 
 local function ensure_service_job(smart, npc_info)
-	if not (smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then
-		return false
-	end
-	local tonum = tonumber
-	local npc_id = tonum(npc_info.se_obj.id) or npc_info.se_obj.id
-	if npc_info.job and service_job_fallback(npc_info, npc_info.job, smart) then
-		local owner = smart.npc_by_job_section and smart.npc_by_job_section[npc_info.job.section] or nil
-		if owner == nil or (tonum(owner) or owner) == npc_id then
-			if smart.npc_by_job_section and owner == nil then
-				smart.npc_by_job_section[npc_info.job.section] = npc_info.se_obj.id
-			end
-			local st = smart.online and db and db.storage and db.storage[npc_info.se_obj.id]
-			if st and st.object and (npc_info.begin_job ~= true or st.section_logic ~= npc_info.job.section) then
-				npc_info.begin_job = true
-				empty_table(db.offline_objects[npc_info.se_obj.id])
-				smart:setup_logic(st.object)
-			end
-			debug_service_job(smart, npc_info, npc_info.job, "current")
-			return true
-		end
+	local svc = service_fillers()
+	if not (svc and svc.assign_job and smart and npc_info and npc_info.stype == 0 and npc_info.se_obj) then return false end
+	if npc_info.job and service_job_fallback(npc_info, npc_info.job, smart)
+		and svc.assign_job(smart, npc_info, npc_info.job) then
+		debug_service_job(smart, npc_info, npc_info.job, "current")
+		return true
 	end
 	return try_service_fallback_job(smart, npc_info)
 end
@@ -2826,6 +2779,19 @@ function M.patch_smart_terrain()
 	if not cls then
 		return false
 	end
+	local gulag = safe_require("gulag_general")
+	M.patch_method(gulag, "get_job_precondition", PATCH_ID .. "_job_owner", function(original)
+		return function(job)
+			local native = original(job)
+			return function(se, smart, candidate, info)
+				local svc, guards = service_fillers(), rawget(_G, "zhopa2_guard_refill")
+				if svc and svc.job_claim_block_reason and (svc.job_role(candidate, smart)
+					or (guards and guards.is_post_job and guards.is_post_job(smart, candidate)))
+					and svc.job_claim_block_reason(info or {se_obj=se}, candidate, smart) then return false end
+				return not native or native(se, smart, candidate, info)
+			end
+		end
+	end)
 	M.patch_method(cls, "target_precondition", PATCH_ID .. "_smart_invitation", function(original)
 		return function(self, squad, ...)
 			local invites = rawget(_G, "zhopa2_base_invitations")
@@ -2855,21 +2821,26 @@ function M.patch_smart_terrain()
 				local svc = service_fillers()
 				local checked, blocked = false, "presence_pending"
 				if svc and type(svc.service_job_block_reason) == "function" then
-					checked, blocked = pcall(svc.service_job_block_reason, npc_info, self)
+					checked, blocked = pcall(svc.service_job_block_reason, npc_info, self, true)
 				end
 				-- Guard the native selector too: its suitable condition can accept generic traders.
 				if not checked or blocked then
+					if checked and (blocked == "native_present" or blocked == "duplicate_filler" or blocked == "duplicate_retiring")
+						and svc.idle_job then svc.idle_job(self, npc_info) end
 					debug_service_job(self, npc_info, npc_info.job, "blocked:" .. tostring(blocked))
 					return true
 				end
 			end
-			if service_relevant and ensure_service_job(self, npc_info) then
+			if service_relevant then
+				if ensure_service_job(self, npc_info) then return true end
+				local svc = service_fillers()
+				if svc and svc.idle_job then svc.idle_job(self, npc_info) end
 				return true
 			end
-			local result = { original(self, npc_info, ...) }
-			if service_relevant and ensure_service_job(self, npc_info) then
-				return true
-			end
+			local svc = service_fillers()
+			local result
+			if svc and svc.guarded_native_select then result = {svc.guarded_native_select(original, self, npc_info, ...)}
+			else result = {original(self, npc_info, ...)} end
 			return unpack(result)
 		end
 	end)
@@ -4199,6 +4170,18 @@ function M.zhopa2_trade_gather_blocked(npc, st)
 	return true
 end
 
+function M.zhopa2_protected_gather_target(npc, st)
+	if not M.master_enabled() then return false end
+	local id = st and tonumber(st.selected_id)
+	local loot = rawget(_G, "zhopa2_loot")
+	if id and loot and type(loot.artifact_is_protected) == "function" and loot.artifact_is_protected(id) then
+		if type(loot.cancel_item_pickup) == "function" then loot.cancel_item_pickup(npc, id) end
+		zhopa2_clear_gather_item(npc, id, "artifact_quest_protected")
+		return true
+	end
+	return false
+end
+
 function M.zhopa2_gather_item_active(npc, item_id)
 	local tonum = tonumber
 	if not (npc and item_id and db and db.storage) then
@@ -4282,6 +4265,7 @@ local function zhopa2_gather_item_replacement(original)
 		local id = npc and object_id(npc)
 		local st = id and db and db.storage and db.storage[id] and db.storage[id].gather_items
 		if M.zhopa2_trade_gather_blocked(npc, st) then return end
+		if M.zhopa2_protected_gather_target(npc, st) then return end
 		local item_id = st and tonumber(st.selected_id)
 		local item = item_id and M.zhopa2_online_object_by_id(item_id)
 		local targeted = item_id and zhopa2_item_targeted_for_npc(npc, item_id)
@@ -4344,8 +4328,13 @@ local function patch_gather_classes(mod)
 			M.artifact_gather_find = function(self, ...)
 				local npc, st = self.object, self.st
 				if M.zhopa2_trade_gather_blocked(npc, st) then return false end
+				if M.zhopa2_protected_gather_target(npc, st) then return false end
 				local ids = zhopa2_targeted_item_ids(npc, true)
-				if not ids then return original(self, ...) end
+				if not ids then
+					local result = original(self, ...)
+					if M.zhopa2_protected_gather_target(npc, st) then return false end
+					return result
+				end
 				if zhopa2_surge_active() or M.zhopa2_trade_gather_blocked(npc, st) then return false end
 				local item_id = tonumber(ids[1])
 				local selected = st and tonumber(st.selected_id)

@@ -155,11 +155,18 @@ local function prepare_service_dialogs(npc)
         local smart = object(record.smart_id)
         local info = smart and smart.npc_info and smart.npc_info[npc:id()]
         local svc = zhopa2_service_fillers
+        local workplace = info and info.job
+        if not workplace or workplace.section ~= record.job_section then
+            workplace = record.job_section
+            for _, job in ipairs(smart and smart.stalker_jobs or {}) do
+                if job.section == record.job_section then workplace = job; break end
+            end
+        end
         if not record.service_character and svc.service_job_character then
-            record.service_character = svc.service_job_character(smart, info and info.job or record.job_section)
+            record.service_character = svc.service_job_character(smart, workplace)
         end
         if not record.service_task_section and svc.service_job_task_section then
-            record.service_task_section = svc.service_job_task_section(smart, info and info.job or record.job_section)
+            record.service_task_section = svc.service_job_task_section(smart, workplace)
         end
         log("dialog_character", record.service_character or "unknown; generic service branches only")
         log("task_section", record.service_task_section or "no named task source; default service offers")
@@ -181,7 +188,7 @@ local function hook(owner, key, factory)
             slot = h
             if owner[key] == h.wrapper then return end
             local rt = rawget(_G, "zhopa2_runtime_patches")
-            if rt and rt.function_chain_contains and rt.function_chain_contains(owner[key], h.wrapper) then return end
+            if rt and rt.function_chain_contains and rt.function_chain_contains(owner[key], h.wrapper, 8) then return end
             break
         end
     end
@@ -190,6 +197,28 @@ local function hook(owner, key, factory)
     if slot then slot.original, slot.wrapper = original, wrapper
     else hooks[#hooks + 1] = {owner = owner, key = key, original = original, wrapper = wrapper} end
     owner[key] = wrapper
+end
+
+local function trade_init_predecessor(original)
+    if not (debug and debug.getinfo and debug.getupvalue) then return original end
+    local info = debug.getinfo(original, "S")
+    local source = info and tostring(info.source):gsub("\\", "/"):gsub("^@", ""):lower()
+    if not source or source:match("([^/]+)$") ~= "fix_sim_mechanic_trade.script" then return original end
+    local values, found = {}, false
+    for i = 1, 80 do
+        local name, value = debug.getupvalue(original, i)
+        if not name then break end
+        values[i] = { name, value }
+        if name == "orig_trade_init" and type(value) == "function" then found = true end
+    end
+    if not found then return original end
+    -- Anthology rewrites its shared orig_* cell when our wrapper becomes the outer function.
+    local copy = assert(loadstring(string.dump(original)), "Anthology trade snapshot unavailable")
+    setfenv(copy, getfenv(original))
+    for i, entry in ipairs(values) do
+        assert(debug.setupvalue(copy, i, entry[2]) == entry[1], "Anthology trade upvalue mismatch")
+    end
+    return copy
 end
 
 local function mechanic_profile(context)
@@ -308,7 +337,13 @@ local function install_hooks()
                             if candidate.job_type_id~=2 and candidate.job_type_id~=8 and candidate.job_type_id~=14 then return false end
                             return not native or native(se,smart,candidate,info)
                         end
-                        return smart.id==r.smart_id and candidate.section==r.job_section
+                        if r.guard_suspended then
+                            local svc=zhopa2_service_fillers
+                            return candidate.exclusive~=true and not guards.is_post_job(smart,candidate)
+                                and not (svc.job_role and svc.job_role(candidate,smart))
+                                and (not native or native(se,smart,candidate,info))
+                        end
+                        return smart.id==r.smart_id and candidate.section==r.job_section and not guards.post_conflict(smart,r)
                     end
                     if guards.blocks(candidate,smart,id_of(se)) then return false end
                     return not native or native(se,smart,candidate,info)
@@ -319,7 +354,10 @@ local function install_hooks()
             return function(smart, info, ...)
                 local r=info and record_for(info.se_obj)
                 if r and r.role=="guard" and not zhopa2_tasks.surge_active() then
-                    guards.bind(smart,info,r,true)
+                    local bound=guards.bind(smart,info,r,true)
+                    if not bound and r.guard_suspended and zhopa2_service_fillers.idle_job then
+                        zhopa2_service_fillers.idle_job(smart,info)
+                    end
                     return true
                 end
                 return original(smart,info,...)
@@ -329,7 +367,7 @@ local function install_hooks()
             return function(smart,npc,...)
                 local r=record_for(npc)
                 if r and r.role=="guard" and not zhopa2_tasks.surge_active() then
-                    if not guards.bind(smart,smart.npc_info and smart.npc_info[npc:id()],r,false) then return end
+                    if not guards.bind(smart,smart.npc_info and smart.npc_info[npc:id()],r,false) and not r.guard_suspended then return end
                 end
                 return original(smart,npc,...)
             end
@@ -395,10 +433,11 @@ local function install_hooks()
         end)
     end
     hook(trade_manager, "trade_init", function(original)
+        local previous = trade_init_predecessor(original)
         return function(npc, cfg, ...)
             local r = record_for(npc)
             if r and r.role ~= "guard" then cfg = r.trade end
-            return original(npc, cfg, ...)
+            return previous(npc, cfg, ...)
         end
     end)
 end
@@ -617,6 +656,7 @@ local function preflight(smart_id, role, quiet, job_section)
                 elseif source.disabled or source.respawn_only_smart then reject = "source_smart_unavailable"
                 elseif not physically_here then reject = "outside_base"
                 elseif npc:is_talking() or npc:best_enemy() then reject = "talking_or_fighting"
+                elseif zhopa2_service_fillers.npc_service_role and zhopa2_service_fillers.npc_service_role(se, source) then reject = "already_service_NPC"
                 elseif (db.storage[npc_id] and db.storage[npc_id].zhopa2_quest_service_token)
                     or (info.job and (info.job.seller_id or info.job.mechanic_id)) then reject = "busy_service"
                 elseif context.role=="guard" and not zhopa2_guard_refill.accepts(se,donor_context,smart) then reject="guard_job_unsuitable"
@@ -786,6 +826,7 @@ function M.run(smart_id, role, job_section)
         assert(se.group_id == donor.id and member(donor, se.id) and donor:npc_count() >= 1
             and donor:npc_count() == record.donor_count_before, "donor changed")
         assert(context.role=="guard" or record.donor_count_before == 1 or donor:commander_id() ~= se.id, "donor commander changed")
+        assert(not zhopa2_service_fillers.npc_service_role or not zhopa2_service_fillers.npc_service_role(se, source), "donor became a service NPC")
         log("detach", "npc=" .. se.id .. " old_squad=" .. donor.id .. " new_squad=" .. group.id)
         pending_binder_refresh[se.id] = true
         if source.id ~= smart.id then

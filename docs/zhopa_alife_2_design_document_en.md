@@ -78,6 +78,7 @@ Runtime modules:
 - `zhopa2_story_psy_watchdog`
 - `zhopa2_story_north_migration`
 - `zhopa2_npc_quests`
+- `zhopa2_npc_quest_cleanup` (passive object cleanup, independent of the master switch)
 - `zhopa2_squad_dialogue`
 - `zhopa2_debug_hud`
 
@@ -199,6 +200,7 @@ Each module owns its own temporary state:
 - `zhopa2_story_north_migration` — story event selection/status;
 - `zhopa2_story_psy_watchdog` — conversion queues and pending reconciliation.
 - `zhopa2_npc_quests` — global contract pool, daily revision, reservations, service phases, and bounded retired history;
+- `zhopa2_npc_quest_cleanup` — a separate persisted queue that removes quest items and backpacks after they naturally switch offline;
 - `zhopa2_squad_dialogue` — non-serialized travel offer, UI lock, arrival safety, and deferred cross-level finalization.
 
 Module runtime state must be cleaned on unregister, death and load. Stale ids easily break the task FSM.
@@ -298,7 +300,7 @@ Current patch anchors:
 - `sim_board` — squad/smart registration facts and safety wrappers;
 - `smart_terrain` — smart update, arrival facts, ownership, service filler hooks;
 - `bind_anomaly_zone` — artifact spawn/take/destroy registration;
-- `xr_gather_items` - ARTEFACT task pickup only; other calls retain the original chain;
+- `xr_gather_items` - ARTEFACT task pickup and quest-item protection; other calls retain the original chain;
 - `sim_offline_combat` — offline combat consequences;
 - `xr_reach_task` — targeted reach/pickup compatibility;
 - `bind_monster` — mutant identity/lifecycle hooks;
@@ -412,11 +414,17 @@ When a moving squad is intercepted, its `EXPLORE`, `POPULATE`, `PATROL`, `TRADE`
 
 `zhopa2_npc_quests` stores a versioned global pool and supports five kinds: `documents`, `clear`, `occupy`, `hunt`, and `delivery`. A trader publishes a bounded number of jobs from its profile; squads select only existing `AVAILABLE` contracts on their current or directly adjacent level. An active contract moves through `RESERVED`, `IN_PROGRESS`, `RETURNING`, `COMPLETED`, or `FAILED` and has exactly one executor.
 
+The daily queue stores only smart IDs. Each smart and its current giver are resolved again before processing, so the queue never retains an NPC's online object across its offline transition. Discovery and revision check up to two smarts per second, with a 3 ms budget between operations; individual engine calls cannot be interrupted. Per-smart errors leave other work running, and failed IDs retry after 30 seconds. An outer error boundary protects actor updates, while diagnostics follow Debug HUD. Loading and option changes reset transient queues and timers; saved quest data keeps its existing format.
+
 Online interaction uses a real trade customer job only for approach and animation. `axr_trade_manager` recognizes the quest token and completes the service phase before monetary trade; path/intent state is then cleared, the NPC immediately receives `select_npc_job`, and the service doctor remains a fallback. Offline or unsafe online preparation uses a one-minute smart-level fallback.
 
 Documents and packages are real ZHOPA-specific sections. Online, the commander picks the document from the top of its backpack through pickup animation, while a delivery package is issued into commander inventory during the giver service phase; offline, the equivalent server transfer completes the phase. A reward is added exactly once to `zhopa2_virtual_money`. `clear` returns for reporting, `occupy` transitions the winner into `BASE_CAMPING` using the shared mode and duration settings, `hunt` follows the target squad, and `delivery` carries a selected package between compatible traders.
 
+`zhopa2_npc_quest_cleanup` separates quest termination from object destruction. Online pickup transfers the original document to the commander; incomplete online context waits without creating a copy. Backpacks and remaining NPC-held documents are removed only after naturally switching offline and losing their client object and binder. Stolen documents, picked-up backpacks and unrelated stash contents are preserved. A separate versioned queue holds up to 512 ID/scalar records, checks up to eight records every 0.5 seconds while work exists, and continues after ZHOPA is disabled. Native server-object marks protect against ID reuse. Queue overflow or unavailable cleanup retains the object; diagnostics follow Debug HUD.
+
 ### 6.5 Commander dialogue and joint travel
+
+The module owns a fade only after successfully creating it. Cleanup removes it once and accesses UI/camera functions only while the actor exists; disabled startup makes no native postprocess calls. Actor disappearance discards old UI state, while unlocking before a level change retains fade ownership until separate cleanup.
 
 `modxml_zhopa2_squad_dialogue` adds a dedicated dialogue without overriding `dialog_manager`. It is available only to the living commander of a managed squad. The response shows current/previous activity, NPC-quest kind, and a destination card with area image, level name, and localized smart name when available.
 
@@ -502,7 +510,11 @@ The module resolves original vanilla Lua functions through bounded wrapper chain
 
 `loot_protect_player_kills` (MCM/LTX, default off) protects corpses killed by the actor or companions, including mutants. The `zhopa2_player_kill` mark uses native server-object storage; new kills are recorded even with the rule off, survive saves and level transitions, and disappear with their objects. `can_loot_target` filters selected/new corpses through native valuable-loot lookup and runs before transfer. Loose ground items are not protected.
 
-Load, first update and option changes refresh private closures. Already-online NPCs are adopted in batches of 32 only on lifecycle events; there are no ongoing world scans or loot-search queues. Disabling restores pack behavior. ARTEFACT delegates to its retained targeted path before checking the online option.
+Load, first update and option changes refresh private closures. Already-online NPCs are adopted in batches of 32 only on lifecycle events; there are no ongoing world scans or loot-search queues. Disabling restores pack behavior while retaining quest-item protection. ARTEFACT delegates to its retained targeted path before checking the online option.
+
+The shared `zhopa2_loot.artifact_is_protected` check protects `quest_item`, story IDs, Artefact Hunters `af_ah_*` sections and selected artifact IDs in active WTF `igi_generic_task.TASKS_CACHE`. Candidate arrays in `entity.ids` and unaccepted `TASK_SETUP` offers are not claimed. The transient selected-`entity.id` cache refreshes through native WTF events, root-table replacement after load and a once-per-second fallback; it is never serialized. WTF remains optional.
+
+Protection runs during ARTEFACT selection/reservation, online requests, offline real/virtual collection, native ground search and immediately before transfer. Existing selected targets and NPC memory are rechecked. A real quest object stays registered but unavailable to NPCs; WTF cancellation/completion reopens it without another spawn. Protection is independent of `loot_enabled`.
 
 Online ARTEFACT flow:
 
@@ -563,6 +575,12 @@ Rules:
 - old squad is released/unregistered safely;
 - debug mode reports converted squad, level and reason.
 
+Reconciliation uses existing SIMBOARD buckets and a transient deduplicated ID queue (up to 256 entries). Spawns on unrelated levels do not trigger a full pass; spawn/level-change events only enqueue relevant IDs. Startup, load and option changes request incremental reconciliation, while `reconcile_all_levels` returns `0, "queued"`. Objects and their current levels are resolved again before processing.
+
+The worker runs at most once per 100 ms: up to 32 bucket steps, 8 checks and one conversion attempt per tick, with a 3 ms `time_global_async` budget (count limits remain if it is unavailable). Queue and scan turns alternate; removed bucket cursors and queue overflow do not lose remaining targets. A single engine call cannot be interrupted internally, so the budget is checked between operations.
+
+Per-squad and worker errors are caught; tracebacks print only with Debug HUD. Processing flags always clear; an unexpected failure before source release rolls the replacement back, while failure after release keeps it. Failed IDs are automatically retried after 30 seconds. Queue, cursors and cooldowns are never serialized and rebuild from the live world on load; disabling the feature/mod clears them.
+
 ### 10.2 `zhopa2_story_north_migration`
 
 North migration is a one-shot story event after the configured story trigger.
@@ -578,6 +596,10 @@ Rules:
 
 ## 11. Service NPCs and Dynamic Ownership
 
+Assignment checks living owners through `npc_by_job_section`, current and saved job records. Missing `npc_info` does not imply death; unknown owner state prevents takeover. Presence also includes living IDs from ownership links. Native selection temporarily protects these links, preserving them during rollback and ordinary NPC job selection. Role checks precede changes to unrelated workplaces.
+
+NPCs already holding service jobs cannot become donors even within ordinary managed squads; this is rechecked before detachment. A living incumbent outranks a duplicate with a lower squad ID. Returning originals recover their workplaces: replacements release only their own links and take available ordinary jobs with native preconditions. If none are available, the old scheme is deactivated. Releasing a service or guard job preserves the matching `st.ini`/`st.section_logic` pair: native reconfiguration reads it before installing the replacement pair, including during load restoration. The NPC, service record and quests are preserved; service can resume after the original disappears. Old-save dialogue/task recovery uses the recorded workplace even while the NPC waits at another job.
+
 Dynamic ownership covers the whole compound base and one vote from the local player's actual faction. The neutral `trader` community contributes no votes, including NPCs awaiting smart registration; their presence still fills service vacancies. Services belonging to a regular faction community contribute to ownership like its other members. `zhopa2_service_fillers` queues trader, technician, medic and cook/barman vacancies; guides are not supported yet. Smart updates and population events refresh the queue. `zhopa2_service_recruitment` owns the shared existing-NPC transfer, load restoration and rollback. Production recruitment creates no NPCs and is not triggered by emissions.
 
 `service_filler_enabled` controls the system; `service_filler_interval_sec` sets the retry interval (15 real seconds by default). Services and guards share a 0.5-second timer: up to eight queue entries are examined, with at most one smart processed/appointment made per step. Catalogs and presence are cached; vacancies are rechecked before transfer. Offline entries remain unconfirmed until the level and job tables load; incomplete data defers recruitment.
@@ -585,6 +607,8 @@ Dynamic ownership covers the whole compound base and one vote from the local pla
 Eligible owner-faction donors across the whole base have priority, followed by factions neutral or allied to the owner and existing services and guards. Relations are checked in both directions. The NPC must be alive, online and physically near a member smart; its registration may belong to a neighboring smart. Story, quest and companion NPCs remain protected. Donor faction, ID and inventory are retained. Only an empty squad container is created; one NPC is detached while remaining members continue simulation. A singleton can also donate; its empty source squad is removed after successful transfer.
 
 The original workplace supplies the service profile, dialogue, stock and tasks. `zhopa2_service_quests` supports task offers, turn-in and cancellation with giver checks; DXML modules adapt branches only for recruited services. Lua replenishes trade funds, while GAMMA repair restrictions remain respected. Unknown or unconfirmed jobs are skipped; named NPCs without a suitable native job are not automatically replaced.
+
+For the trade wrapper from `fix_sim_mechanic_trade.script` with its mutable `orig_trade_init` reference, ZHOPA creates a private Lua-function copy when installing its hook. The copy retains the environment and upvalue values, so an Anthology reinstall cannot change the delegation path already captured by ZHOPA. Recruited NPC profiles, native restocking and mechanic behavior are preserved. The copy exists only in memory; save formats and the external script remain unchanged. Repeated ZHOPA hook installation checks wrapper chains to a depth of eight functions.
 
 Migration removes services spawned by the old filler, preserving originals and existing recruits. Recruitment records contain serializable data only (limit 2048), including the source smart for rollback. Disabling an individual option stops new appointments; the ZHOPA master switch returns living recruited services and guards to ordinary squads, including offline recruits.
 
@@ -595,6 +619,8 @@ Read-only diagnostics `zhopa2_service_recruitment.audit_level()` and the compati
 ### 11.1 Empty and Depleted Base Invitations
 
 `zhopa2_base_invitations` adds explicit settlement requests alongside existing roaming weights. One `zhopa2_bases.key` groups all member smarts. `smart_terrain_on_update` only queues the key; a separate 0.5-second timer examines up to eight keys and processes one base in rotating order. Base reassessment normally runs every 15 real seconds; an accepted invitation accelerates the next step to 0.5 seconds.
+
+The shared squad index caches only IDs, resolves current ALife objects on every read and rechecks their levels. Missing squads never fall back to stale bucket references, including when objects disappear or are replaced within the same frame. Invitations resolve candidates again before selection and assignment; missing and expired failure records are cleared without invoking methods on old objects.
 
 `zhopa2_index.base_population` collects living server NPCs from registrations, saved registrations, arriving NPCs and actual rosters of physically present squads. IDs are deduplicated and each NPC supplies its own faction; mutant members use their squad's faction. No headcount cache is needed. Missing NPCs, unknown position/level or an incomplete roster produce `complete=false`, never an empty base. Ownership uses the same collector. Invitations additionally examine physically nearby squads despite delayed registration. Every service profession is excluded from emptiness; guards, regular stalkers and wild groups count as residents. The local player influences ownership without preventing an empty-base request.
 
@@ -743,6 +769,8 @@ After BASE_CAMPING ends, the departure guard covers the whole compound. Automati
 Donor selection considers all owner-faction squads before non-hostile factions. Live game_relations checks run in both directions against the owner and existing service factions; unknown relations defer recruitment. The container and saved service_faction follow the donor, while owner remains the base-ownership snapshot. A registered NPC physically inside the base may donate even when registered elsewhere; donor_smart_id preserves the original registration for rollback.
 
 ## Guard Refill
+
+Every bind checks all aliases of a physical post, including already active jobs. Another living owner or native guard suspends the assignment (`guard_suspended` in the service record): only the recruit's own links/reservation are released, and it stays alive at its base with an ordinary waiting job. Its reservation no longer blocks the original or blindly returns on load. The same NPC can resume when the post is free; newly established living guards are also protected from displacement.
 
 `zhopa2_guard_refill` maintains a cached defensive-post catalog and a scalar-ID queue. Smart updates/population events feed it through the service filler; it shares that timer and the one-appointment-per-step budget. All core service roles across the compound must be filled first. A step checks up to eight queued IDs and processes at most one smart; retry spacing uses service_filler_interval_sec. Occupancy is collected in one pass and refreshed after load.
 

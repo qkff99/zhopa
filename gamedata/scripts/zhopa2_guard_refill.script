@@ -23,9 +23,13 @@ local function ensure_claims()
     if claims_revision==revision then return end
     claims,claims_revision={},revision
     for _,r in ipairs(core and core.guard_records and core.guard_records() or {}) do
-        if r.guard_post then
-            claims[r.smart_id]=claims[r.smart_id] or {}
-            claims[r.smart_id][r.guard_post]=r.npc_id
+        if r.guard_post and not r.guard_suspended then
+            local conflict=M.post_conflict and M.post_conflict(object(r.smart_id),r)
+            if conflict=="native_present" or conflict=="post_occupied" then r.guard_suspended=true
+            else
+                claims[r.smart_id]=claims[r.smart_id] or {}
+                claims[r.smart_id][r.guard_post]=r.npc_id
+            end
         end
     end
 end
@@ -266,6 +270,27 @@ function M.bind(smart,info,r,setup)
     local cat=catalog(smart)
     local entry=cat and cat.sections[r.job_section]
     if not entry or entry.key~=r.guard_post then return false end
+    local blocked=M.post_conflict(smart,r)
+    if blocked then
+        if blocked~="guard_jobs_pending" then
+            r.guard_suspended=true
+            M.release(r)
+            local current=info.job and cat.sections[info.job.section]
+            if current and current.key==r.guard_post then
+                local svc=rawget(_G,"zhopa2_service_fillers")
+                if svc and svc.release_job then svc.release_job(smart,info)
+                else
+                    for section,id in pairs(smart.npc_by_job_section or {}) do
+                        if id==r.npc_id then smart.npc_by_job_section[section]=nil end
+                    end
+                    info.job,info.begin_job=nil,false
+                end
+            end
+        end
+        return false
+    end
+    r.guard_suspended=nil
+    M.reserve(r)
     local current=smart.npc_by_job_section and smart.npc_by_job_section[r.job_section]
     local st=db.storage and db.storage[r.npc_id]
     if current==r.npc_id and info.job and info.job.section==r.job_section
@@ -273,6 +298,8 @@ function M.bind(smart,info,r,setup)
     if current and current~=r.npc_id and alive(current)~=false then return false end
     local occupied=collect_occupants(smart,cat)[entry.key]
     for id in pairs(occupied or {}) do if id~=r.npc_id then return false end end
+    local svc=rawget(_G,"zhopa2_service_fillers")
+    if setup and svc and svc.assign_job then return svc.assign_job(smart,info,entry.job) end
     smart.npc_by_job_section=smart.npc_by_job_section or {}
     local changed=not info.job or info.job.section~=r.job_section
     for section,id in pairs(smart.npc_by_job_section) do if id==r.npc_id then smart.npc_by_job_section[section]=nil end end
@@ -285,8 +312,30 @@ function M.bind(smart,info,r,setup)
     end
     return true
 end
+function M.is_post_job(smart,job)
+    local cat=catalog(smart)
+    local entry=cat and job and cat.sections[job.section]
+    return entry~=nil and cat.places[entry.key]~=nil
+end
+function M.post_conflict(smart,r)
+    local cat=catalog(smart)
+    local post=cat and r and cat.places[r.guard_post]
+    if not post then return "guard_jobs_pending" end
+    local native,id=named_alive(post,smart)
+    if native and id~=r.npc_id then return "native_present" end
+    local occupants=collect_occupants(smart,cat)[post.key]
+    for id in pairs(occupants or {}) do if id~=r.npc_id then return "post_occupied" end end
+end
 function M.reserve(r)
     ensure_claims()
+    if r.guard_suspended then return end
+    local conflict=M.post_conflict(object(r.smart_id),r)
+    if conflict=="native_present" or conflict=="post_occupied" then
+        r.guard_suspended=true
+        local set=claims[r.smart_id]
+        if set and set[r.guard_post]==r.npc_id then set[r.guard_post]=nil end
+        return
+    end
     claims[r.smart_id]=claims[r.smart_id] or {}
     claims[r.smart_id][r.guard_post]=r.npc_id
 end

@@ -83,6 +83,7 @@ local active = false
 local pending_offer = nil
 local active_travel = nil
 local ui_locked = false
+local fade_active = false
 local arrival_safety = nil
 local pending_cross_combat_arrival = nil
 local pending_cross_time_distance = nil
@@ -934,13 +935,15 @@ local function restore_ui(cancel_events)
 		pcall(RemoveTimeEvent, EVENT_ID, "restore")
 	end
 	local lvl = rawget(_G, "level")
-	if lvl and type(lvl.remove_pp_effector) == "function" then
+	local unlock, remove_fade = ui_locked, fade_active
+	ui_locked, fade_active = false, false
+	if not (lvl and db and db.actor) then return end
+	if remove_fade and type(lvl.remove_pp_effector) == "function" then
 		pcall(lvl.remove_pp_effector, FADE_EFFECT_ID)
 	end
-	if not ui_locked then
+	if not unlock then
 		return
 	end
-	ui_locked = false
 	if lvl then
 		if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, true) end
 		if type(lvl.enable_input) == "function" then pcall(lvl.enable_input) end
@@ -950,14 +953,17 @@ end
 
 local function lock_ui_for_fade()
 	local lvl = rawget(_G, "level")
-	if not lvl then
+	if not (lvl and db and db.actor) then
 		return false
 	end
 	ui_locked = true
 	if type(lvl.disable_input) == "function" then pcall(lvl.disable_input) end
 	if type(lvl.hide_indicators_safe) == "function" then pcall(lvl.hide_indicators_safe) end
 	if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, false) end
-	if type(lvl.add_pp_effector) == "function" then pcall(lvl.add_pp_effector, "fade_in_out.ppe", FADE_EFFECT_ID, false) end
+	if type(lvl.add_pp_effector) == "function" then
+		local ok, result = pcall(lvl.add_pp_effector, "fade_in_out.ppe", FADE_EFFECT_ID, false)
+		fade_active = ok and result ~= false
+	end
 	return true
 end
 
@@ -967,6 +973,7 @@ local function unlock_ui_for_level_change()
 	end
 	ui_locked = false
 	local lvl = rawget(_G, "level")
+	if not (lvl and db and db.actor) then fade_active = false; return end
 	if lvl then
 		if type(lvl.show_weapon) == "function" then pcall(lvl.show_weapon, true) end
 		if type(lvl.enable_input) == "function" then pcall(lvl.enable_input) end

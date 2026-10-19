@@ -27,6 +27,7 @@ local function object(id)
     return id and id>=0 and id<65535 and alife_object and alife_object(id) or nil
 end
 local function name(obj)
+	obj=object(obj and obj.id)
     if not obj then return nil end
     local ok,value=pcall(function() return obj:name() end)
     return ok and value or nil
@@ -211,6 +212,13 @@ end
 
 local ALLOWED={REST=true,NIGHT_REST=true,EXPLORE=true,PATROL=true,TRADE=true,HUNT=true}
 local function candidate(squad,smart)
+    local id=squad and squad.id
+    squad=object(id)
+    if not squad then
+        local cycle=M.cycles[zhopa2_bases.key(smart)]
+        if cycle and cycle.failed and id then cycle.failed[id]=nil end
+        return nil
+    end
     if not (squad and squad.id) or M.reservations[squad.id] or inside(squad,smart) then return nil end
     local cycle=M.cycles[zhopa2_bases.key(smart)]
     local failed=cycle and cycle.failed and cycle.failed[squad.id]
@@ -332,7 +340,8 @@ end
 local function accept(c,cycle,wave,slot)
     local count=0;for _ in pairs(M.reservations) do count=count+1 end
     if count>=MAX_RESERVATIONS then return false end
-    local q=c.squad
+    local q=object(c.squad and c.squad.id)
+    if not q then return false end
     local squad_name=name(q)
     if not squad_name then return false end
     if not zhopa2_tasks.interrupt_task(q,TASK,c.target.id,0,"base_invitation_"..slot,nil,{direct_target=false,clear_reason="base_invitation_"..slot}) then return false end
@@ -447,6 +456,9 @@ local function process_base(smart,key)
             wild_arrived=wild_owner or false,wild_faction=wild_owner and snap.owner or nil,wild_sent=0,
             first_hostile_arrived=wild_owner or false,partial=not empty and not wild_owner}
         M.cycles[key]=cycle
+    end
+    for id,failed in pairs(cycle.failed or {}) do
+        if (tonumber(failed.expires) or 0)<=now() or not object(id) then cycle.failed[id]=nil end
     end
     local list=live_reservations(cycle)
     if cycle.phase=="settled" then

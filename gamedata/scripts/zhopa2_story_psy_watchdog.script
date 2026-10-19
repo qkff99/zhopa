@@ -7,6 +7,12 @@ local SECTION_ZOMBIED_ADVANCED = "zombied_sim_squad_advanced"
 local SECTION_ZOMBIED_VETERAN = "zombied_sim_squad_veteran"
 local INVALID_ID = 65535
 local RECONCILE_RECHECK_MS = 1000
+local WORK_INTERVAL_MS = 100
+local WORK_BUDGET_MS = 3
+local SCAN_LIMIT = 32
+local CHECK_LIMIT = 8
+local QUEUE_LIMIT = 256
+local ERROR_RETRY_MS = 30000
 
 local MEMBER_POOL_BY_SECTION = {
 	[SECTION_ZOMBIED_NOVICE] = {
@@ -36,6 +42,7 @@ local callbacks_registered = false
 local pending_reconcile = false
 local pending_source = nil
 local next_reconcile_tg = 0
+local work = { queue = {}, queued = {}, head = 1, tail = 0, failed_until = {} }
 
 local function load_module(name)
 	local mod = rawget(_G, name)
@@ -102,6 +109,25 @@ end
 
 local function now_ms()
 	return time_global and time_global() or 0
+end
+
+local function budget_ms()
+	if type(time_global_async) == "function" then return time_global_async() end
+	return os and os.clock and os.clock() * 1000 or 0
+end
+
+local function error_trace(err)
+	return debug and type(debug.traceback) == "function" and debug.traceback(tostring(err), 2) or tostring(err)
+end
+
+local function report_error(sid, source, err)
+	pcall(debug_log, "~ ZHOPA2 psy watchdog error | squad [%s] source [%s] detail [%s]", tostring(sid or "-"), tostring(source or "-"), tostring(err))
+end
+
+local function reset_work()
+	work = { queue = {}, queued = {}, head = 1, tail = 0, failed_until = {} }
+	runtime.processing_by_sid = {}
+	next_reconcile_tg = 0
 end
 
 local function normalize_id(value)
@@ -791,151 +817,229 @@ function M.convert_squad_to_zombied(squad, context, source)
 		return false
 	end
 	runtime.processing_by_sid[sid] = true
+	local new_squad, new_sid
+	local source_released = false
+	local function convert()
+		new_squad = create_empty_squad(context.zombied_squad_section, context.position, context.level_vertex_id, context.game_vertex_id)
+		new_sid = normalize_id(new_squad and new_squad.id)
+		if not (new_squad and new_sid) then
+			runtime.processing_by_sid[sid] = nil
+			log_mutation_error(sid, context, source, "create_failed")
+			return false
+		end
+		runtime.processing_by_sid[new_sid] = true
 
-	local new_squad = create_empty_squad(context.zombied_squad_section, context.position, context.level_vertex_id, context.game_vertex_id)
-	local new_sid = normalize_id(new_squad and new_squad.id)
-	if not (new_squad and new_sid) then
-		runtime.processing_by_sid[sid] = nil
-		log_mutation_error(sid, context, source, "create_failed")
-		return false
+		local populated, spawned_members = populate_zombied_squad(new_squad, context)
+		if populated ~= true then
+			release_squad_safe(new_squad, "story_psy_watchdog_spawn_failed")
+			runtime.processing_by_sid[new_sid] = nil
+			runtime.processing_by_sid[sid] = nil
+			log_mutation_error(sid, context, source, "member_spawn_failed", new_squad)
+			return false
+		end
+		spawned_members = tonumber(spawned_members) or 0
+
+		if release_squad_safe(squad, "story_psy_watchdog_convert") ~= true then
+			release_squad_safe(new_squad, "story_psy_watchdog_rollback")
+			runtime.processing_by_sid[new_sid] = nil
+			runtime.processing_by_sid[sid] = nil
+			log_mutation_error(sid, context, source, "source_release_failed", new_squad)
+			return false
+		end
+		source_released = true
+
+		cleanup_source_task(squad)
+		unregister_released_squad(squad)
+		finalize_spawned_squad(new_squad, context)
+
+		local source_members = tonumber(context.member_count) or 0
+		local new_members = tonumber(squad_member_count(new_squad)) or 0
+		local count_check = (source_members > 0 and spawned_members == source_members and new_members == source_members) and "ok" or "mismatch"
+		if count_check ~= "ok" then
+			local tostr = tostring
+			log_mutation_error(
+				sid,
+				context,
+				source,
+				"member_count_mismatch",
+				new_squad,
+				"source_members=" .. tostr(source_members) .. ",spawned_members=" .. tostr(spawned_members) .. ",new_members=" .. tostr(new_members)
+			)
+		end
+
+		return true
 	end
-	runtime.processing_by_sid[new_sid] = true
-
-	local populated, spawned_members = populate_zombied_squad(new_squad, context)
-	if populated ~= true then
-		release_squad_safe(new_squad, "story_psy_watchdog_spawn_failed")
-		runtime.processing_by_sid[new_sid] = nil
-		runtime.processing_by_sid[sid] = nil
-		log_mutation_error(sid, context, source, "member_spawn_failed", new_squad)
-		return false
-	end
-	spawned_members = tonumber(spawned_members) or 0
-
-	if release_squad_safe(squad, "story_psy_watchdog_convert") ~= true then
-		release_squad_safe(new_squad, "story_psy_watchdog_rollback")
-		runtime.processing_by_sid[new_sid] = nil
-		runtime.processing_by_sid[sid] = nil
-		log_mutation_error(sid, context, source, "source_release_failed", new_squad)
-		return false
-	end
-
-	cleanup_source_task(squad)
-	unregister_released_squad(squad)
-	finalize_spawned_squad(new_squad, context)
-
-	local source_members = tonumber(context.member_count) or 0
-	local new_members = tonumber(squad_member_count(new_squad)) or 0
-	local count_check = (source_members > 0 and spawned_members == source_members and new_members == source_members) and "ok" or "mismatch"
-	if count_check ~= "ok" then
-		local tostr = tostring
-		log_mutation_error(
-			sid,
-			context,
-			source,
-			"member_count_mismatch",
-			new_squad,
-			"source_members=" .. tostr(source_members) .. ",spawned_members=" .. tostr(spawned_members) .. ",new_members=" .. tostr(new_members)
-		)
-	end
-
-	runtime.processing_by_sid[new_sid] = nil
+	local ok, result = xpcall(convert, error_trace)
 	runtime.processing_by_sid[sid] = nil
-
-	return true
+	if new_sid then runtime.processing_by_sid[new_sid] = nil end
+	if not ok then
+		-- Keep the replacement after source release; otherwise roll back partial spawning.
+		if new_squad and not source_released then pcall(release_squad_safe, new_squad, "story_psy_watchdog_error_rollback") end
+		report_error(sid, source, result)
+		return source_released, "conversion_error"
+	end
+	return result
 end
 
 function M.try_process_squad(squad, source, known_level)
-	local context = candidate_context(squad, source, known_level)
-	if not context then
-		return false
+	local valid, sid = pcall(function() return normalize_id(squad and squad.id) end)
+	if not valid then report_error(nil, source, sid); return false, false end
+	if not sid or (work.failed_until[sid] or 0) > now_ms() then return false, false end
+	local attempted = false
+	local ok, result, reason = xpcall(function()
+		local context = candidate_context(squad, source, known_level)
+		if not context then return false end
+		attempted = true
+		return M.convert_squad_to_zombied(squad, context, source)
+	end, error_trace)
+	if not ok or reason == "conversion_error" then
+		work.failed_until[sid] = now_ms() + ERROR_RETRY_MS
+		if not ok then report_error(sid, source, result) end
+		return ok and result == true, attempted
 	end
-	return M.convert_squad_to_zombied(squad, context, source)
+	work.failed_until[sid] = nil
+	return result == true, attempted
 end
 
 function M.reconcile_all_levels(source)
-	if not runtime_ready("story_psy_watchdog_reconcile") then
-		pending_reconcile = true
-		pending_source = source or pending_source or "runtime_not_ready"
-		return 0, "runtime_not_ready"
-	end
-	if not feature_enabled_now() then
-		pending_reconcile = false
-		return 0
-	end
-	local idx = index_mod()
-	if not (idx and type(idx.squads_on_levels) == "function") then
-		pending_reconcile = true
-		pending_source = source or pending_source or "index_missing"
-		return 0, "index_missing"
-	end
-	local levels = {}
-	for level_name in pairs(get_psi_levels()) do
-		levels[#levels + 1] = level_name
-	end
-	local squads = idx.squads_on_levels(levels)
-	local converted = 0
-	for i = 1, #squads do
-		if M.try_process_squad(squads[i], source or "reconcile_all") == true then
-			converted = converted + 1
-		end
-	end
-	pending_reconcile = false
-	return converted
+	pending_reconcile = true
+	pending_source = source or pending_source or "reconcile_all"
+	return 0, "queued"
 end
 
 local function request_reconcile(source)
-	pending_reconcile = true
-	pending_source = source or pending_source or "request"
-	if runtime_ready("story_psy_watchdog_request") then
-		return M.reconcile_all_levels(source)
+	return M.reconcile_all_levels(source)
+end
+
+local function enqueue_squad(squad, source, known_level)
+	local sid = normalize_id(squad and squad.id)
+	if not sid or runtime.processing_by_sid[sid] or work.queued[sid] then return false end
+	if not is_target_level(squad_level_name(squad, known_level)) or not is_plain_stalker_sim_squad(squad)
+		or is_already_zombied(squad, squad.player_id) then return false end
+	if work.tail - work.head + 1 >= QUEUE_LIMIT then
+		request_reconcile("queue_full")
+		return false
 	end
-	return 0, "runtime_not_ready"
+	work.tail = work.tail + 1
+	work.queue[work.tail] = { id = sid, source = source }
+	work.queued[sid] = true
+	return true
+end
+
+local function scan_next(by_level)
+	local scan = work.scan
+	if not scan then return nil end
+	local name = scan.levels[scan.index]
+	if not name then work.scan = nil; return nil end
+	local bucket = by_level[name]
+	if type(bucket) ~= "table" then scan.index = scan.index + 1; scan.cursor = nil; return nil end
+	if bucket ~= scan.bucket then scan.bucket, scan.cursor = bucket, nil end
+	-- Conversion/level changes can remove the previous key between ticks.
+	if scan.cursor ~= nil and bucket[scan.cursor] == nil then scan.cursor = nil end
+	local id = next(bucket, scan.cursor)
+	scan.cursor = id
+	if id == nil then scan.index = scan.index + 1; return nil end
+	local sid = normalize_id(id)
+	if not sid or scan.seen[sid] then return nil end
+	scan.seen[sid] = true
+	return sid, scan.source
+end
+
+local function process_work()
+	if not feature_enabled_now() then reset_work(); pending_reconcile = false; return end
+	if not runtime_ready("story_psy_watchdog_work") then return end
+	local board = get_board()
+	local by_level = board and board.zhopa2_squads_by_level
+	if type(by_level) ~= "table" then return end
+	if work.retry_cursor and work.failed_until[work.retry_cursor] == nil then work.retry_cursor = nil end
+	local retry = next(work.failed_until, work.retry_cursor)
+	work.retry_cursor = retry
+	if retry and work.failed_until[retry] <= now_ms() then
+		work.failed_until[retry] = nil
+		local squad = resolve_alife_object(retry)
+		if squad then enqueue_squad(squad, "error_retry") end
+	end
+	if pending_reconcile and not work.scan then
+		local levels = {}
+		for name in pairs(get_psi_levels()) do levels[#levels + 1] = name end
+		work.scan = { levels = levels, index = 1, seen = {}, source = pending_source }
+		pending_reconcile = false
+	end
+	work.scan_turn = not work.scan_turn
+	local started, checks, scanned = budget_ms(), 0, 0
+	while checks < CHECK_LIMIT and scanned < SCAN_LIMIT do
+		if budget_ms() - started >= WORK_BUDGET_MS then break end
+		local sid, source
+		if work.head <= work.tail and not (work.scan and work.scan_turn) then
+			local entry = work.queue[work.head]
+			work.queue[work.head] = nil
+			work.head = work.head + 1
+			sid, source = entry.id, entry.source
+			work.queued[sid] = nil
+			if work.scan then work.scan.seen[sid] = true end
+		else
+			if work.head > work.tail then work.queue, work.head, work.tail = {}, 1, 0 end
+			if not work.scan then break end
+			scanned = scanned + 1
+			sid, source = scan_next(by_level)
+		end
+		if sid then
+			checks = checks + 1
+			local squad = resolve_alife_object(sid)
+			if squad then
+				local _, attempted = M.try_process_squad(squad, source)
+				if attempted then break end
+			end
+		end
+	end
 end
 
 local function actor_on_update()
-	if pending_reconcile ~= true then
-		return
-	end
+	if not pending_reconcile and not work.scan and work.head > work.tail and not next(work.failed_until) then return end
 	local now = now_ms()
-	if now > 0 and now < next_reconcile_tg then
-		return
+	if now > 0 and now < next_reconcile_tg then return end
+	next_reconcile_tg = now + WORK_INTERVAL_MS
+	local ok, err = xpcall(process_work, error_trace)
+	if not ok then
+		next_reconcile_tg = now_ms() + RECONCILE_RECHECK_MS
+		work.scan = nil
+		request_reconcile("work_error")
+		if work.last_error ~= err then report_error(nil, "actor_on_update", err) end
+		work.last_error = err
+	else
+		work.last_error = nil
 	end
-	next_reconcile_tg = now > 0 and (now + RECONCILE_RECHECK_MS) or 0
-	request_reconcile(pending_source or "actor_on_update")
 end
 
 local function actor_on_first_update()
 	invalidate_runtime_caches()
+	reset_work()
 	request_reconcile("actor_on_first_update")
 end
 
 local function on_game_load()
 	invalidate_runtime_caches()
+	reset_work()
 	request_reconcile("on_game_load")
 end
 
 local function on_option_change()
 	invalidate_runtime_caches()
+	reset_work()
 	request_reconcile("on_option_change")
 end
 
 local function squad_on_after_level_change(squad, old_level, new_level)
-	if not runtime_ready("story_psy_watchdog_level_change") then
-		pending_reconcile = true
-		pending_source = "squad_on_after_level_change"
-		return
-	end
-	if is_target_level(new_level) then
-		M.try_process_squad(squad, "squad_on_after_level_change", new_level)
-	end
+	local ok, err = pcall(enqueue_squad, squad, "squad_on_after_level_change", new_level)
+	if not ok then report_error(nil, "squad_on_after_level_change", err) end
 end
 
 local function server_entity_on_register(se_obj, type_name)
 	if type_name ~= "sim_squad_scripted" then
 		return
 	end
-	pending_reconcile = true
-	pending_source = "server_entity_on_register"
+	local ok, err = pcall(enqueue_squad, se_obj, "server_entity_on_register")
+	if not ok then report_error(nil, "server_entity_on_register", err) end
 end
 
 function M.on_game_start()
@@ -992,7 +1096,7 @@ function M.on_master_disable()
 		pcall(UnregisterScriptCallback, "server_entity_on_register", server_entity_on_register)
 	end
 	invalidate_runtime_caches()
-	runtime.processing_by_sid = {}
+	reset_work()
 	callbacks_registered = false
 	pending_reconcile = false
 	pending_source = nil

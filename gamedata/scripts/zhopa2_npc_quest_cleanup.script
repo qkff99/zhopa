@@ -1,0 +1,133 @@
+-- Passive cleanup must survive master disable and must never destroy a live loot source.
+local M = { pending = {} }
+local KEY = "zhopa2_npc_quest_cleanup"
+local DOCUMENT = "zhopa_npc_quest_documents"
+local TIMER = "zhopa2_npc_quest_cleanup"
+local MAX_PENDING, PER_STEP = 512, 8
+local cursor, timer_started = nil, false
+local start_timer
+
+local function object(id)
+    id = tonumber(id)
+    return id and id > 0 and id < 65535 and alife_object and alife_object(id) or nil
+end
+local function log_error(err)
+    local cfg = rawget(_G, "zhopa2_cfg")
+    if cfg and cfg.get_bool and cfg.get_bool("debug_hud_enabled", false) and printf then
+        printf("~ ZHOPA2 quest cleanup | %s", tostring(err):sub(1, 384))
+    end
+end
+local function offline(obj)
+    local id = obj.id
+    return obj.online == false and level and type(level.object_by_id) == "function"
+        and not level.object_by_id(id) and not (db and db.storage and db.storage[id] and db.storage[id].object)
+end
+local function release_entry(id, entry)
+    local obj = object(id)
+    if not obj then return true end
+    if obj:name() ~= entry.name or obj:section_name() ~= entry.section then return true end
+    if entry.marked and (not se_load_var or se_load_var(id, entry.name, KEY) ~= true) then return true end
+    if tonumber(obj.parent_id) ~= entry.parent then return true end
+    if not offline(obj) then return false end
+    local sim = alife and alife()
+    if not (sim and type(sim.release) == "function") then return false end
+    if entry.section == "inv_backpack" then
+        if type(sim.get_children) ~= "function" then return false end
+        for child_id in sim:get_children(obj) do
+            -- A player may reuse the bag as a stash. Never remove their items with it.
+            if tonumber(child_id) ~= entry.document then return true end
+            local child = object(child_id)
+            if not child then return false end
+            if child:section_name() ~= DOCUMENT then return true end
+            if tonumber(child.parent_id) ~= id or not offline(child) then return false end
+        end
+    end
+    sim:release(obj, true)
+    return true
+end
+function M.process()
+    if not (db and db.actor) then return false end
+    local seen = {}
+    for _ = 1, PER_STEP do
+        if cursor and M.pending[cursor] == nil then cursor = nil end
+        local id, entry = next(M.pending, cursor)
+        if not id then id, entry = next(M.pending) end
+        if not id or seen[id] then break end
+        cursor, seen[id] = id, true
+        local ok, done = pcall(release_entry, id, entry)
+        if ok and done then M.pending[id] = nil
+        elseif not ok then
+            local err = tostring(done):sub(1, 384)
+            if entry.error ~= err then pcall(log_error, err) end
+            entry.error = err
+        else entry.error = nil end
+    end
+    return next(M.pending) == nil
+end
+local function tick()
+    if ResetTimeEvent then ResetTimeEvent(TIMER, "release", 0.5) end
+    local ok, done = pcall(M.process)
+    if not ok then pcall(log_error, done) end
+    if ok and done then timer_started = false; return true end
+    return false
+end
+start_timer = function()
+    if not timer_started and next(M.pending) and db and db.actor and CreateTimeEvent then
+        local ok, result = pcall(CreateTimeEvent, TIMER, "release", 0.5, tick)
+        timer_started = ok and result ~= false
+    end
+end
+function M.enqueue(id, parent, document)
+    id, parent = tonumber(id), tonumber(parent)
+    local obj = object(id)
+    if not obj then return true end
+    if parent == nil or tonumber(obj.parent_id) ~= parent then return false end
+    local section = obj:section_name()
+    if section ~= "inv_backpack" and section ~= DOCUMENT then return false end
+    local entry = { name = obj:name(), section = section, parent = parent, document = tonumber(document) }
+    local ok, done = pcall(release_entry, id, entry)
+    if ok and done then M.pending[id] = nil; return true end
+    if not M.pending[id] then
+        local count = 0; for _ in pairs(M.pending) do count = count + 1 end
+        if count >= MAX_PENDING then pcall(log_error, "queue full; container retained"); return false end
+    end
+    if se_save_var and se_load_var then
+        se_save_var(id, entry.name, KEY, true)
+        entry.marked = true
+    end
+    M.pending[id] = entry
+    start_timer()
+    return true
+end
+local function save(data)
+    if type(data) ~= "table" then return end
+    data[KEY] = next(M.pending) and { version = 1, pending = M.pending } or nil
+end
+local function load(data)
+    data = type(data) == "table" and data or {}
+    M.pending, cursor, timer_started = {}, nil, false
+    if RemoveTimeEvent then RemoveTimeEvent(TIMER, "release") end
+    local state = type(data[KEY]) == "table" and data[KEY] or {}
+    local count = 0
+    for raw_id, entry in pairs(state.version == 1 and type(state.pending) == "table" and state.pending or {}) do
+        local id = tonumber(raw_id)
+        if id and id > 0 and id < 65535 and type(entry) == "table" and type(entry.name) == "string"
+            and (entry.section == "inv_backpack" or entry.section == DOCUMENT) and tonumber(entry.parent) then
+            M.pending[id] = { name = entry.name, section = entry.section, parent = tonumber(entry.parent), document = tonumber(entry.document), marked = entry.marked == true }
+            count = count + 1; if count >= MAX_PENDING then break end
+        end
+    end
+    start_timer()
+end
+function M.on_game_start()
+    if not RegisterScriptCallback then return false end
+    for key, fn in pairs({ save_state = save, load_state = load, actor_on_first_update = start_timer }) do
+        if UnregisterScriptCallback then UnregisterScriptCallback(key, fn) end
+        RegisterScriptCallback(key, fn)
+    end
+    start_timer()
+    return true
+end
+function on_game_start() return M.on_game_start() end
+_G.zhopa2_npc_quest_cleanup = M
+return M

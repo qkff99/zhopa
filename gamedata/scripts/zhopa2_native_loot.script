@@ -116,10 +116,22 @@ local function initialize_gather(ctx)
 	if type(old_items) == "table" then upvalue(ctx.init, "Items", old_items, true) end
 end
 
+local function quest_item_protected(obj)
+	local loot = rawget(_G, "zhopa2_loot")
+	return rawget(_G, "zhopa2_runtime_disabled") ~= true and loot and type(loot.artifact_is_protected) == "function"
+		and loot.artifact_is_protected(obj) == true or false
+end
+
 local function rebuild(ctx)
 	if ctx.kind == "gather" and enabled then initialize_gather(ctx) end
 	local overrides = { near_actor = function() return false end }
 	if ctx.kind == "gather" then
+		overrides.near_actor = quest_item_protected
+		local story_id = upvalue(ctx.find, "get_object_story_id")
+		overrides.get_object_story_id = function(id)
+			if quest_item_protected(id) then return "zhopa2_quest_artifact" end
+			return story_id and story_id(id)
+		end
 		overrides.MaxDetectDistance = math.huge
 		overrides.UseCorpseLootTable = true
 		overrides.ArtifactDectection = true
@@ -176,11 +188,16 @@ end
 function M.find(self, kind)
 	local ctx = contexts[kind]
 	if not ctx then return false end
+	if kind == "gather" and runtime and runtime.zhopa2_protected_gather_target
+		and runtime.zhopa2_protected_gather_target(self.object, self.st) then return false end
 	if kind == "gather" and artifact_request(self.object) and runtime and runtime.artifact_gather_find then
 		return runtime.artifact_gather_find(self)
 	end
 	if not enabled then return ctx.class[ctx.find_name](self) end
-	return ctx.find_body and ctx.find_body(self) or false
+	local result = ctx.find_body and ctx.find_body(self) or false
+	if kind == "gather" and runtime and runtime.zhopa2_protected_gather_target
+		and runtime.zhopa2_protected_gather_target(self.object, self.st) then return false end
+	return result
 end
 
 if class and property_evaluator and not rawget(_G, "zhopa2_native_gather_evaluator") then

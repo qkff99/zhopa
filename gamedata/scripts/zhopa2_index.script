@@ -354,8 +354,17 @@ local function section_is_artifact(section)
 	if not section_exists(section) then
 		return false
 	end
+	if section:find("^af_ah_") or (ini_sys.r_bool_ex and ini_sys:r_bool_ex(section, "quest_item", false) == true) then
+		return false
+	end
 	local cls = ini_sys.r_string_ex and ini_sys:r_string_ex(section, "class") or nil
 	return cls == "ARTEFACT"
+end
+
+local function artifact_is_available(id)
+	if not artifact_is_valid(id) then return false end
+	local loot = rawget(_G, "zhopa2_loot")
+	return not (loot and type(loot.artifact_is_protected) == "function" and loot.artifact_is_protected(id, M.artifact_section[id]))
 end
 
 local function artefact_settings()
@@ -992,7 +1001,8 @@ function M.base_smarts_on_levels(levels, limit)
 end
 
 function M.squads_on_levels(levels, limit)
-	return frame_reader("squads", levels, limit, function(max_count)
+	-- Cache IDs only: a squad can be removed or replaced even within this frame.
+	local ids = frame_reader("squads", levels, limit, function(max_count)
 		local board = simboard()
 		if board and type(board.zhopa2_ensure_buckets) == "function" then
 			board:zhopa2_ensure_buckets()
@@ -1009,12 +1019,13 @@ function M.squads_on_levels(levels, limit)
 			if not bucket then
 				return false
 			end
-			for squad_id, stored_squad in pairs(bucket) do
+			for squad_id in pairs(bucket) do
 				if not seen[squad_id] then
 					seen[squad_id] = true
-					local squad = alife_object(squad_id) or stored_squad
+					local squad = alife_object(squad_id)
+					if not squad then bucket[squad_id] = nil end
 					if squad and obj_level(squad) == level_name then
-						out[#out + 1] = squad
+						out[#out + 1] = squad_id
 						if max_count and #out >= max_count then
 							return true
 						end
@@ -1025,6 +1036,13 @@ function M.squads_on_levels(levels, limit)
 		end)
 		return out
 	end)
+	local out, wanted = {}, {}
+	each_level(levels, function(level_name) wanted[level_name] = true; return false end)
+	for _, id in ipairs(ids) do
+		local squad = alife_object(id)
+		if squad and wanted[obj_level(squad)] then out[#out + 1] = squad end
+	end
+	return out
 end
 
 function M.squad_level_names()
@@ -1199,7 +1217,7 @@ local function recalc_smart_artefact_flag(smart_id)
 	local bucket = M.smart_artifacts[smart_id]
 	if bucket then
 		for artifact_id in pairs(bucket) do
-			if tonumber(M.artifact_smart[artifact_id]) == tonumber(smart_id) and artifact_is_valid(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved(artifact_id) then
+			if tonumber(M.artifact_smart[artifact_id]) == tonumber(smart_id) and artifact_is_available(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved(artifact_id) then
 				flags.artefact_available = true
 				break
 			end
@@ -1817,7 +1835,8 @@ function M.unregister_zone_artifacts(zone, reason)
 end
 
 function M.smart_artefact_available(smart)
-	local smart_id = smart and smart.id or tonumber(smart)
+	local smart_id = type(smart) == "number" and smart or smart and smart.id
+	recalc_smart_artefact_flag(smart_id)
 	local flags = smart_id and M.smart_task_flags[smart_id] or nil
 	return flags and flags.artefact_available == true
 end
@@ -1829,7 +1848,7 @@ function M.reserve_artifact_for_squad(squad, artifact_id)
 	if artifact_id and artifact_id < 0 and not artifact_is_valid(artifact_id) then
 		restore_virtual_artifact_for_squad(squad, artifact_id)
 	end
-	if not (squad_id and artifact_id and artifact_is_valid(artifact_id)) then
+	if not (squad_id and artifact_id and artifact_is_available(artifact_id)) then
 		return false
 	end
 	if artifact_reserved_for_other_squad(artifact_id, squad) then
@@ -1980,7 +1999,7 @@ function M.available_artifact_for_smart(smart_or_id, squad, opts)
 		return nil
 	end
 	for artifact_id in pairs(bucket) do
-		if tonum(M.artifact_smart[artifact_id]) == smart_id and artifact_is_valid(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved_for_other_squad(artifact_id, squad) then
+		if tonum(M.artifact_smart[artifact_id]) == smart_id and artifact_is_available(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved_for_other_squad(artifact_id, squad) then
 			if not (opts.real_only == true and M.virtual_artifacts[artifact_id]) then
 				return tonum(artifact_id) or artifact_id
 			end
@@ -2022,7 +2041,7 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 					local artifact_smart_matches_bucket = tonum(M.artifact_smart[artifact_id]) == tonum(smart_id)
 					if not artifact_smart_matches_bucket then
 						stale[#stale + 1] = { artifact_id = artifact_id, smart_id = smart_id }
-					elseif not M.virtual_artifacts[artifact_id] and artifact_is_valid(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved_for_other_squad(artifact_id, squad) then
+					elseif not M.virtual_artifacts[artifact_id] and artifact_is_available(artifact_id) and section_is_artifact(M.artifact_section[artifact_id]) and not artifact_reserved_for_other_squad(artifact_id, squad) then
 						out[#out + 1] = {
 							smart = smart,
 							artifact_id = artifact_id,
@@ -2061,7 +2080,7 @@ function M.artifact_candidate_smarts_on_levels(levels, squad)
 					local artifact_smart_matches_bucket = tonum(M.artifact_smart[artifact_id]) == tonum(smart_id)
 					if not artifact_smart_matches_bucket then
 						remove_artifact_from_smart_bucket(artifact_id, smart_id)
-					elseif M.virtual_artifacts[artifact_id] and virtual_artifact_level_allowed(smart_level) and smart.online ~= true and artifact_is_valid(artifact_id) and not artifact_reserved_for_other_squad(artifact_id, squad) then
+					elseif M.virtual_artifacts[artifact_id] and virtual_artifact_level_allowed(smart_level) and smart.online ~= true and artifact_is_available(artifact_id) and not artifact_reserved_for_other_squad(artifact_id, squad) then
 						out[#out + 1] = {
 							smart = smart,
 							artifact_id = artifact_id,

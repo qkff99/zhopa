@@ -545,6 +545,58 @@ local function object_is_story(obj, id)
 	return get_object_story_id and id and get_object_story_id(id) ~= nil
 end
 
+local quest_artifacts = { ids = {}, dirty = true, next_check = 0 }
+local quest_artifact_events = { "on_first_run", "on_entity_init", "on_entity_del", "on_task_update", "on_finish", "on_subtask_status_change" }
+
+local function invalidate_quest_artifacts()
+	quest_artifacts.dirty = true
+end
+
+local function quest_artifact_ids()
+	local callbacks = rawget(_G, "igi_callbacks")
+	if callbacks ~= quest_artifacts.callbacks then
+		local old = quest_artifacts.callbacks
+		for _, event in ipairs(quest_artifact_events) do
+			if old and type(old.remove_callback) == "function" then old.remove_callback(event, invalidate_quest_artifacts) end
+			if callbacks and type(callbacks.add_callback) == "function" then callbacks.add_callback(event, invalidate_quest_artifacts) end
+		end
+		quest_artifacts.callbacks = callbacks
+		quest_artifacts.dirty = true
+	end
+	local tasks = rawget(_G, "igi_generic_task")
+	local root = tasks and tasks.TASKS_CACHE
+	local now = now_ms()
+	if root ~= quest_artifacts.root or quest_artifacts.dirty or now >= quest_artifacts.next_check then
+		local ids = {}
+		if type(root) == "table" then
+			for _, task in pairs(root) do
+				if type(task) == "table" and task.status ~= "complete" and task.status ~= "fail" and type(task.entities) == "table" then
+					for _, entity in pairs(task.entities) do
+						-- WTF's ids array is a candidate pool; only the resolved id belongs to this quest.
+						local id = type(entity) == "table" and tonumber(entity.id)
+						if valid_id(id) then ids[id] = true end
+					end
+				end
+			end
+		end
+		quest_artifacts.ids, quest_artifacts.root = ids, root
+		quest_artifacts.dirty, quest_artifacts.next_check = false, now + 1000
+	end
+	return quest_artifacts.ids
+end
+
+function M.artifact_is_protected(obj_or_id, section)
+	local id = type(obj_or_id) == "number" and obj_or_id or object_id(obj_or_id)
+	local obj = obj_or_id
+	if type(obj_or_id) == "number" then
+		obj = valid_id(id) and ((alife_object and alife_object(id)) or online_object_by_id(id)) or nil
+	end
+	section = section or object_section(obj)
+	if type(section) ~= "string" or section == "" then return false end
+	if section:find("^af_ah_") or section_is_quest(section) or object_is_story(obj, id) then return true end
+	return id ~= nil and object_is_artifact(obj) and quest_artifact_ids()[id] == true or false
+end
+
 local function cleanup_exclusive_item_reservations()
 	local ttl = math.max(1, cfg_num("loot_event_ttl_sec", 900)) * 1000
 	local now = now_ms()
@@ -594,10 +646,7 @@ function M.can_take_section(section, obj, looter)
 	if section:find("^mp_") then
 		return false
 	end
-	if section_is_quest(section) then
-		return false
-	end
-	if object_is_story(obj) then
+	if M.artifact_is_protected(obj, section) then
 		return false
 	end
 	if item_reserved_for_other(obj, looter) then
@@ -2069,6 +2118,8 @@ local function on_item_take(npc, item)
 end
 
 function M.on_game_load()
+	quest_artifacts.ids, quest_artifacts.root = {}, nil
+	quest_artifacts.dirty, quest_artifacts.next_check = true, 0
 	targeted_item_requests = {}
 	targeted_item_requests_by_item = {}
 	exclusive_item_reservations = {}
@@ -2093,6 +2144,11 @@ function M.on_game_start()
 end
 
 function M.on_master_disable()
+	local callbacks = quest_artifacts.callbacks
+	if callbacks and type(callbacks.remove_callback) == "function" then
+		for _, event in ipairs(quest_artifact_events) do callbacks.remove_callback(event, invalidate_quest_artifacts) end
+	end
+	quest_artifacts.callbacks = nil
 	if UnregisterScriptCallback then
 		pcall(UnregisterScriptCallback, "npc_on_death_callback", on_npc_death)
 		pcall(UnregisterScriptCallback, "npc_on_item_take", on_item_take)

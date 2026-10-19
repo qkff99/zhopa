@@ -4074,6 +4074,11 @@ function M.service_npc_ids_at_smart(smart)
 	for id in pairs(smart.arriving_npc or {}) do
 		add_id(id)
 	end
+	-- Ownership links can survive while NPC/squad registration is still being restored.
+	for _, id in pairs(smart.npc_by_job_section or {}) do
+		local obj = server_object_by_id(id)
+		if obj then add_id(id) end
+	end
 	local node = SIMBOARD and SIMBOARD.smarts and SIMBOARD.smarts[smart_id] or nil
 	if not (node and type(node.squads) == "table") then
 		complete = false

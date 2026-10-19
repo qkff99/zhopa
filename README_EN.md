@@ -74,6 +74,8 @@ After offline combat, loot is recorded in a bounded virtual ledger. It is sold t
 
 ## Artefacts
 
+NPCs cannot pick up artifact IDs selected by active WTF quests or Artefact Hunters items with `af_ah_*` sections. Protection covers online/offline ARTEFACT and native ground pickup independently of `loot_enabled`. WTF protects the specific object rather than every artifact of that type; cancellation or completion removes its claim.
+
 Real artefacts are registered in runtime indexes and belong to exactly one suitable smart bucket. A real artefact is preferred whenever one is available. Virtual artefacts are generated from anomaly-zone settings for the offline economy only and do not reduce real artefact spawn.
 
 ## Requirements

@@ -95,6 +95,7 @@ local JOB_ROLE_CACHE = {}
 local provider_catalogs = {}
 local presence_cache = {}
 local retiring_squads = {}
+local job_owner_guards = {}
 
 local function economy_mod()
 	local economy = rawget(_G, "zhopa2_economy")
@@ -573,6 +574,15 @@ local function se_object_alive(se_obj)
 	return nil
 end
 
+local function job_owner_alive(id)
+	id = tonumber(id)
+	if not id or id <= 0 or id >= 65535 or type(alife_object) ~= "function" then return nil end
+	local ok, obj = pcall(alife_object, id)
+	if not ok then return nil end
+	if not obj then return false end
+	return se_object_alive(obj)
+end
+
 local function set_online_community(se_obj, engine_owner)
 	if not engine_owner then
 		return false
@@ -937,21 +947,164 @@ local function collect_presence(smart, force)
 	return presence
 end
 
-function M.service_job_block_reason(npc_info, smart)
+function M.service_job_block_reason(npc_info, smart, fresh)
 	if cfg_bool("enabled", true) ~= true then return nil end
 	local npc = npc_info and npc_info.se_obj
 	local squad = service_squad_from_member(npc)
 	if not zhop_service_squad(squad, squad_section(squad)) then return nil end
 	if retiring_squads[squad.id] then return "duplicate_retiring" end
 	if not (smart and smart.id) then return "presence_pending" end
-	local presence = collect_presence(smart)
+	local presence = collect_presence(smart, fresh)
 	if not (presence and presence.complete) then return "presence_pending" end
 	local role = normalize_role(squad.zhopa2_service_role) or role_from_section(squad_section(squad))
 	if presence.native[role] then return "native_present" end
+	local incumbent
+	local function holding(id)
+		local obj = safe_squad_by_id(tonumber(id))
+		local group = obj and service_squad_from_member(obj)
+		if group and presence.fillers[role] and presence.fillers[role][group.id] and se_object_alive(obj) == true then
+			return group.id
+		end
+	end
+	for _, job in ipairs(smart.stalker_jobs or {}) do
+		if classify_job_role(job, smart) == role then
+			incumbent = holding(smart.npc_by_job_section and smart.npc_by_job_section[job.section])
+			if incumbent then break end
+		end
+	end
+	if not incumbent then
+		for id, info in pairs(smart.npc_info or {}) do
+			if info.job and classify_job_role(info.job, smart) == role then
+				local holder = holding(id)
+				if holder then incumbent = math.min(incumbent or holder, holder) end
+			end
+		end
+	end
+	if incumbent then return incumbent ~= squad.id and "duplicate_filler" or nil end
 	for id in pairs(presence.fillers[role] or {}) do
 		if id < squad.id then return "duplicate_filler" end
 	end
 	return nil
+end
+
+function M.job_role(job, smart)
+	return classify_job_role(job, smart)
+end
+
+function M.job_claim_block_reason(npc_info, job, smart)
+	local npc_id = tonumber(npc_info and npc_info.se_obj and npc_info.se_obj.id)
+	if not (npc_id and smart and job and job.section) then return "job_state_pending" end
+	local function blocks(id)
+		if id == nil then return false end
+		id = tonumber(id)
+		if not id or id <= 0 or id >= 65535 then return true end
+		if id == npc_id then return false end
+		return job_owner_alive(id) ~= false
+	end
+	local protected = job_owner_guards[smart]
+	local owner = protected and protected[job.section] or smart.npc_by_job_section and smart.npc_by_job_section[job.section]
+	if blocks(owner) then return "job_owner_alive_or_unknown", owner end
+	for id, info in pairs(smart.npc_info or {}) do
+		if type(info) == "table" and info.job and info.job.section == job.section and blocks(id) then
+			return "job_info_owner_alive_or_unknown", id
+		end
+	end
+	for id, info in pairs(smart.load_info or {}) do
+		if type(info) == "table" and info.job_section == job.section and blocks(id) then
+			return "saved_job_owner_alive_or_unknown", id
+		end
+	end
+	return nil
+end
+
+function M.guarded_native_select(original, smart, npc_info, ...)
+	local previous, protected = job_owner_guards[smart], {}
+	for section, id in pairs(previous or {}) do protected[section] = id end
+	local guards = rawget(_G, "zhopa2_guard_refill")
+	for _, job in ipairs(smart.stalker_jobs or {}) do
+		local owner = smart.npc_by_job_section and smart.npc_by_job_section[job.section]
+		if owner and not (smart.npc_info and smart.npc_info[tonumber(owner)])
+			and (classify_job_role(job, smart) or (guards and guards.is_post_job and guards.is_post_job(smart, job))) then
+			if job_owner_alive(owner) ~= false then protected[job.section] = owner end
+		end
+	end
+	job_owner_guards[smart] = protected
+	local args = {...}
+	local ok, results = pcall(function() return {original(smart, npc_info, unpack(args))} end)
+	job_owner_guards[smart] = previous
+	for section, id in pairs(protected) do
+		if smart.npc_by_job_section and smart.npc_by_job_section[section] == nil then
+			if job_owner_alive(id) ~= false then smart.npc_by_job_section[section] = id end
+		end
+	end
+	if not ok then error(results, 0) end
+	return unpack(results)
+end
+
+function M.release_job(smart, npc_info, keep_job)
+	local id = tonumber(npc_info and npc_info.se_obj and npc_info.se_obj.id)
+	if not (id and smart) then return false end
+	local old_section = npc_info.job and npc_info.job.section
+	local changed = false
+	for section, owner in pairs(smart.npc_by_job_section or {}) do
+		if tonumber(owner) == id and (not keep_job or section ~= keep_job.section) then
+			smart.npc_by_job_section[section] = nil; changed = true
+		end
+	end
+	local saved = smart.load_info and smart.load_info[id]
+	if saved and (not keep_job or saved.job_section ~= keep_job.section) then saved.job_section = nil end
+	if not keep_job then
+		npc_info.job, npc_info.begin_job, npc_info.current_index = nil, false, 1
+		npc_info.need_job = "nil"
+	end
+	local st = db and db.storage and db.storage[id]
+	if not keep_job and old_section and st then
+		if st.object and st.ini and xr_logic and xr_logic.switch_to_section then xr_logic.switch_to_section(st.object, st.ini, "nil") end
+		-- Keep the INI/root pair valid until native configure_schemes replaces it.
+	end
+	if changed or not keep_job then M.invalidate_presence(smart) end
+	return true
+end
+
+function M.assign_job(smart, npc_info, job)
+	if M.job_claim_block_reason(npc_info, job, smart) then return false end
+	local id = tonumber(npc_info.se_obj.id)
+	local changed = npc_info.job ~= job
+	if changed then M.release_job(smart, npc_info) end
+	smart.npc_by_job_section = smart.npc_by_job_section or {}
+	smart.npc_by_job_section[job.section] = id
+	npc_info.job, npc_info.current_index = job, 1
+	local st = smart.online and db and db.storage and db.storage[id]
+	if st and st.object and (changed or not npc_info.begin_job or st.section_logic ~= job.section) then
+		npc_info.begin_job = true
+		if db.offline_objects then db.offline_objects[id] = {} end
+		smart:setup_logic(st.object)
+	end
+	return true
+end
+
+function M.idle_job(smart, npc_info)
+	local guards = rawget(_G, "zhopa2_guard_refill")
+	local function ordinary(job)
+		return job and job.exclusive ~= true and not classify_job_role(job, smart)
+			and not (guards and guards.is_post_job and guards.is_post_job(smart, job))
+	end
+	if npc_info.job and ordinary(npc_info.job) and not M.job_claim_block_reason(npc_info, npc_info.job, smart) then
+		M.release_job(smart, npc_info, npc_info.job)
+		return true
+	end
+	M.release_job(smart, npc_info)
+	for _, job in ipairs(smart.stalker_jobs or {}) do
+		if ordinary(job) and not M.job_claim_block_reason(npc_info, job, smart) then
+			local precond = gulag_general and gulag_general.get_job_precondition and gulag_general.get_job_precondition(job)
+			local ok, suitable = true, true
+			if precond then ok, suitable = pcall(precond, npc_info.se_obj, smart, job, npc_info) end
+			if ok and suitable and (type(allowed) ~= "function" or allowed({section=job.section})) then
+				return M.assign_job(smart, npc_info, job)
+			end
+		end
+	end
+	return false
 end
 
 function M.job_accepts_service_npc(npc_info, job, smart)
@@ -961,6 +1114,7 @@ function M.job_accepts_service_npc(npc_info, job, smart)
 	if not (npc_info and job and smart) then
 		return false
 	end
+	if M.job_claim_block_reason(npc_info, job, smart) then return false end
 	if M.service_job_block_reason(npc_info, smart) then return false end
 	local job_role = classify_job_role(job, smart)
 	if not job_role then

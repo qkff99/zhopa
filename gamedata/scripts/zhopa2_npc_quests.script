@@ -19,6 +19,8 @@ local FALLBACK_DELIVERY_SECTIONS = {
 local DEFAULT_CONTAINER_SECTION = "inv_backpack"
 local REVISION_INTERVAL_MS = 1000
 local REVISION_GIVERS_PER_TICK = 2
+local REVISION_BUDGET_MS = 3
+local REVISION_RETRY_MS = 30000
 local RETIRED_LIMIT = 128
 local DOCUMENT_PICKUP_RADIUS_SQR = 25
 local DOCUMENT_PICKUP_DELAY_MS = 2500
@@ -30,6 +32,8 @@ local callbacks_registered = false
 local pending_reconcile = true
 local revision_queue = {}
 local revision_day = nil
+local revision_failed = {}
+local revision_retry_tg = 0
 local next_revision_tg = 0
 local suppress_task_clear = false
 local delivery_sections_cache = nil
@@ -172,13 +176,13 @@ local function object_alive(obj)
 	if not obj then
 		return false
 	end
-	if type(obj.alive) == "function" then
-		local ok, alive = pcall(obj.alive, obj)
-		if ok then
-			return alive == true
+	local ok, alive = pcall(function()
+		if type(obj.alive) == "function" then
+			return obj:alive() == true
 		end
-	end
-	return object_id(obj) ~= nil
+		return object_id(obj) ~= nil
+	end)
+	return ok and alive == true
 end
 
 local function squad_alive(squad)
@@ -737,21 +741,23 @@ local function runtime_level_vertex_id(obj)
 	return ok and tonumber(value) or nil
 end
 
+local function defer_document_cleanup(id, parent, document)
+	local cleanup = safe_require("zhopa2_npc_quest_cleanup")
+	if cleanup and type(cleanup.enqueue) == "function" then
+		local ok, result = pcall(cleanup.enqueue, id, parent, document)
+		if ok and result then return end
+	end
+	debug_log("~ ZHOPA2 npc quest | stage [cleanup_deferred] item [%s] reason [cleanup_unavailable]", tostring(id))
+end
+
 local function cleanup_document(quest)
 	if not quest then
 		return
 	end
-	local in_box, doc = document_is_in_container(quest)
-	if in_box then
-		release_object(doc)
-	end
-	local box = alife_object(quest.document_container_id)
-	if box then
-		release_object(box)
-	end
+	defer_document_cleanup(quest.document_container_id, 65535, quest.document_id)
 	local carried = alife_object(quest.document_carried_id)
 	if carried and tonumber(carried.parent_id) == tonumber(quest.document_carried_by_id) then
-		release_object(carried)
+		defer_document_cleanup(quest.document_carried_id, quest.document_carried_by_id)
 	end
 	quest.document_id = nil
 	quest.document_container_id = nil
@@ -816,22 +822,32 @@ local function collect_document_to_commander(quest, squad)
 	if not commander then
 		return false, "commander_missing"
 	end
-	if type(alife_create_item) ~= "function" then
-		return false, "item_create_missing"
-	end
-	local created_ok, carried = pcall(alife_create_item, DEFAULT_DOCUMENT_SECTION, commander)
-	local carried_id = created_ok and object_id(carried) or nil
-	if not (carried_id and alife_object(carried_id)) then
-		return false, "item_create_failed"
-	end
-	if not release_object(document) then
-		release_object(carried)
-		return false, "document_release_failed"
-	end
 	local box = alife_object(quest.document_container_id)
-	if box then
-		release_object(box)
+	if not box then return false, "document_container_missing" end
+	local lookup = level and level.object_by_id
+	local live_box = type(lookup) == "function" and lookup(quest.document_container_id)
+	local live_doc = type(lookup) == "function" and lookup(quest.document_id)
+	local carried_id
+	if box.online ~= false or document.online ~= false or live_box or live_doc then
+		local live_commander = type(lookup) == "function" and lookup(commander_id)
+		if box.online ~= true or document.online ~= true or not (live_box and live_doc and live_commander) then
+			return false, "document_transfer_pending"
+		end
+		-- Transfer the real online document; deleting/recreating it invalidates loot callbacks.
+		local ok, result = pcall(live_box.transfer_item, live_box, live_doc, live_commander)
+		if not ok or result == false then return false, "document_transfer_failed" end
+		carried_id = quest.document_id
+	else
+		if type(alife_create_item) ~= "function" then return false, "item_create_missing" end
+		local created_ok, carried = pcall(alife_create_item, DEFAULT_DOCUMENT_SECTION, commander)
+		carried_id = created_ok and object_id(carried) or nil
+		if not (carried_id and alife_object(carried_id)) then return false, "item_create_failed" end
+		if not release_object(document) then
+			defer_document_cleanup(carried_id, commander_id)
+			return false, "document_release_failed"
+		end
 	end
+	defer_document_cleanup(quest.document_container_id, 65535, quest.document_id)
 	quest.document_id = nil
 	quest.document_container_id = nil
 	quest.document_carried_id = carried_id
@@ -850,7 +866,7 @@ local function spawn_document(target_smart)
 	end
 	local doc_ok, doc = pcall(alife_create_item, DEFAULT_DOCUMENT_SECTION, box)
 	if not (doc_ok and doc and object_id(doc)) then
-		release_object(box)
+		defer_document_cleanup(object_id(box), 65535)
 		return nil, nil
 	end
 	return object_id(box), object_id(doc)
@@ -1573,6 +1589,7 @@ local function document_pickup_online(quest, squad)
 	end
 	local collected, reason = collect_document_to_commander(quest, squad)
 	if not collected then
+		if reason == "document_transfer_pending" then return true end
 		return terminal(quest, STATUS_FAILED, reason or "document_transfer_failed", true)
 	end
 	quest.document_pickup_started = nil
@@ -1592,6 +1609,7 @@ local function update_objective(quest, squad)
 		end
 		local collected, reason = collect_document_to_commander(quest, squad)
 		if not collected then
+			if reason == "document_transfer_pending" then return true end
 			return terminal(quest, STATUS_FAILED, reason or "document_transfer_failed", true)
 		end
 		debug_event("document_pickup_offline", squad, quest, reason)
@@ -2121,6 +2139,33 @@ local function revise_giver(giver)
 	end
 end
 
+local function revision_error(err)
+	return debug and type(debug.traceback) == "function" and debug.traceback(tostring(err), 2) or tostring(err)
+end
+
+local function revision_clock()
+	if type(time_global_async) == "function" then return time_global_async() end
+	return os and os.clock and os.clock() * 1000 or 0
+end
+
+local function reset_revision()
+	revision_queue, revision_failed = {}, {}
+	revision_day, revision_retry_tg, next_revision_tg = nil, 0, 0
+end
+
+local function revise_smart(smart_id)
+	local smart = alife_object(smart_id)
+	if not smart_is_valid(smart) then return end
+	local profile = profile_for_smart(smart)
+	if not profile then return end
+	local provider = provider_for_smart(smart)
+	if object_alive(provider) then
+		revise_giver({ smart = smart, provider = provider, profile = profile })
+	else
+		debug_log("~ ZHOPA2 npc quest | stage [giver_skipped] smart [%s] reason [no_longer_live]", tostring(smart_id))
+	end
+end
+
 local function start_revision(day)
 	if revision_day == day and #revision_queue > 0 then
 		return
@@ -2130,8 +2175,11 @@ local function start_revision(day)
 	if eco and type(eco.clear_missing_live_trade_provider_cache) == "function" then
 		pcall(eco.clear_missing_live_trade_provider_cache)
 	end
-	revision_queue = all_givers(nil, "daily_revision")
-	debug_log("~ ZHOPA2 npc quest | stage [revision_started] day [%s] givers [%s]", tostring(day), tostring(#revision_queue))
+	-- Keep only IDs between ticks; online provider objects may disappear during fast travel.
+	local smarts, queued = all_provider_smarts(), {}
+	for i = 1, #smarts do queued[#queued + 1] = object_id(smarts[i]) end
+	revision_queue, revision_failed, revision_retry_tg = queued, {}, 0
+	debug_log("~ ZHOPA2 npc quest | stage [revision_started] day [%s] smarts [%s]", tostring(day), tostring(#revision_queue))
 end
 
 local function process_revision()
@@ -2143,18 +2191,26 @@ local function process_revision()
 	if day > qstate.last_revision_day and #revision_queue == 0 then
 		start_revision(day)
 	end
+	if now_ms() < revision_retry_tg then return end
+	local started = revision_clock()
 	local processed = 0
 	while #revision_queue > 0 and processed < REVISION_GIVERS_PER_TICK do
-		local giver = table.remove(revision_queue, 1)
-		if giver and smart_is_valid(giver.smart) and object_alive(giver.provider) then
-			revise_giver(giver)
-		elseif giver then
-			debug_log("~ ZHOPA2 npc quest | stage [giver_skipped] giver [%s:%s] reason [no_longer_live]", tostring(object_name(giver.smart) or "-"), tostring(object_id(giver.smart) or "-"))
+		local smart_id = table.remove(revision_queue, 1)
+		local ok, err = xpcall(function() revise_smart(smart_id) end, revision_error)
+		if not ok then
+			revision_failed[#revision_failed + 1] = smart_id
+			pcall(debug_log, "~ ZHOPA2 npc quest | stage [revision_error] smart [%s] detail [%s]", tostring(smart_id), tostring(err))
 		end
 		processed = processed + 1
+		if revision_clock() - started >= REVISION_BUDGET_MS then break end
 	end
-	if revision_day == day and #revision_queue == 0 then
-		qstate.last_revision_day = day
+	if #revision_queue == 0 then
+		if #revision_failed > 0 then
+			revision_queue, revision_failed = revision_failed, {}
+			revision_retry_tg = now_ms() + REVISION_RETRY_MS
+		elseif revision_day == day then
+			qstate.last_revision_day = day
+		end
 	end
 end
 
@@ -2199,21 +2255,16 @@ end
 
 local function load_state(m_data)
 	state = normalize_state(type(m_data) == "table" and m_data[STATE_KEY] or nil)
-	revision_queue = {}
-	revision_day = nil
+	reset_revision()
 	pending_reconcile = true
-end
-
-local function actor_on_first_update()
-	pending_reconcile = true
-	process_revision()
 end
 
 local function on_game_load()
+	reset_revision()
 	pending_reconcile = true
 end
 
-local function actor_on_update()
+local function update_quests()
 	local now = now_ms()
 	if now < next_revision_tg then
 		return
@@ -2225,7 +2276,22 @@ local function actor_on_update()
 	process_revision()
 end
 
+local function actor_on_update()
+	local ok, err = xpcall(update_quests, revision_error)
+	if not ok then
+		next_revision_tg = now_ms() + REVISION_RETRY_MS
+		pcall(debug_log, "~ ZHOPA2 npc quest | stage [update_error] detail [%s]", tostring(err))
+	end
+end
+
+local function actor_on_first_update()
+	pending_reconcile = true
+	next_revision_tg = 0
+	actor_on_update()
+end
+
 local function on_option_change()
+	reset_revision()
 	if M.enabled() then
 		quest_state().last_revision_day = -1
 		return
@@ -2292,9 +2358,7 @@ function M.on_master_disable()
 	end
 	callbacks_registered = false
 	pending_reconcile = false
-	revision_queue = {}
-	revision_day = nil
-	next_revision_tg = 0
+	reset_revision()
 	state = new_state()
 	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
 		local ok, save = pcall(alife_storage_manager.get_state)
