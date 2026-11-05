@@ -62,6 +62,7 @@ SCRIPT_ROLES = {
     "zhopa2_task_scoring.script": "bounded task-target scoring, runtime level geometry, faction-presence snapshots, and configurable lore preferences",
     "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, fallback rules, and server-side revenge relations",
     "zhopa2_topology.script": "level-changer topology rebuilt through ALife iteration, neighbor levels, and route helpers",
+    "zhopa2_level_hop.script": "instant level-border crossing: cross-level edges read from the all.spawn game graph, border hop through TeleportSquad, and Debug HUD diagnostics of every hop and crossing",
 }
 
 

@@ -10,9 +10,9 @@ Regenerate it with:
 python tools/generate_function_reference.py
 ```
 
-- Runtime script functions: 2437
+- Runtime script functions: 2480
 - Diagnostic script functions: 529
-- Total documented named functions: 2966
+- Total documented named functions: 3009
 
 ## Reading Notes
 
@@ -37,6 +37,7 @@ python tools/generate_function_reference.py
 | Runtime | `gamedata/scripts/zhopa2_economy.script` | 308 | online trade and quest-service customer-job preparation, offline trade execution, pricing, virtual cargo/money, queues, routing, and service-job recovery. |
 | Runtime | `gamedata/scripts/zhopa2_guard_refill.script` | 36 | defensive-post catalog, vacancy queue, live alias-owner protection, suspended/resumed reservations, and native job pinning. |
 | Runtime | `gamedata/scripts/zhopa2_index.script` | 142 | SIMBOARD bucket access with per-frame squad IDs and fresh ALife resolution, plus artifact, ownership and trade-smart state. |
+| Runtime | `gamedata/scripts/zhopa2_level_hop.script` | 41 | instant level-border crossing: cross-level edges read from the all.spawn game graph, border hop through TeleportSquad, and Debug HUD diagnostics of every hop and crossing. |
 | Runtime | `gamedata/scripts/zhopa2_loot.script` | 134 | shared WTF/AH quest-artifact protection, ARTEFACT targeted pickup and inventory recovery, offline virtual loot accounting, artifact cargo and death materialization. |
 | Runtime | `gamedata/scripts/zhopa2_mcm.script` | 5 | MCM menu registration and settings bridge. |
 | Runtime | `gamedata/scripts/zhopa2_mcm_schema.script` | 2 | MCM option schema, defaults, paid-travel controls, and per-faction task panels. |
@@ -49,7 +50,7 @@ python tools/generate_function_reference.py
 | Runtime | `gamedata/scripts/zhopa2_runtime_patches.script` | 261 | chain-friendly runtime patching of vanilla/pack scripts. |
 | Runtime | `gamedata/scripts/zhopa2_service_fillers.script` | 105 | bounded vacancy queue, service presence detection, shared live job-owner guards, safe waiting/resumption, recruitment scheduling, and legacy filler migration. |
 | Runtime | `gamedata/scripts/zhopa2_service_quests.script` | 14 | original workplace task identity, simulation task fallback, turn-in and cancellation. |
-| Runtime | `gamedata/scripts/zhopa2_service_recruitment.script` | 68 | existing-NPC transfer, service/guard records, isolated Anthology trade predecessor, rollback, save/load restoration and diagnostics. |
+| Runtime | `gamedata/scripts/zhopa2_service_recruitment.script` | 70 | existing-NPC transfer, service/guard records, isolated Anthology trade predecessor, rollback, save/load restoration and diagnostics. |
 | Runtime | `gamedata/scripts/zhopa2_smart_service_slot_doctor.script` | 101 | bounded observation and vanilla smart-job reselection for stalled trade/technician customer jobs. |
 | Runtime | `gamedata/scripts/zhopa2_squad_dialogue.script` | 117 | commander activity dialogue, paid travel, actor-ready owned-fade cleanup, arrival safety, time advancement and same/cross-level recovery. |
 | Runtime | `gamedata/scripts/zhopa2_story_north_migration.script` | 85 | story-gated northern migration task selection and recovery. |
@@ -369,25 +370,25 @@ Role: master enable/disable lifecycle, cleanup coordination, and startup bridge 
 
 | Line | Function | Kind | Parameters | Description |
 | ---: | --- | --- | --- | --- |
-| 31 | `safe_require` | local helper | `name` | Validates safety gates and controlled fallback conditions. |
-| 42 | `configured_enabled` | local helper | `` | Reads or normalizes configuration data for the bootstrap subsystem. |
-| 53 | `log_line` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 61 | `notify` | local helper | `text_id` | Supports bootstrap subsystem behavior. |
-| 79 | `unregister_first_update` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
-| 86 | `register_first_update` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
-| 94 | `stop_modules` | local helper | `reason` | Supports bootstrap subsystem behavior. |
-| 117 | `M.state` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
-| 124 | `M.is_enabled` | module export | `` | Supports bootstrap subsystem behavior. |
-| 129 | `M.is_disabled` | module export | `` | Supports bootstrap subsystem behavior. |
-| 133 | `M.disable` | module export | `reason` | Supports bootstrap subsystem behavior. |
-| 157 | `M.enable` | module export | `reason` | Supports bootstrap subsystem behavior. |
-| 189 | `M._actor_on_first_update` | module export | `` | Supports bootstrap subsystem behavior. |
-| 197 | `M._on_game_load` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
-| 207 | `M._on_option_change` | module export | `` | Supports bootstrap subsystem behavior. |
-| 218 | `register_lifecycle_callback` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
-| 231 | `M.on_game_start` | module export | `` | Runtime hook for bootstrap lifecycle integration. |
-| 249 | `on_game_start` | script hook/global | `` | Runtime hook for bootstrap lifecycle integration. |
-| 253 | `_G.zhopa2_master_enabled` | assigned wrapper | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 32 | `safe_require` | local helper | `name` | Validates safety gates and controlled fallback conditions. |
+| 43 | `configured_enabled` | local helper | `` | Reads or normalizes configuration data for the bootstrap subsystem. |
+| 54 | `log_line` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 62 | `notify` | local helper | `text_id` | Supports bootstrap subsystem behavior. |
+| 80 | `unregister_first_update` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
+| 87 | `register_first_update` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
+| 95 | `stop_modules` | local helper | `reason` | Supports bootstrap subsystem behavior. |
+| 118 | `M.state` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 125 | `M.is_enabled` | module export | `` | Supports bootstrap subsystem behavior. |
+| 130 | `M.is_disabled` | module export | `` | Supports bootstrap subsystem behavior. |
+| 134 | `M.disable` | module export | `reason` | Supports bootstrap subsystem behavior. |
+| 158 | `M.enable` | module export | `reason` | Supports bootstrap subsystem behavior. |
+| 190 | `M._actor_on_first_update` | module export | `` | Supports bootstrap subsystem behavior. |
+| 198 | `M._on_game_load` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 208 | `M._on_option_change` | module export | `` | Supports bootstrap subsystem behavior. |
+| 219 | `register_lifecycle_callback` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
+| 232 | `M.on_game_start` | module export | `` | Runtime hook for bootstrap lifecycle integration. |
+| 250 | `on_game_start` | script hook/global | `` | Runtime hook for bootstrap lifecycle integration. |
+| 254 | `_G.zhopa2_master_enabled` | assigned wrapper | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
 
 ### `gamedata/scripts/zhopa2_cfg.script`
 
@@ -395,37 +396,37 @@ Role: configuration, MCM defaults, faction aliases, and blacklist access.
 
 | Line | Function | Kind | Parameters | Description |
 | ---: | --- | --- | --- | --- |
-| 132 | `section_faction` | local helper | `section` | Supports cfg subsystem behavior. |
-| 140 | `squad_section_name` | local helper | `squad` | Resolves a safe section name for runtime classification. |
-| 158 | `squad_faction` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 169 | `is_monster_or_zombied` | local helper | `squad` | Handles story-gated squad events, conversion, migration, or recovery. |
-| 185 | `bool_from_value` | local helper | `v, default` | Supports cfg subsystem behavior. |
-| 196 | `mcm_path_for_key` | local helper | `key` | Supports cfg subsystem behavior. |
-| 208 | `read_mcm` | local helper | `key` | Supports cfg subsystem behavior. |
-| 226 | `read_ltx` | local helper | `key, default` | Supports cfg subsystem behavior. |
-| 240 | `get` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
-| 253 | `get_bool` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
-| 257 | `get_num` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
-| 261 | `get_string` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
-| 266 | `get_faction_alias` | script hook/global | `faction` | Supports cfg subsystem behavior. |
-| 274 | `faction_task_key` | local helper | `squad, key` | Supports cfg subsystem behavior. |
-| 289 | `squad_task_enabled` | script hook/global | `squad, key, default` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 297 | `squad_task_weight` | script hook/global | `squad, key, default` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 305 | `faction_task_settings_enabled` | script hook/global | `` | Reads or normalizes configuration data for the cfg subsystem. |
-| 309 | `reset_blacklist_cache` | local helper | `` | Validates safety gates and controlled fallback conditions. |
-| 314 | `cache_key` | local helper | `section, key` | Supports cfg subsystem behavior. |
-| 318 | `section_value` | local helper | `section, key` | Supports cfg subsystem behavior. |
-| 332 | `list_set` | local helper | `value` | Supports cfg subsystem behavior. |
-| 352 | `section_set` | local helper | `section, key` | Supports cfg subsystem behavior. |
-| 363 | `section_has` | local helper | `section, key, value` | Supports cfg subsystem behavior. |
-| 374 | `section_is_true` | local helper | `section, key` | Supports cfg subsystem behavior. |
-| 379 | `smart_name_for_blacklist` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 400 | `is_global_level_blacklisted` | script hook/global | `level_name` | Validates safety gates and controlled fallback conditions. |
-| 404 | `is_level_blacklisted_for_squad` | script hook/global | `squad, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 427 | `is_smart_blacklisted_for_squad` | script hook/global | `squad, smart, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 459 | `is_trade_smart_blacklisted` | script hook/global | `smart, level_name` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 474 | `is_trade_provider_section_blacklisted` | script hook/global | `section` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 480 | `reload` | script hook/global | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 134 | `section_faction` | local helper | `section` | Supports cfg subsystem behavior. |
+| 142 | `squad_section_name` | local helper | `squad` | Resolves a safe section name for runtime classification. |
+| 160 | `squad_faction` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 171 | `is_monster_or_zombied` | local helper | `squad` | Handles story-gated squad events, conversion, migration, or recovery. |
+| 187 | `bool_from_value` | local helper | `v, default` | Supports cfg subsystem behavior. |
+| 198 | `mcm_path_for_key` | local helper | `key` | Supports cfg subsystem behavior. |
+| 210 | `read_mcm` | local helper | `key` | Supports cfg subsystem behavior. |
+| 228 | `read_ltx` | local helper | `key, default` | Supports cfg subsystem behavior. |
+| 242 | `get` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
+| 255 | `get_bool` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
+| 259 | `get_num` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
+| 263 | `get_string` | script hook/global | `key, default` | Supports cfg subsystem behavior. |
+| 268 | `get_faction_alias` | script hook/global | `faction` | Supports cfg subsystem behavior. |
+| 276 | `faction_task_key` | local helper | `squad, key` | Supports cfg subsystem behavior. |
+| 291 | `squad_task_enabled` | script hook/global | `squad, key, default` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 299 | `squad_task_weight` | script hook/global | `squad, key, default` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 307 | `faction_task_settings_enabled` | script hook/global | `` | Reads or normalizes configuration data for the cfg subsystem. |
+| 311 | `reset_blacklist_cache` | local helper | `` | Validates safety gates and controlled fallback conditions. |
+| 316 | `cache_key` | local helper | `section, key` | Supports cfg subsystem behavior. |
+| 320 | `section_value` | local helper | `section, key` | Supports cfg subsystem behavior. |
+| 334 | `list_set` | local helper | `value` | Supports cfg subsystem behavior. |
+| 354 | `section_set` | local helper | `section, key` | Supports cfg subsystem behavior. |
+| 365 | `section_has` | local helper | `section, key, value` | Supports cfg subsystem behavior. |
+| 376 | `section_is_true` | local helper | `section, key` | Supports cfg subsystem behavior. |
+| 381 | `smart_name_for_blacklist` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 402 | `is_global_level_blacklisted` | script hook/global | `level_name` | Validates safety gates and controlled fallback conditions. |
+| 406 | `is_level_blacklisted_for_squad` | script hook/global | `squad, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 429 | `is_smart_blacklisted_for_squad` | script hook/global | `squad, smart, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 461 | `is_trade_smart_blacklisted` | script hook/global | `smart, level_name` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 476 | `is_trade_provider_section_blacklisted` | script hook/global | `section` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 482 | `reload` | script hook/global | `` | Reads, writes, clears, or migrates serializable runtime state. |
 
 ### `gamedata/scripts/zhopa2_debug_hud.script`
 
@@ -969,6 +970,54 @@ Role: SIMBOARD bucket access with per-frame squad IDs and fresh ALife resolution
 | 2649 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
 | 2692 | `on_game_start` | script hook/global | `` | Runtime hook for index lifecycle integration. |
 
+### `gamedata/scripts/zhopa2_level_hop.script`
+
+Role: instant level-border crossing: cross-level edges read from the all.spawn game graph, border hop through TeleportSquad, and Debug HUD diagnostics of every hop and crossing.
+
+| Line | Function | Kind | Parameters | Description |
+| ---: | --- | --- | --- | --- |
+| 53 | `safe_require` | local helper | `name` | Validates safety gates and controlled fallback conditions. |
+| 64 | `cfg_bool` | local helper | `key, default` | Reads a boolean ZHOPA setting with a safe default fallback. |
+| 75 | `debug_enabled` | local helper | `` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 79 | `dbg` | local helper | `fmt, ...` | Supports level hop subsystem behavior. |
+| 85 | `tag` | local helper | `value` | Supports level hop subsystem behavior. |
+| 92 | `squad_label` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 99 | `lname` | local helper | `level_id` | Formats names or display text for diagnostics and UI output. |
+| 115 | `level_of` | local helper | `vertex` | Resolves level, graph, route, distance, or position data. |
+| 129 | `u16_at` | local helper | `s, i` | Supports level hop subsystem behavior. |
+| 134 | `u32_at` | local helper | `s, i` | Supports level hop subsystem behavior. |
+| 139 | `f32_at` | local helper | `s, i` | Supports level hop subsystem behavior. |
+| 155 | `build_level_distances` | local helper | `` | Resolves level, graph, route, distance, or position data. |
+| 189 | `apply_edges` | local helper | `flat, vcount` | Supports level hop subsystem behavior. |
+| 226 | `release_file` | local helper | `` | Clears transient state, reservations, or stale runtime references. |
+| 236 | `fail` | local helper | `reason, detail` | Supports level hop subsystem behavior. |
+| 246 | `find_graph_chunk` | local helper | `f` | Supports level hop subsystem behavior. |
+| 270 | `begin_load` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 327 | `validate_samples` | local helper | `` | Validates safety gates and controlled fallback conditions. |
+| 340 | `finish_load` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 356 | `read_vertices` | local helper | `` | Supports level hop subsystem behavior. |
+| 392 | `read_edges` | local helper | `` | Supports level hop subsystem behavior. |
+| 435 | `load_step` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 452 | `use_saved_graph` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 475 | `save_state` | script hook/global | `m_data` | Runtime hook for level hop lifecycle integration. |
+| 486 | `load_state` | script hook/global | `m_data` | Runtime hook for level hop lifecycle integration. |
+| 492 | `pump` | local helper | `` | Supports level hop subsystem behavior. |
+| 522 | `skip` | local helper | `squad, reason, detail, target_id` | Supports level hop subsystem behavior. |
+| 536 | `is_mutant` | local helper | `squad` | Supports level hop subsystem behavior. |
+| 541 | `hop_switch_on` | local helper | `squad` | Supports level hop subsystem behavior. |
+| 549 | `squad_enabled` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 558 | `sweep_pending` | local helper | `` | Supports level hop subsystem behavior. |
+| 581 | `M.try_hop` | module export | `squad, target_id` | Supports level hop subsystem behavior. |
+| 670 | `edge_known` | local helper | `from, to` | Calculates time, cooldown, or tick-throttling values. |
+| 686 | `squad_on_after_game_vertex_change` | local helper | `squad, old_vertex, new_vertex, level_changed` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 746 | `M.is_ready` | module export | `` | Supports level hop subsystem behavior. |
+| 751 | `M.audit` | module export | `` | Supports level hop subsystem behavior. |
+| 763 | `unregister_callbacks` | local helper | `` | Maintains indexed runtime state by adding or removing entries. |
+| 772 | `reset_state` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 779 | `M.on_game_start` | module export | `` | Runtime hook for level hop lifecycle integration. |
+| 795 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 809 | `on_game_start` | script hook/global | `` | Runtime hook for level hop lifecycle integration. |
+
 ### `gamedata/scripts/zhopa2_loot.script`
 
 Role: shared WTF/AH quest-artifact protection, ARTEFACT targeted pickup and inventory recovery, offline virtual loot accounting, artifact cargo and death materialization.
@@ -1128,8 +1177,8 @@ Role: MCM option schema, defaults, paid-travel controls, and per-faction task pa
 
 | Line | Function | Kind | Parameters | Description |
 | ---: | --- | --- | --- | --- |
-| 199 | `get_path` | script hook/global | `key` | Supports mcm schema subsystem behavior. |
-| 203 | `get_option` | script hook/global | `key` | Supports mcm schema subsystem behavior. |
+| 202 | `get_path` | script hook/global | `key` | Supports mcm schema subsystem behavior. |
+| 206 | `get_option` | script hook/global | `key` | Supports mcm schema subsystem behavior. |
 
 ### `gamedata/scripts/zhopa2_memory.script`
 
@@ -1601,267 +1650,267 @@ Role: chain-friendly runtime patching of vanilla/pack scripts.
 
 | Line | Function | Kind | Parameters | Description |
 | ---: | --- | --- | --- | --- |
-| 64 | `safe_require` | local helper | `name` | Validates safety gates and controlled fallback conditions. |
-| 75 | `M.task_scoring` | module export | `` | Supports runtime patches subsystem behavior. |
-| 79 | `M.notify_task_scoring` | module export | `event, ...` | Supports runtime patches subsystem behavior. |
-| 86 | `M.master_enabled` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 100 | `class_candidate` | local helper | `candidate, required_method` | Builds, scores, or selects candidates for weighted simulation decisions. |
-| 114 | `script_class` | local helper | `script_name, class_name, required_method` | Supports runtime patches subsystem behavior. |
-| 150 | `object_id` | local helper | `obj` | Extracts a stable numeric id from supported object/id values. |
-| 168 | `server_object` | local helper | `id` | Safely resolves an ALife/server-side object or runtime reference. |
-| 189 | `simboard_squad_object` | local helper | `id, stored` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 197 | `M.zhopa2_online_object_by_id` | module export | `id` | Resolves an online game object through db.storage or level lookups. |
-| 213 | `runtime_object_alive` | local helper | `obj` | Supports runtime patches subsystem behavior. |
-| 221 | `runtime_object_dead` | local helper | `obj` | Supports runtime patches subsystem behavior. |
-| 229 | `M.zhopa2_first_squad_member_id` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 245 | `M.zhopa2_first_online_squad_member` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 250 | `M.zhopa2_object_location` | module export | `obj` | Supports runtime patches subsystem behavior. |
-| 287 | `M.zhopa2_direct_hunt_target_anchor` | module export | `target` | Handles hostile target selection, revenge state, or pursuit behavior. |
-| 299 | `direct_hunt_target_signature` | local helper | `target` | Handles hostile target selection, revenge state, or pursuit behavior. |
-| 318 | `cfg_bool` | local helper | `key, default` | Reads a boolean ZHOPA setting with a safe default fallback. |
-| 326 | `cfg_num` | local helper | `key, default` | Reads a numeric ZHOPA setting with a safe default fallback. |
-| 334 | `object_level_name` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
-| 349 | `global_level_blacklisted` | local helper | `level_name` | Validates safety gates and controlled fallback conditions. |
-| 359 | `zhopa2_debug_printf` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 365 | `zhopa2_valid_script_target_id` | local helper | `target_id` | Validates safety gates and controlled fallback conditions. |
-| 386 | `runtime_time_ms` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 390 | `runtime_log` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 402 | `runtime_item_key` | local helper | `stage, item` | Supports runtime patches subsystem behavior. |
-| 406 | `mark_runtime_item` | local helper | `stage, item, ok, reason, detail` | Supports runtime patches subsystem behavior. |
-| 426 | `runtime_item_ready` | local helper | `stage, item` | Supports runtime patches subsystem behavior. |
-| 430 | `runtime_error_enabled` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 434 | `runtime_mark_context` | local helper | `` | Formats names or display text for diagnostics and UI output. |
-| 457 | `runtime_missing_item` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 478 | `required_script_class` | local helper | `script_name, class_name, surface, required_method` | Supports runtime patches subsystem behavior. |
-| 489 | `start_zhopa_module` | local helper | `name` | Supports runtime patches subsystem behavior. |
-| 520 | `M.ensure_zhopa_modules` | module export | `` | Supports runtime patches subsystem behavior. |
-| 531 | `upvalue` | local helper | `fn, name` | Supports runtime patches subsystem behavior. |
-| 547 | `set_upvalue` | local helper | `fn, name, value` | Supports runtime patches subsystem behavior. |
-| 564 | `M.function_chain_contains` | module export | `fn, target, depth, seen` | Supports runtime patches subsystem behavior. |
-| 590 | `M.patch_method` | module export | `owner, method, patch_id, wrapper_factory` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 625 | `wrapper` | local helper | `...` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 639 | `install_class_method` | local helper | `cls, name, fn` | Supports runtime patches subsystem behavior. |
-| 663 | `M.restore_runtime_patches` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 704 | `patch_required_method` | local helper | `owner, method, patch_id, wrapper_factory, surface` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 730 | `game_time` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 734 | `elapsed` | local helper | `start_time` | Supports runtime patches subsystem behavior. |
-| 742 | `perception` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 746 | `memory` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
-| 750 | `tasks` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 754 | `zhopa2_surge_active` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 759 | `index` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 763 | `cache_squad_section_name` | local helper | `squad` | Resolves a safe section name for runtime classification. |
-| 781 | `object_debug_name` | local helper | `obj` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 800 | `cache_squad_member_count` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 818 | `squad_player_id` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 839 | `is_monster_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 859 | `plain_sim_stalker_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 874 | `service_squad` | local helper | `squad` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 885 | `managed_stalker_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 892 | `task_invalid_for_monster` | local helper | `squad, task` | Validates safety gates and controlled fallback conditions. |
-| 901 | `is_night` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 906 | `write_string` | local helper | `packet, value` | Supports runtime patches subsystem behavior. |
-| 910 | `read_string` | local helper | `packet` | Supports runtime patches subsystem behavior. |
-| 918 | `unpack_ids` | local helper | `value` | Supports runtime patches subsystem behavior. |
-| 935 | `squad_methods.zhopa2_cleanup_debug` | assigned wrapper | `self` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 942 | `squad_methods.zhopa2_release_task_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 949 | `squad_methods.zhopa2_release_revenge_hostility` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 956 | `squad_methods.zhopa2_unregister_base_camping_registry` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 963 | `squad_methods.zhopa2_sync_base_camping_registry` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 977 | `squad_methods.zhopa2_is_managed_scripted_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 981 | `squad_methods.zhopa2_actor_quest_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1007 | `squad_methods.zhopa2_reset_state` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1036 | `squad_methods.zhopa2_task_requires_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1042 | `squad_methods.zhopa2_sync_task_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1060 | `squad_methods.zhopa2_clear_task` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1132 | `squad_methods.zhopa2_reconcile_mutant_cycle` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1181 | `squad_methods.zhopa2_sanitize_task_owner` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1189 | `squad_methods.zhopa2_global_level_blacklisted` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1194 | `squad_methods.zhopa2_purge_global_level_blacklist` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1212 | `squad_methods.zhopa2_can_manage` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1264 | `squad_methods.zhopa2_assign_task` | assigned wrapper | `self, task, target_id, duration_sec, reason, patrol` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1342 | `squad_methods.zhopa2_assign_rest` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1347 | `squad_methods.zhopa2_reached_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1354 | `squad_methods.zhopa2_patrol_next` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1373 | `squad_methods.zhopa2_task_completed` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1413 | `squad_methods.zhopa2_target_is_alive` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1440 | `squad_methods.zhopa2_update_task` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1461 | `squad_methods.zhopa2_get_script_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1508 | `squad_methods.zhopa2_prepare_hunt_target` | assigned wrapper | `self, script_target_id` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1554 | `squad_methods.zhopa2_apply_revenge_hostility` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1562 | `squad_methods.zhopa2_state_write` | assigned wrapper | `self, packet` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1578 | `squad_methods.zhopa2_state_read` | assigned wrapper | `self, packet` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1611 | `squad_methods.zhopa2_debug_offline_inventory_update_dump` | assigned wrapper | `self` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 1615 | `install_squad_methods` | local helper | `cls` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1621 | `wrapped_returns` | local helper | `original, self, ...` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 1626 | `retrofit_existing_squads` | local helper | `` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1646 | `finish_actor_quest_check` | local helper | `previous, ok, ...` | Supports runtime patches subsystem behavior. |
-| 1654 | `actor_quest_check_wrapper` | local helper | `original` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 1662 | `M.patch_actor_quest_targets` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 1683 | `M.patch_sim_squad_scripted` | module export | `` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1849 | `M.patch_axr_companions` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 1856 | `squad_from_npc` | local helper | `npc` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1864 | `online_npc_id` | local helper | `npc` | Supports runtime patches subsystem behavior. |
-| 1869 | `vanilla_guide_complete` | local helper | `npc` | Supports runtime patches subsystem behavior. |
-| 1892 | `pda_guide_complete` | local helper | `npc` | Supports runtime patches subsystem behavior. |
-| 1914 | `mark_post_guide_rest` | local helper | `npc, reason, target_id` | Supports runtime patches subsystem behavior. |
-| 1935 | `maybe_mark` | local helper | `npc` | Supports runtime patches subsystem behavior. |
-| 1960 | `obj_level` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
-| 1975 | `prop_value` | local helper | `props, key` | Supports runtime patches subsystem behavior. |
-| 1979 | `smart_is_base` | local helper | `smart, props` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 1993 | `smart_kind_flags` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2019 | `level_bucket` | local helper | `root, level_name` | Resolves level, graph, route, distance, or position data. |
-| 2027 | `kind_bucket` | local helper | `root, level_name, kind` | Supports runtime patches subsystem behavior. |
-| 2036 | `trim` | local helper | `value` | Supports runtime patches subsystem behavior. |
-| 2043 | `lower` | local helper | `value` | Supports runtime patches subsystem behavior. |
-| 2047 | `contains` | local helper | `haystack, needle` | Supports runtime patches subsystem behavior. |
-| 2051 | `ini_string` | local helper | `ini, section, key` | Supports runtime patches subsystem behavior. |
-| 2065 | `ini_section_exists` | local helper | `ini, section` | Supports runtime patches subsystem behavior. |
-| 2073 | `open_ini` | local helper | `path` | Supports runtime patches subsystem behavior. |
-| 2082 | `smart_cfg_filename` | local helper | `smart` | Reads or normalizes configuration data for the runtime patches subsystem. |
-| 2102 | `smart_ini` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2111 | `beh_ini` | local helper | `` | Supports runtime patches subsystem behavior. |
-| 2119 | `read_job_string` | local helper | `job_or_section, key, smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2132 | `M.trade_provider_section_blacklisted` | module export | `section` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2141 | `M.trade_smart_blacklisted` | module export | `smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2150 | `trade_job_flags` | local helper | `job, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2180 | `merge_trade_flags` | local helper | `flags, job_flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2191 | `scan_loaded_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2201 | `scan_exclusive_trade_job` | local helper | `smart, flags, work_field, work_path` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2212 | `scan_smart_ini_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2240 | `scan_beh_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2258 | `remove_smart_from_level_buckets` | local helper | `board, smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2285 | `board_methods.zhopa2_ensure_buckets` | assigned wrapper | `self` | Supports runtime patches subsystem behavior. |
-| 2301 | `board_methods.zhopa2_register_trade_smart` | assigned wrapper | `self, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2346 | `board_methods.zhopa2_unregister_trade_smart` | assigned wrapper | `self, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 2361 | `board_methods.zhopa2_register_smart` | assigned wrapper | `self, obj` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2389 | `board_methods.zhopa2_unregister_smart` | assigned wrapper | `self, obj` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2409 | `board_methods.zhopa2_update_squad_level` | assigned wrapper | `self, squad, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 2452 | `board_methods.zhopa2_unregister_squad` | assigned wrapper | `self, squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 2470 | `board_methods.zhopa2_rebuild_buckets` | assigned wrapper | `self` | Supports runtime patches subsystem behavior. |
-| 2500 | `install_board_methods` | local helper | `cls` | Supports runtime patches subsystem behavior. |
-| 2506 | `M.patch_sim_board` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 2581 | `service_fillers` | local helper | `` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 2585 | `service_job_fallback` | local helper | `npc_info, job, smart` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 2596 | `debug_service_job` | local helper | `smart, npc_info, job, source` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 2641 | `M.npc_storage_from_info` | module export | `npc_info` | Supports runtime patches subsystem behavior. |
-| 2646 | `M.has_targeted_gather_state` | module export | `npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 2653 | `live_targeted_gather_id` | local helper | `npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 2680 | `targeted_gather_blocks_job` | local helper | `smart, npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 2696 | `M.safe_section_name` | module export | `obj` | Resolves a safe section name for runtime classification. |
-| 2707 | `M.service_job_check_relevant` | module export | `npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 2720 | `try_service_fallback_job` | local helper | `smart, npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 2733 | `ensure_service_job` | local helper | `smart, npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 2744 | `refresh_job_capacity` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2777 | `M.patch_smart_terrain` | module export | `` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 2864 | `artifact_index` | local helper | `` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2868 | `register_artifact` | local helper | `artifact_id, zone, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2875 | `unregister_artifact` | local helper | `artifact_id, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2882 | `unregister_zone_artifacts` | local helper | `zone, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2889 | `register_anomaly_zone` | local helper | `zone, cfg_file, source` | Maintains indexed runtime state by adding or removing entries. |
-| 2896 | `virtual_artifacts_for_zone` | local helper | `zone` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2905 | `materialize_virtual_artifact` | local helper | `virtual_id, real_id, zone, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2912 | `zone_key` | local helper | `zone` | Supports runtime patches subsystem behavior. |
-| 2918 | `M.zhopa2_sync_existing_anomaly_zones` | module export | `source` | Supports runtime patches subsystem behavior. |
-| 2953 | `zhopa2_materialize_virtual_artifact_online` | script hook/global | `virtual_id` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 2972 | `anomaly_spawn_artefact_section` | local helper | `self, section` | Resolves a safe section name for runtime classification. |
-| 2995 | `anomaly_materialize_virtual_artifacts` | local helper | `self` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3010 | `M.patch_bind_anomaly_zone` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 3102 | `M.zhopa2_direct_hunt_live_location` | module export | `squad` | Handles hostile target selection, revenge state, or pursuit behavior. |
-| 3126 | `M.zhopa2_direct_hunt_commander_execute` | module export | `self, squad` | Handles hostile target selection, revenge state, or pursuit behavior. |
-| 3161 | `M.patch_xr_reach_task` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 3179 | `task_run` | local helper | `squad` | Supports runtime patches subsystem behavior. |
-| 3187 | `direct_monster_update` | local helper | `self` | Supports runtime patches subsystem behavior. |
-| 3256 | `M.patch_bind_monster` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 3273 | `offline_loot_attacker_squad` | local helper | `killer` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3288 | `ignore_offline_loot_detail` | local helper | `detail` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3299 | `offline_loot_on_death` | local helper | `victim, killer` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3340 | `patch_death_class` | local helper | `cls, patch_name` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 3352 | `M.patch_sim_offline_combat` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 3375 | `gather_mod` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3379 | `module_member` | local helper | `mod, name` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 3383 | `export_script_function` | local helper | `mod, name, fn` | Supports runtime patches subsystem behavior. |
-| 3413 | `gather_original_func` | local helper | `mod, name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3429 | `gather_upvalue` | local helper | `name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3435 | `set_gather_upvalue` | local helper | `name, value` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3441 | `gather_items_table` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3450 | `zhopa2_loot_mod` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3454 | `M.zhopa2_has_targeted_item_requests` | module export | `` | Supports runtime patches subsystem behavior. |
-| 3459 | `zhopa2_can_take_section` | local helper | `npc, item, section` | Resolves a safe section name for runtime classification. |
-| 3467 | `zhopa2_targeted_item_ids` | local helper | `npc, include_blocked` | Supports runtime patches subsystem behavior. |
-| 3475 | `zhopa2_item_targeted_for_npc` | local helper | `npc, item_id, ids` | Supports runtime patches subsystem behavior. |
-| 3493 | `zhopa2_item_reserved_for_other` | local helper | `npc, item_id` | Supports runtime patches subsystem behavior. |
-| 3501 | `zhopa2_item_clsid` | local helper | `item` | Supports runtime patches subsystem behavior. |
-| 3509 | `zhopa2_record_loot` | local helper | `npc, item, reason` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3517 | `M.zhopa2_note_vanilla_artifact_pickup` | module export | `npc, artifact_id, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3526 | `zhopa2_item_reserved_by` | local helper | `item_id` | Supports runtime patches subsystem behavior. |
-| 3532 | `zhopa2_reservation_is_live` | local helper | `owner_id, item_id` | Supports runtime patches subsystem behavior. |
-| 3549 | `zhopa2_clear_artifact_scan` | local helper | `st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3559 | `zhopa2_reset_artifact_approach` | local helper | `st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3577 | `zhopa2_mark_approach_failed` | local helper | `st, item_id, reason` | Supports runtime patches subsystem behavior. |
-| 3585 | `zhopa2_clear_approach_failure` | local helper | `st, item_id` | Clears transient state, reservations, or stale runtime references. |
-| 3596 | `zhopa2_object_vertex` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
-| 3613 | `zhopa2_valid_accessible_vertex` | local helper | `npc, vid` | Validates safety gates and controlled fallback conditions. |
-| 3627 | `zhopa2_nearest_accessible_vertex` | local helper | `npc, pos` | Resolves level, graph, route, distance, or position data. |
-| 3649 | `zhopa2_vertex_in_direction` | local helper | `npc, from_vid, dir, dist` | Resolves level, graph, route, distance, or position data. |
-| 3662 | `zhopa2_select_artifact_approach` | local helper | `npc, item, item_pos, start_index, bad_vids` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3700 | `zhopa2_safe_look_position` | local helper | `npc, pos` | Validates safety gates and controlled fallback conditions. |
-| 3711 | `zhopa2_artifact_approach_reached` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3718 | `zhopa2_artifact_pickup_ready` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3726 | `M.zhopa2_artifact_vanilla_pickup_reachable` | module export | `npc, st, item` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3747 | `zhopa2_artifact_approach_progress_ok` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3770 | `zhopa2_prepare_next_artifact_approach` | local helper | `npc, st, item, item_pos, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3793 | `zhopa2_send_to_artifact_vertex` | local helper | `npc, st, invalid_reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3811 | `zhopa2_evaluator_camper_end_for_gather:__init` | assigned wrapper | `name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3813 | `zhopa2_evaluator_camper_end_for_gather:evaluate` | assigned wrapper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3834 | `zhopa2_apply_camper_end_override` | local helper | `manager` | Supports runtime patches subsystem behavior. |
-| 3848 | `zhopa2_add_gather_precondition` | local helper | `manager, action_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3865 | `zhopa2_job_action_key` | local helper | `root` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 3876 | `zhopa2_suspend_active_scheme_for_targeted_gather` | local helper | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3900 | `zhopa2_restore_active_scheme_after_targeted_gather` | local helper | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 3918 | `zhopa2_apply_job_preconditions` | local helper | `npc, st` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 3962 | `zhopa2_start_artifact_scan` | local helper | `npc, st, item, now` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3973 | `zhopa2_update_artifact_scan` | local helper | `npc, st, item, now` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 3994 | `zhopa2_begin_artifact_pickup` | local helper | `npc, st, item, now, force` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 4006 | `M.zhopa2_try_artifact_force_pickup` | module export | `npc, st, item, now, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 4022 | `zhopa2_reset_gather_state` | local helper | `st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4047 | `zhopa2_item_reservation_owner_impl` | local helper | `item_id` | Supports runtime patches subsystem behavior. |
-| 4057 | `zhopa2_prepare_targeted_gather_impl` | local helper | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4071 | `zhopa2_force_gather_item` | script hook/global | `npc, item_id, targeted` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4133 | `zhopa2_clear_gather_item` | script hook/global | `npc, item_id, reason` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4154 | `M.zhopa2_trade_context_active` | module export | `npc` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 4164 | `M.zhopa2_trade_gather_blocked` | module export | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4173 | `M.zhopa2_protected_gather_target` | module export | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4185 | `M.zhopa2_gather_item_active` | module export | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4213 | `zhopa2_gather_item_failure_reason_impl` | local helper | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4224 | `zhopa2_gather_item_debug_status_impl` | local helper | `npc, item_id` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 4262 | `zhopa2_gather_item_replacement` | local helper | `original` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4324 | `patch_gather_classes` | local helper | `mod` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4328 | `M.artifact_gather_find` | module export | `self, ...` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 4350 | `M.artifact_gather_evaluate` | module export | `self, ...` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
-| 4440 | `M.patch_xr_gather_items` | module export | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4459 | `M.patch_native_loot` | module export | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
-| 4465 | `M.patch_se_level_changer` | module export | `` | Resolves level, graph, route, distance, or position data. |
-| 4471 | `run_runtime_patch` | local helper | `patch` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 4540 | `M.clear_prefixed_table` | module export | `tbl` | Clears transient state, reservations, or stale runtime references. |
-| 4558 | `M.purge_squad_state` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 4579 | `M.purge_runtime_state` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
-| 4648 | `M.unregister_runtime_callbacks` | module export | `` | Maintains indexed runtime state by adding or removing entries. |
-| 4657 | `M.reset_runtime_ready_state` | module export | `` | Checks the shared runtime readiness barrier before context-dependent work. |
-| 4670 | `M.ensure_all` | module export | `reason` | Supports runtime patches subsystem behavior. |
-| 4685 | `M._on_game_load` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
-| 4698 | `M._actor_on_first_update` | module export | `` | Supports runtime patches subsystem behavior. |
-| 4711 | `M._actor_on_update` | module export | `` | Supports runtime patches subsystem behavior. |
-| 4720 | `M._runtime_recheck_due` | module export | `reason` | Supports runtime patches subsystem behavior. |
-| 4738 | `M.runtime_not_ready_reason` | module export | `` | Supports runtime patches subsystem behavior. |
-| 4743 | `M.runtime_ready` | module export | `reason` | Checks the shared runtime readiness barrier before context-dependent work. |
-| 4755 | `M.runtime_gate_ready` | module export | `reason` | Supports runtime patches subsystem behavior. |
-| 4759 | `M.on_game_start` | module export | `` | Runtime hook for runtime patches lifecycle integration. |
-| 4779 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 4787 | `M.on_master_enable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 4792 | `on_game_start` | script hook/global | `` | Runtime hook for runtime patches lifecycle integration. |
-| 4796 | `_G.zhopa2_runtime_ready` | assigned wrapper | `reason` | Checks the shared runtime readiness barrier before context-dependent work. |
-| 4800 | `_G.zhopa2_runtime_not_ready_reason` | assigned wrapper | `` | Supports runtime patches subsystem behavior. |
+| 65 | `safe_require` | local helper | `name` | Validates safety gates and controlled fallback conditions. |
+| 76 | `M.task_scoring` | module export | `` | Supports runtime patches subsystem behavior. |
+| 80 | `M.notify_task_scoring` | module export | `event, ...` | Supports runtime patches subsystem behavior. |
+| 87 | `M.master_enabled` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 101 | `class_candidate` | local helper | `candidate, required_method` | Builds, scores, or selects candidates for weighted simulation decisions. |
+| 115 | `script_class` | local helper | `script_name, class_name, required_method` | Supports runtime patches subsystem behavior. |
+| 151 | `object_id` | local helper | `obj` | Extracts a stable numeric id from supported object/id values. |
+| 169 | `server_object` | local helper | `id` | Safely resolves an ALife/server-side object or runtime reference. |
+| 190 | `simboard_squad_object` | local helper | `id, stored` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 198 | `M.zhopa2_online_object_by_id` | module export | `id` | Resolves an online game object through db.storage or level lookups. |
+| 214 | `runtime_object_alive` | local helper | `obj` | Supports runtime patches subsystem behavior. |
+| 222 | `runtime_object_dead` | local helper | `obj` | Supports runtime patches subsystem behavior. |
+| 230 | `M.zhopa2_first_squad_member_id` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 246 | `M.zhopa2_first_online_squad_member` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 251 | `M.zhopa2_object_location` | module export | `obj` | Supports runtime patches subsystem behavior. |
+| 288 | `M.zhopa2_direct_hunt_target_anchor` | module export | `target` | Handles hostile target selection, revenge state, or pursuit behavior. |
+| 300 | `direct_hunt_target_signature` | local helper | `target` | Handles hostile target selection, revenge state, or pursuit behavior. |
+| 319 | `cfg_bool` | local helper | `key, default` | Reads a boolean ZHOPA setting with a safe default fallback. |
+| 327 | `cfg_num` | local helper | `key, default` | Reads a numeric ZHOPA setting with a safe default fallback. |
+| 335 | `object_level_name` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
+| 350 | `global_level_blacklisted` | local helper | `level_name` | Validates safety gates and controlled fallback conditions. |
+| 360 | `zhopa2_debug_printf` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 366 | `zhopa2_valid_script_target_id` | local helper | `target_id` | Validates safety gates and controlled fallback conditions. |
+| 387 | `runtime_time_ms` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 391 | `runtime_log` | local helper | `fmt, ...` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 403 | `runtime_item_key` | local helper | `stage, item` | Supports runtime patches subsystem behavior. |
+| 407 | `mark_runtime_item` | local helper | `stage, item, ok, reason, detail` | Supports runtime patches subsystem behavior. |
+| 427 | `runtime_item_ready` | local helper | `stage, item` | Supports runtime patches subsystem behavior. |
+| 431 | `runtime_error_enabled` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 435 | `runtime_mark_context` | local helper | `` | Formats names or display text for diagnostics and UI output. |
+| 458 | `runtime_missing_item` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 479 | `required_script_class` | local helper | `script_name, class_name, surface, required_method` | Supports runtime patches subsystem behavior. |
+| 490 | `start_zhopa_module` | local helper | `name` | Supports runtime patches subsystem behavior. |
+| 521 | `M.ensure_zhopa_modules` | module export | `` | Supports runtime patches subsystem behavior. |
+| 532 | `upvalue` | local helper | `fn, name` | Supports runtime patches subsystem behavior. |
+| 548 | `set_upvalue` | local helper | `fn, name, value` | Supports runtime patches subsystem behavior. |
+| 565 | `M.function_chain_contains` | module export | `fn, target, depth, seen` | Supports runtime patches subsystem behavior. |
+| 591 | `M.patch_method` | module export | `owner, method, patch_id, wrapper_factory` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 626 | `wrapper` | local helper | `...` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 640 | `install_class_method` | local helper | `cls, name, fn` | Supports runtime patches subsystem behavior. |
+| 664 | `M.restore_runtime_patches` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 705 | `patch_required_method` | local helper | `owner, method, patch_id, wrapper_factory, surface` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 731 | `game_time` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 735 | `elapsed` | local helper | `start_time` | Supports runtime patches subsystem behavior. |
+| 743 | `perception` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 747 | `memory` | local helper | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 751 | `tasks` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 755 | `zhopa2_surge_active` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 760 | `index` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 764 | `cache_squad_section_name` | local helper | `squad` | Resolves a safe section name for runtime classification. |
+| 782 | `object_debug_name` | local helper | `obj` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 801 | `cache_squad_member_count` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 819 | `squad_player_id` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 840 | `is_monster_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 860 | `plain_sim_stalker_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 875 | `service_squad` | local helper | `squad` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 886 | `managed_stalker_squad` | local helper | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 893 | `task_invalid_for_monster` | local helper | `squad, task` | Validates safety gates and controlled fallback conditions. |
+| 902 | `is_night` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 907 | `write_string` | local helper | `packet, value` | Supports runtime patches subsystem behavior. |
+| 911 | `read_string` | local helper | `packet` | Supports runtime patches subsystem behavior. |
+| 919 | `unpack_ids` | local helper | `value` | Supports runtime patches subsystem behavior. |
+| 936 | `squad_methods.zhopa2_cleanup_debug` | assigned wrapper | `self` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 943 | `squad_methods.zhopa2_release_task_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 950 | `squad_methods.zhopa2_release_revenge_hostility` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 957 | `squad_methods.zhopa2_unregister_base_camping_registry` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 964 | `squad_methods.zhopa2_sync_base_camping_registry` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 978 | `squad_methods.zhopa2_is_managed_scripted_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 982 | `squad_methods.zhopa2_actor_quest_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1008 | `squad_methods.zhopa2_reset_state` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1037 | `squad_methods.zhopa2_task_requires_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1043 | `squad_methods.zhopa2_sync_task_rush` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1061 | `squad_methods.zhopa2_clear_task` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1133 | `squad_methods.zhopa2_reconcile_mutant_cycle` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1182 | `squad_methods.zhopa2_sanitize_task_owner` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1190 | `squad_methods.zhopa2_global_level_blacklisted` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1195 | `squad_methods.zhopa2_purge_global_level_blacklist` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1213 | `squad_methods.zhopa2_can_manage` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1265 | `squad_methods.zhopa2_assign_task` | assigned wrapper | `self, task, target_id, duration_sec, reason, patrol` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1343 | `squad_methods.zhopa2_assign_rest` | assigned wrapper | `self, reason` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1348 | `squad_methods.zhopa2_reached_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1355 | `squad_methods.zhopa2_patrol_next` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1374 | `squad_methods.zhopa2_task_completed` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1414 | `squad_methods.zhopa2_target_is_alive` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1441 | `squad_methods.zhopa2_update_task` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1462 | `squad_methods.zhopa2_get_script_target` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1509 | `squad_methods.zhopa2_prepare_hunt_target` | assigned wrapper | `self, script_target_id` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1555 | `squad_methods.zhopa2_apply_revenge_hostility` | assigned wrapper | `self` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1563 | `squad_methods.zhopa2_state_write` | assigned wrapper | `self, packet` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1579 | `squad_methods.zhopa2_state_read` | assigned wrapper | `self, packet` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1612 | `squad_methods.zhopa2_debug_offline_inventory_update_dump` | assigned wrapper | `self` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 1616 | `install_squad_methods` | local helper | `cls` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1622 | `wrapped_returns` | local helper | `original, self, ...` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 1627 | `retrofit_existing_squads` | local helper | `` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1647 | `finish_actor_quest_check` | local helper | `previous, ok, ...` | Supports runtime patches subsystem behavior. |
+| 1655 | `actor_quest_check_wrapper` | local helper | `original` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 1663 | `M.patch_actor_quest_targets` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 1684 | `M.patch_sim_squad_scripted` | module export | `` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1855 | `M.patch_axr_companions` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 1862 | `squad_from_npc` | local helper | `npc` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1870 | `online_npc_id` | local helper | `npc` | Supports runtime patches subsystem behavior. |
+| 1875 | `vanilla_guide_complete` | local helper | `npc` | Supports runtime patches subsystem behavior. |
+| 1898 | `pda_guide_complete` | local helper | `npc` | Supports runtime patches subsystem behavior. |
+| 1920 | `mark_post_guide_rest` | local helper | `npc, reason, target_id` | Supports runtime patches subsystem behavior. |
+| 1941 | `maybe_mark` | local helper | `npc` | Supports runtime patches subsystem behavior. |
+| 1966 | `obj_level` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
+| 1981 | `prop_value` | local helper | `props, key` | Supports runtime patches subsystem behavior. |
+| 1985 | `smart_is_base` | local helper | `smart, props` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 1999 | `smart_kind_flags` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2025 | `level_bucket` | local helper | `root, level_name` | Resolves level, graph, route, distance, or position data. |
+| 2033 | `kind_bucket` | local helper | `root, level_name, kind` | Supports runtime patches subsystem behavior. |
+| 2042 | `trim` | local helper | `value` | Supports runtime patches subsystem behavior. |
+| 2049 | `lower` | local helper | `value` | Supports runtime patches subsystem behavior. |
+| 2053 | `contains` | local helper | `haystack, needle` | Supports runtime patches subsystem behavior. |
+| 2057 | `ini_string` | local helper | `ini, section, key` | Supports runtime patches subsystem behavior. |
+| 2071 | `ini_section_exists` | local helper | `ini, section` | Supports runtime patches subsystem behavior. |
+| 2079 | `open_ini` | local helper | `path` | Supports runtime patches subsystem behavior. |
+| 2088 | `smart_cfg_filename` | local helper | `smart` | Reads or normalizes configuration data for the runtime patches subsystem. |
+| 2108 | `smart_ini` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2117 | `beh_ini` | local helper | `` | Supports runtime patches subsystem behavior. |
+| 2125 | `read_job_string` | local helper | `job_or_section, key, smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2138 | `M.trade_provider_section_blacklisted` | module export | `section` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2147 | `M.trade_smart_blacklisted` | module export | `smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2156 | `trade_job_flags` | local helper | `job, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2186 | `merge_trade_flags` | local helper | `flags, job_flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2197 | `scan_loaded_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2207 | `scan_exclusive_trade_job` | local helper | `smart, flags, work_field, work_path` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2218 | `scan_smart_ini_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2246 | `scan_beh_trade_jobs` | local helper | `smart, flags` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2264 | `remove_smart_from_level_buckets` | local helper | `board, smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2291 | `board_methods.zhopa2_ensure_buckets` | assigned wrapper | `self` | Supports runtime patches subsystem behavior. |
+| 2307 | `board_methods.zhopa2_register_trade_smart` | assigned wrapper | `self, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2352 | `board_methods.zhopa2_unregister_trade_smart` | assigned wrapper | `self, smart` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 2367 | `board_methods.zhopa2_register_smart` | assigned wrapper | `self, obj` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2395 | `board_methods.zhopa2_unregister_smart` | assigned wrapper | `self, obj` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2415 | `board_methods.zhopa2_update_squad_level` | assigned wrapper | `self, squad, level_name` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 2458 | `board_methods.zhopa2_unregister_squad` | assigned wrapper | `self, squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 2476 | `board_methods.zhopa2_rebuild_buckets` | assigned wrapper | `self` | Supports runtime patches subsystem behavior. |
+| 2506 | `install_board_methods` | local helper | `cls` | Supports runtime patches subsystem behavior. |
+| 2512 | `M.patch_sim_board` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 2587 | `service_fillers` | local helper | `` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 2591 | `service_job_fallback` | local helper | `npc_info, job, smart` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 2602 | `debug_service_job` | local helper | `smart, npc_info, job, source` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 2647 | `M.npc_storage_from_info` | module export | `npc_info` | Supports runtime patches subsystem behavior. |
+| 2652 | `M.has_targeted_gather_state` | module export | `npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 2659 | `live_targeted_gather_id` | local helper | `npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 2686 | `targeted_gather_blocks_job` | local helper | `smart, npc_info` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 2702 | `M.safe_section_name` | module export | `obj` | Resolves a safe section name for runtime classification. |
+| 2713 | `M.service_job_check_relevant` | module export | `npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 2726 | `try_service_fallback_job` | local helper | `smart, npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 2739 | `ensure_service_job` | local helper | `smart, npc_info` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 2750 | `refresh_job_capacity` | local helper | `smart` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2783 | `M.patch_smart_terrain` | module export | `` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 2870 | `artifact_index` | local helper | `` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2874 | `register_artifact` | local helper | `artifact_id, zone, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2881 | `unregister_artifact` | local helper | `artifact_id, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2888 | `unregister_zone_artifacts` | local helper | `zone, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2895 | `register_anomaly_zone` | local helper | `zone, cfg_file, source` | Maintains indexed runtime state by adding or removing entries. |
+| 2902 | `virtual_artifacts_for_zone` | local helper | `zone` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2911 | `materialize_virtual_artifact` | local helper | `virtual_id, real_id, zone, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2918 | `zone_key` | local helper | `zone` | Supports runtime patches subsystem behavior. |
+| 2924 | `M.zhopa2_sync_existing_anomaly_zones` | module export | `source` | Supports runtime patches subsystem behavior. |
+| 2959 | `zhopa2_materialize_virtual_artifact_online` | script hook/global | `virtual_id` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 2978 | `anomaly_spawn_artefact_section` | local helper | `self, section` | Resolves a safe section name for runtime classification. |
+| 3001 | `anomaly_materialize_virtual_artifacts` | local helper | `self` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3016 | `M.patch_bind_anomaly_zone` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 3108 | `M.zhopa2_direct_hunt_live_location` | module export | `squad` | Handles hostile target selection, revenge state, or pursuit behavior. |
+| 3132 | `M.zhopa2_direct_hunt_commander_execute` | module export | `self, squad` | Handles hostile target selection, revenge state, or pursuit behavior. |
+| 3167 | `M.patch_xr_reach_task` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 3185 | `task_run` | local helper | `squad` | Supports runtime patches subsystem behavior. |
+| 3193 | `direct_monster_update` | local helper | `self` | Supports runtime patches subsystem behavior. |
+| 3262 | `M.patch_bind_monster` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 3279 | `offline_loot_attacker_squad` | local helper | `killer` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3294 | `ignore_offline_loot_detail` | local helper | `detail` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3305 | `offline_loot_on_death` | local helper | `victim, killer` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3346 | `patch_death_class` | local helper | `cls, patch_name` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 3358 | `M.patch_sim_offline_combat` | module export | `` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 3381 | `gather_mod` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3385 | `module_member` | local helper | `mod, name` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 3389 | `export_script_function` | local helper | `mod, name, fn` | Supports runtime patches subsystem behavior. |
+| 3419 | `gather_original_func` | local helper | `mod, name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3435 | `gather_upvalue` | local helper | `name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3441 | `set_gather_upvalue` | local helper | `name, value` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3447 | `gather_items_table` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3456 | `zhopa2_loot_mod` | local helper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3460 | `M.zhopa2_has_targeted_item_requests` | module export | `` | Supports runtime patches subsystem behavior. |
+| 3465 | `zhopa2_can_take_section` | local helper | `npc, item, section` | Resolves a safe section name for runtime classification. |
+| 3473 | `zhopa2_targeted_item_ids` | local helper | `npc, include_blocked` | Supports runtime patches subsystem behavior. |
+| 3481 | `zhopa2_item_targeted_for_npc` | local helper | `npc, item_id, ids` | Supports runtime patches subsystem behavior. |
+| 3499 | `zhopa2_item_reserved_for_other` | local helper | `npc, item_id` | Supports runtime patches subsystem behavior. |
+| 3507 | `zhopa2_item_clsid` | local helper | `item` | Supports runtime patches subsystem behavior. |
+| 3515 | `zhopa2_record_loot` | local helper | `npc, item, reason` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3523 | `M.zhopa2_note_vanilla_artifact_pickup` | module export | `npc, artifact_id, section` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3532 | `zhopa2_item_reserved_by` | local helper | `item_id` | Supports runtime patches subsystem behavior. |
+| 3538 | `zhopa2_reservation_is_live` | local helper | `owner_id, item_id` | Supports runtime patches subsystem behavior. |
+| 3555 | `zhopa2_clear_artifact_scan` | local helper | `st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3565 | `zhopa2_reset_artifact_approach` | local helper | `st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3583 | `zhopa2_mark_approach_failed` | local helper | `st, item_id, reason` | Supports runtime patches subsystem behavior. |
+| 3591 | `zhopa2_clear_approach_failure` | local helper | `st, item_id` | Clears transient state, reservations, or stale runtime references. |
+| 3602 | `zhopa2_object_vertex` | local helper | `obj` | Resolves level, graph, route, distance, or position data. |
+| 3619 | `zhopa2_valid_accessible_vertex` | local helper | `npc, vid` | Validates safety gates and controlled fallback conditions. |
+| 3633 | `zhopa2_nearest_accessible_vertex` | local helper | `npc, pos` | Resolves level, graph, route, distance, or position data. |
+| 3655 | `zhopa2_vertex_in_direction` | local helper | `npc, from_vid, dir, dist` | Resolves level, graph, route, distance, or position data. |
+| 3668 | `zhopa2_select_artifact_approach` | local helper | `npc, item, item_pos, start_index, bad_vids` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3706 | `zhopa2_safe_look_position` | local helper | `npc, pos` | Validates safety gates and controlled fallback conditions. |
+| 3717 | `zhopa2_artifact_approach_reached` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3724 | `zhopa2_artifact_pickup_ready` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3732 | `M.zhopa2_artifact_vanilla_pickup_reachable` | module export | `npc, st, item` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3753 | `zhopa2_artifact_approach_progress_ok` | local helper | `npc, st` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3776 | `zhopa2_prepare_next_artifact_approach` | local helper | `npc, st, item, item_pos, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3799 | `zhopa2_send_to_artifact_vertex` | local helper | `npc, st, invalid_reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3817 | `zhopa2_evaluator_camper_end_for_gather:__init` | assigned wrapper | `name` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3819 | `zhopa2_evaluator_camper_end_for_gather:evaluate` | assigned wrapper | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3840 | `zhopa2_apply_camper_end_override` | local helper | `manager` | Supports runtime patches subsystem behavior. |
+| 3854 | `zhopa2_add_gather_precondition` | local helper | `manager, action_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3871 | `zhopa2_job_action_key` | local helper | `root` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 3882 | `zhopa2_suspend_active_scheme_for_targeted_gather` | local helper | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3906 | `zhopa2_restore_active_scheme_after_targeted_gather` | local helper | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 3924 | `zhopa2_apply_job_preconditions` | local helper | `npc, st` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 3968 | `zhopa2_start_artifact_scan` | local helper | `npc, st, item, now` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 3979 | `zhopa2_update_artifact_scan` | local helper | `npc, st, item, now` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 4000 | `zhopa2_begin_artifact_pickup` | local helper | `npc, st, item, now, force` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 4012 | `M.zhopa2_try_artifact_force_pickup` | module export | `npc, st, item, now, reason` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 4028 | `zhopa2_reset_gather_state` | local helper | `st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4053 | `zhopa2_item_reservation_owner_impl` | local helper | `item_id` | Supports runtime patches subsystem behavior. |
+| 4063 | `zhopa2_prepare_targeted_gather_impl` | local helper | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4077 | `zhopa2_force_gather_item` | script hook/global | `npc, item_id, targeted` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4139 | `zhopa2_clear_gather_item` | script hook/global | `npc, item_id, reason` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4160 | `M.zhopa2_trade_context_active` | module export | `npc` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 4170 | `M.zhopa2_trade_gather_blocked` | module export | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4179 | `M.zhopa2_protected_gather_target` | module export | `npc, st` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4191 | `M.zhopa2_gather_item_active` | module export | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4219 | `zhopa2_gather_item_failure_reason_impl` | local helper | `npc, item_id` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4230 | `zhopa2_gather_item_debug_status_impl` | local helper | `npc, item_id` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 4268 | `zhopa2_gather_item_replacement` | local helper | `original` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4330 | `patch_gather_classes` | local helper | `mod` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4334 | `M.artifact_gather_find` | module export | `self, ...` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 4356 | `M.artifact_gather_evaluate` | module export | `self, ...` | Handles artifact task state, bucket registration, cargo, pickup, or retargeting. |
+| 4446 | `M.patch_xr_gather_items` | module export | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4465 | `M.patch_native_loot` | module export | `` | Handles loot target selection, pickup integration, accounting, or anti-loop cleanup. |
+| 4471 | `M.patch_se_level_changer` | module export | `` | Resolves level, graph, route, distance, or position data. |
+| 4477 | `run_runtime_patch` | local helper | `patch` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 4546 | `M.clear_prefixed_table` | module export | `tbl` | Clears transient state, reservations, or stale runtime references. |
+| 4564 | `M.purge_squad_state` | module export | `squad` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 4585 | `M.purge_runtime_state` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 4654 | `M.unregister_runtime_callbacks` | module export | `` | Maintains indexed runtime state by adding or removing entries. |
+| 4663 | `M.reset_runtime_ready_state` | module export | `` | Checks the shared runtime readiness barrier before context-dependent work. |
+| 4676 | `M.ensure_all` | module export | `reason` | Supports runtime patches subsystem behavior. |
+| 4691 | `M._on_game_load` | module export | `` | Reads, writes, clears, or migrates serializable runtime state. |
+| 4704 | `M._actor_on_first_update` | module export | `` | Supports runtime patches subsystem behavior. |
+| 4717 | `M._actor_on_update` | module export | `` | Supports runtime patches subsystem behavior. |
+| 4726 | `M._runtime_recheck_due` | module export | `reason` | Supports runtime patches subsystem behavior. |
+| 4744 | `M.runtime_not_ready_reason` | module export | `` | Supports runtime patches subsystem behavior. |
+| 4749 | `M.runtime_ready` | module export | `reason` | Checks the shared runtime readiness barrier before context-dependent work. |
+| 4761 | `M.runtime_gate_ready` | module export | `reason` | Supports runtime patches subsystem behavior. |
+| 4765 | `M.on_game_start` | module export | `` | Runtime hook for runtime patches lifecycle integration. |
+| 4785 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 4793 | `M.on_master_enable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 4798 | `on_game_start` | script hook/global | `` | Runtime hook for runtime patches lifecycle integration. |
+| 4802 | `_G.zhopa2_runtime_ready` | assigned wrapper | `reason` | Checks the shared runtime readiness barrier before context-dependent work. |
+| 4806 | `_G.zhopa2_runtime_not_ready_reason` | assigned wrapper | `` | Supports runtime patches subsystem behavior. |
 
 ### `gamedata/scripts/zhopa2_service_fillers.script`
 
@@ -1983,18 +2032,18 @@ Role: original workplace task identity, simulation task fallback, turn-in and ca
 | ---: | --- | --- | --- | --- |
 | 7 | `debug_print_enabled` | local helper | `` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
 | 12 | `service_squad` | local helper | `npc` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 31 | `owned` | local helper | `task, npc, squad` | Supports service quests subsystem behavior. |
-| 36 | `task_info` | local helper | `` | Supports service quests subsystem behavior. |
-| 41 | `recruitment_task_section` | local helper | `npc` | Resolves a safe section name for runtime classification. |
-| 49 | `native_prefix` | local helper | `npc` | Supports service quests subsystem behavior. |
-| 58 | `matching_tasks` | local helper | `manager, npc, squad, finished` | Supports service quests subsystem behavior. |
-| 83 | `wrap` | local helper | `manager, key, factory` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
-| 92 | `M.install` | module export | `` | Supports service quests subsystem behavior. |
-| 162 | `M.can_cancel` | module export | `a, b` | Validates safety gates and controlled fallback conditions. |
-| 167 | `add_cancel_dialog` | local helper | `character_id, list` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
-| 177 | `M.on_game_start` | module export | `` | Runtime hook for service quests lifecycle integration. |
-| 191 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 208 | `on_game_start` | script hook/global | `` | Runtime hook for service quests lifecycle integration. |
+| 37 | `owned` | local helper | `task, npc, squad` | Supports service quests subsystem behavior. |
+| 42 | `task_info` | local helper | `` | Supports service quests subsystem behavior. |
+| 47 | `recruitment_task_section` | local helper | `npc` | Resolves a safe section name for runtime classification. |
+| 55 | `native_prefix` | local helper | `npc` | Supports service quests subsystem behavior. |
+| 64 | `matching_tasks` | local helper | `manager, npc, squad, finished` | Supports service quests subsystem behavior. |
+| 89 | `wrap` | local helper | `manager, key, factory` | Installs or supports a chain-friendly runtime patch around vanilla behavior. |
+| 98 | `M.install` | module export | `` | Supports service quests subsystem behavior. |
+| 168 | `M.can_cancel` | module export | `a, b` | Validates safety gates and controlled fallback conditions. |
+| 173 | `add_cancel_dialog` | local helper | `character_id, list` | Formats or emits debug/diagnostic output, normally gated by debug settings. |
+| 183 | `M.on_game_start` | module export | `` | Runtime hook for service quests lifecycle integration. |
+| 197 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 214 | `on_game_start` | script hook/global | `` | Runtime hook for service quests lifecycle integration. |
 
 ### `gamedata/scripts/zhopa2_service_recruitment.script`
 
@@ -2029,47 +2078,49 @@ Role: existing-NPC transfer, service/guard records, isolated Anthology trade pre
 | 224 | `mechanic_profile` | local helper | `context` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
 | 233 | `mechanic_precondition` | local helper | `npc, section` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
 | 255 | `M.service_task_section` | module export | `npc` | Resolves a safe section name for runtime classification. |
-| 262 | `M.open_upgrade` | module export | `a, b` | Supports service recruitment subsystem behavior. |
-| 298 | `M.heal` | module export | `a, b, kind` | Supports service recruitment subsystem behavior. |
-| 311 | `install_hooks` | local helper | `` | Supports service recruitment subsystem behavior. |
-| 445 | `snapshot` | local helper | `npc, label` | Supports service recruitment subsystem behavior. |
-| 458 | `assert_inventory` | local helper | `before, after` | Supports service recruitment subsystem behavior. |
-| 462 | `protected_quest` | local helper | `npc_id, squad_id` | Supports service recruitment subsystem behavior. |
-| 472 | `choose_smart` | local helper | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 481 | `donor_squads` | local helper | `smart, owner` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 485 | `add` | local helper | `id, part_id, origin` | Maintains indexed runtime state by adding or removing entries. |
-| 528 | `peaceful_factions` | local helper | `a, b` | Supports service recruitment subsystem behavior. |
-| 539 | `donor_block_reason` | local helper | `group, owner, services` | Supports service recruitment subsystem behavior. |
-| 572 | `preflight` | local helper | `smart_id, role, quiet, job_section` | Supports service recruitment subsystem behavior. |
-| 676 | `refresh` | local helper | `group` | Supports service recruitment subsystem behavior. |
-| 685 | `release_empty` | local helper | `group` | Clears transient state, reservations, or stale runtime references. |
-| 694 | `bind_service` | local helper | `smart, group, npc, context` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
-| 722 | `undo_record` | local helper | `allow_offline` | Supports service recruitment subsystem behavior. |
-| 794 | `M.inspect` | module export | `smart_id, role` | Supports service recruitment subsystem behavior. |
-| 801 | `M.run` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
-| 874 | `M.status` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 902 | `M.stock` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 918 | `M.undo` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
-| 927 | `finish_batch` | local helper | `reason` | Supports service recruitment subsystem behavior. |
-| 939 | `batch_step` | local helper | `` | Supports service recruitment subsystem behavior. |
-| 1019 | `M.test_smart` | module export | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
-| 1085 | `M.batch_status` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1097 | `M.audit_level` | module export | `` | Resolves level, graph, route, distance, or position data. |
-| 1177 | `M.restore` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1215 | `save_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
-| 1216 | `load_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
-| 1221 | `trade_closed` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 1222 | `traded` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
-| 1226 | `npc_online` | local helper | `npc` | Supports service recruitment subsystem behavior. |
-| 1236 | `npc_gone` | local helper | `npc` | Supports service recruitment subsystem behavior. |
-| 1247 | `M.owns_squad` | module export | `group` | Handles squad lookup, membership, task state, or squad-level accounting. |
-| 1253 | `M.is_reserved` | module export | `smart` | Supports service recruitment subsystem behavior. |
-| 1260 | `M.recruit` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
-| 1275 | `M.guard_record` | module export | `npc` | Supports service recruitment subsystem behavior. |
-| 1279 | `M.guard_records` | module export | `` | Supports service recruitment subsystem behavior. |
-| 1286 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
-| 1297 | `M.on_game_start` | module export | `` | Runtime hook for service recruitment lifecycle integration. |
-| 1319 | `on_game_start` | script hook/global | `` | Runtime hook for service recruitment lifecycle integration. |
+| 262 | `M.is_service_npc` | module export | `npc` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 266 | `M.open_upgrade` | module export | `a, b` | Supports service recruitment subsystem behavior. |
+| 302 | `M.heal` | module export | `a, b, kind` | Supports service recruitment subsystem behavior. |
+| 315 | `install_hooks` | local helper | `` | Supports service recruitment subsystem behavior. |
+| 449 | `snapshot` | local helper | `npc, label` | Supports service recruitment subsystem behavior. |
+| 462 | `assert_inventory` | local helper | `before, after` | Supports service recruitment subsystem behavior. |
+| 466 | `protected_quest` | local helper | `npc_id, squad_id` | Supports service recruitment subsystem behavior. |
+| 476 | `choose_smart` | local helper | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 485 | `donor_squads` | local helper | `smart, owner` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 489 | `add` | local helper | `id, part_id, origin` | Maintains indexed runtime state by adding or removing entries. |
+| 532 | `peaceful_factions` | local helper | `a, b` | Supports service recruitment subsystem behavior. |
+| 544 | `is_guide_squad` | local helper | `id` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 558 | `donor_block_reason` | local helper | `group, owner, services` | Supports service recruitment subsystem behavior. |
+| 592 | `preflight` | local helper | `smart_id, role, quiet, job_section` | Supports service recruitment subsystem behavior. |
+| 696 | `refresh` | local helper | `group` | Supports service recruitment subsystem behavior. |
+| 705 | `release_empty` | local helper | `group` | Clears transient state, reservations, or stale runtime references. |
+| 714 | `bind_service` | local helper | `smart, group, npc, context` | Handles service-provider classification, customer intent, completion, or smart-job recovery. |
+| 742 | `undo_record` | local helper | `allow_offline` | Supports service recruitment subsystem behavior. |
+| 814 | `M.inspect` | module export | `smart_id, role` | Supports service recruitment subsystem behavior. |
+| 821 | `M.run` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
+| 894 | `M.status` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 922 | `M.stock` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 938 | `M.undo` | module export | `npc_id` | Supports service recruitment subsystem behavior. |
+| 947 | `finish_batch` | local helper | `reason` | Supports service recruitment subsystem behavior. |
+| 959 | `batch_step` | local helper | `` | Supports service recruitment subsystem behavior. |
+| 1039 | `M.test_smart` | module export | `smart_id` | Handles smart-terrain lookup, job selection, base ownership, or service logic. |
+| 1105 | `M.batch_status` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1117 | `M.audit_level` | module export | `` | Resolves level, graph, route, distance, or position data. |
+| 1197 | `M.restore` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1235 | `save_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
+| 1236 | `load_state` | script hook/global | `data` | Runtime hook for service recruitment lifecycle integration. |
+| 1241 | `trade_closed` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 1242 | `traded` | local helper | `` | Handles NPC trade policy, pricing, route selection, or payment accounting. |
+| 1246 | `npc_online` | local helper | `npc` | Supports service recruitment subsystem behavior. |
+| 1256 | `npc_gone` | local helper | `npc` | Supports service recruitment subsystem behavior. |
+| 1267 | `M.owns_squad` | module export | `group` | Handles squad lookup, membership, task state, or squad-level accounting. |
+| 1273 | `M.is_reserved` | module export | `smart` | Supports service recruitment subsystem behavior. |
+| 1280 | `M.recruit` | module export | `smart_id, role, job_section` | Supports service recruitment subsystem behavior. |
+| 1295 | `M.guard_record` | module export | `npc` | Supports service recruitment subsystem behavior. |
+| 1299 | `M.guard_records` | module export | `` | Supports service recruitment subsystem behavior. |
+| 1306 | `M.on_master_disable` | module export | `` | Stops, cleans, or restarts module-owned runtime state for the MCM master lifecycle. |
+| 1317 | `M.on_game_start` | module export | `` | Runtime hook for service recruitment lifecycle integration. |
+| 1339 | `on_game_start` | script hook/global | `` | Runtime hook for service recruitment lifecycle integration. |
 
 ### `gamedata/scripts/zhopa2_smart_service_slot_doctor.script`
 

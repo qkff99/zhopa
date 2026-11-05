@@ -63,6 +63,7 @@ Runtime modules:
 - `zhopa2_bases`
 - `zhopa2_index`
 - `zhopa2_topology`
+- `zhopa2_level_hop`
 - `zhopa2_task_scoring`
 - `zhopa2_loot`
 - `zhopa2_native_loot`
@@ -274,6 +275,20 @@ Tracks level adjacency:
 - cached neighbor lists.
 
 Used by `EXPLORE`, `PATROL`, `HUNT`, `ARTEFACT`, `TRADE`, `QUEST`, and `STORY_NORTH_MIGRATION`. On load, the level-changer map is rebuilt through exported `alife():iterate_objects()`; the unavailable `object_count()` API is not used.
+
+### 4.5.1 `zhopa2_level_hop`
+
+Skips only the level-border edge of a squad's route. Vanilla walks an offline squad along the game-graph edge between two levels at its going speed; these edges are 100-1600 m long, so one border crossing costs minutes of real time. Task selection, walking inside a level, arrival, timers and consequences stay untouched.
+
+- Lua has no edge API for the game graph, so the cross-level edges are read once from chunk 4 of `all.spawn` with plain `io.open` (the path comes from `getFS():update_path("$game_spawn$", "all.spawn")`; `FS:r_open`/`FS:r_close` must not be used, because `r_close` takes `IReader*&`, raises a luabind error even inside `pcall`, and GAMMA turns that into a Busy Hands crash). The read is split into fixed-size slices, 512 vertices or about 2048 edges each, at most one per frame (about 20 frames, under a millisecond per slice). `time_global()` only changes between frames, so the slices are limited by work counts, never by a clock. They are driven from `try_hop`, i.e. from the squad update, whichever thread runs it. The edge array is expected to follow the vertex array in vertex order and is checked while reading. The vertex count and 24 sampled vertices (level id, level vertex id) must match `game_graph()`; otherwise the module prints the reason and stays inactive.
+- The validated edge list (three numbers per edge, about 800 numbers) is stored in the save under `zhopa2_level_graph` with a version. A save is bound to its graph by GUID, and every stored edge is rechecked against `game_graph()` (valid vertices on different levels, vertex count) before use; a missing, outdated or invalid blob is reported and `all.spawn` is read instead. The master disable removes the key, so the save-state contract of §2.2 holds.
+- From the edges it computes the number of level borders between any two levels. A hop is allowed only to a level strictly closer to the target level, so squads cannot loop or go backwards.
+- It is called from the patched `sim_squad_scripted:specific_update` for managed squads; for a vertex that is not a border vertex the cost is one table lookup.
+- The hop is `TeleportSquad` to the far end of the edge, followed by `check_online_status()` so the exclusion zone around the actor applies before the switch manager runs. Vanilla keeps an offline squad within `excl_dist` of the actor offline; beyond it the usual online distance decides.
+- Online squads are hopped as well during testing (`HOP_ONLINE_SQUADS`, marked `ZHOPA2_HOP_ONLINE_TEST`); `teleport_object` switches such a squad offline first.
+- Stalker and mutant squads follow `stalker_movement_enabled` and `mutant_movement_enabled`. Companions and story squads are excluded. `instant_level_hop_enabled` (Stalker simulation page) and `mutant_instant_level_hop_enabled` (Mutant simulation page), both on by default, switch the feature per squad kind; a switched-off option is silent, while a disabled simulation is reported as `squad_kind_disabled`.
+
+Diagnostics follow Debug HUD: the graph summary, every hop, the skip reasons that need attention (`same_level` and `edge_not_toward_target` are normal at a border vertex and are only counted for `audit()`), and every observed level crossing of a managed squad, labelled `hop`, `hop_late`, `walked` or `walked_update_gap` with the number of borders crossed between two script updates (up to 3 is normal). Every hop is accounted for: it gets its crossing line from the vanilla level-change callback whether or not the squad is still managed; `hop_level_not_changed` means vanilla saw the vertex change but no level change; `hop_unconfirmed` is printed after 2 minutes without the callback, with the squad's current state (existence, vertex, level, online, managed, `last_gvid`, `level_name`). `crossing_levels_not_adjacent`, `vertex_count_mismatch`, `graph_sample_mismatch`, `edge_layout_not_sequential` and the other error reasons mean the table or the file disagrees with the game and must be investigated. `zhopa2_level_hop.audit()` prints the totals, including unconfirmed hops.
 
 ### 4.6 `zhopa2_debug_hud`
 

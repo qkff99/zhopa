@@ -1,0 +1,814 @@
+-- Instant level-border crossing for ZHOPA squads.
+--
+-- Vanilla walks an offline squad along the game-graph edge between two levels at going_speed, and those
+-- edges are 100-1600 m long (minutes of real time). Everything else a squad does (task choice, walking
+-- inside a level, arrival, timers, consequences) is left untouched: only the border edge is skipped.
+--
+-- Lua has no edge API for the game graph, so the cross-level edges are read once from chunk 4 of all.spawn,
+-- the same graph the engine loaded. Layout: xrServerEntities/game_graph_space.h and xrGame/game_graph_inline.h.
+-- A save is bound to its graph (the engine checks the GUID on load), so the validated edge list is stored in the save
+-- (zhopa2_level_graph) and later loads skip reading the file. Every decision and mismatch is printed through Debug HUD only.
+--
+-- The file is read with plain io.open. Do NOT use getFS():r_open/r_close here: FS:r_close takes IReader*&, luabind cannot
+-- bind a Lua object to it, and even inside pcall the engine's error callback fires, which GAMMA turns into a Busy Hands crash.
+-- time_global() is cached per frame, so slices are limited by work counts, never by a clock. The load is driven from try_hop,
+-- one slice per frame, whichever thread the squad update runs on; nothing depends on that.
+local M = {}
+
+local SPAWN_ALIAS = "$game_spawn$"
+local SPAWN_FILE = "all.spawn" -- the spawn name is not exposed to Lua
+local GRAPH_CHUNK_ID = 4
+local GRAPH_VERSION = 10
+local VERTEX_SIZE = 42 -- packed CVertex
+local EDGE_SIZE = 6 -- packed CEdge: u16 vertex id + float distance
+local COMPRESSED_FLAG = 2147483648
+local HEADER_BYTES = 8192 -- the graph header (level table) is read as one block
+local VERTICES_PER_SLICE = 512 -- vertices decoded per slice of the first pass
+local EDGES_PER_SLICE = 2048 -- edges decoded per slice of the second pass
+local PUMP_INTERVAL_MS = 16 -- at most one slice per frame (time_global() only moves between frames)
+local SAMPLE_COUNT = 24 -- vertices compared against game_graph() to prove the file is the loaded graph
+local MAX_GAP_BORDERS = 3 -- a squad may cross this many borders between two script updates without being reported
+local HOP_CONFIRM_TIMEOUT_MS = 120000 -- Debug HUD: a hop must be followed by the vanilla level-change callback within this time
+local SWEEP_INTERVAL_MS = 1000 -- Debug HUD: how often hops awaiting that callback are checked
+local STATE_KEY = "zhopa2_level_graph" -- key in the save (m_data); removed by the master disable
+local STATE_VERSION = 1 -- raise whenever the stored layout or its meaning changes: older blobs are then re-read from all.spawn
+
+-- Skip reasons that are normal at a border vertex (the squad stands there but has nothing to hop): counted for the audit, not printed.
+local QUIET_SKIPS = { same_level = true, edge_not_toward_target = true }
+
+-- ZHOPA2_HOP_ONLINE_TEST: online squads are hopped too. teleport_object() switches them offline first, so they
+-- vanish in front of the player. If that gets in the way after testing, set this to false (or delete the
+-- marked block in M.try_hop) to return to offline-only hopping.
+local HOP_ONLINE_SQUADS = true
+
+local state = { phase = "idle", reason = nil, hops = 0, skips = {}, crossings = 0, mismatches = 0 }
+local cross = {} -- cross[vertex] = { { to = vertex, level = level id, dist = meters }, ... }
+local level_dist = {} -- level_dist[from][to] = number of level borders between them
+local level_name = {} -- level_name[level id] = name (graph header or alife():level_name)
+local loader = nil -- parse state, only while phase == "loading"
+local pending = {} -- pending[squad id] = a hop still waiting for its crossing line (tracked only while Debug HUD is on)
+local cache_blob = nil -- blob found in the save by load_state, consumed by the first pump
+local callbacks_registered = false
+
+local function safe_require(name)
+	local mod = rawget(_G, name)
+	if mod then
+		return mod
+	end
+	if require then
+		pcall(require, name)
+	end
+	return rawget(_G, name)
+end
+
+local function cfg_bool(key, default)
+	local cfg = safe_require("zhopa2_cfg")
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok, value = pcall(cfg.get_bool, key, default)
+		if ok then
+			return value == true
+		end
+	end
+	return default == true
+end
+
+local function debug_enabled()
+	return cfg_bool("debug_hud_enabled", false) and type(printf) == "function"
+end
+
+local function dbg(fmt, ...)
+	if debug_enabled() then
+		printf(fmt, ...)
+	end
+end
+
+local function tag(value)
+	if value == nil then
+		return "-"
+	end
+	return tostring(value)
+end
+
+local function squad_label(squad)
+	local ok, name = pcall(function()
+		return squad:name()
+	end)
+	return tostring(ok and name or "?") .. ":" .. tostring(squad and squad.id or "-")
+end
+
+local function lname(level_id)
+	if level_id == nil then
+		return "?"
+	end
+	local name = level_name[level_id]
+	if name == nil then
+		local ok, value = pcall(function()
+			return alife():level_name(level_id)
+		end)
+		name = ok and value or nil
+		level_name[level_id] = name
+	end
+	return tostring(name or level_id)
+end
+
+-- Level of a game vertex straight from the loaded graph (nil for an invalid vertex).
+local function level_of(vertex)
+	if type(vertex) ~= "number" then
+		return nil
+	end
+	local gg = game_graph()
+	if not gg:valid_vertex_id(vertex) then
+		return nil
+	end
+	return gg:vertex(vertex):level_id()
+end
+
+----------------------------------------------------------------------------------------------------
+-- little-endian decoding of file blocks (1-based string indexes)
+----------------------------------------------------------------------------------------------------
+local function u16_at(s, i)
+	local a, b = s:byte(i, i + 1)
+	return a + b * 256
+end
+
+local function u32_at(s, i)
+	local a, b, c, d = s:byte(i, i + 3)
+	return a + b * 256 + c * 65536 + d * 16777216
+end
+
+local function f32_at(s, i)
+	local bits = u32_at(s, i)
+	local exp, mant = math.floor(bits / 8388608) % 256, bits % 8388608
+	if exp == 0 and mant == 0 then
+		return 0
+	end
+	local value = (1 + mant / 8388608) * 2 ^ (exp - 127)
+	if bits >= 2147483648 then
+		return -value
+	end
+	return value
+end
+
+----------------------------------------------------------------------------------------------------
+-- edge table: built from the parsed file or from the save, validated against game_graph() either way
+----------------------------------------------------------------------------------------------------
+local function build_level_distances()
+	local adj = {}
+	local pairs_count = 0
+	for src, list in pairs(cross) do
+		local a = level_of(src)
+		adj[a] = adj[a] or {}
+		for i = 1, #list do
+			if not adj[a][list[i].level] then
+				adj[a][list[i].level] = true
+				pairs_count = pairs_count + 1
+			end
+		end
+	end
+	level_dist = {}
+	for start in pairs(adj) do
+		local d = { [start] = 0 }
+		local queue, head = { start }, 1
+		while head <= #queue do
+			local cur = queue[head]
+			head = head + 1
+			for nxt in pairs(adj[cur] or {}) do
+				if d[nxt] == nil then
+					d[nxt] = d[cur] + 1
+					queue[#queue + 1] = nxt
+				end
+			end
+		end
+		level_dist[start] = d
+	end
+	return pairs_count
+end
+
+-- flat = { from, to, dist, from, to, dist, ... }. Every edge must join two valid vertices on different levels
+-- and the vertex count must be the loaded graph's. Returns true, or nil, reason, detail.
+local function apply_edges(flat, vcount)
+	local gg = game_graph()
+	if type(vcount) ~= "number" or not (gg:valid_vertex_id(vcount - 1) and not gg:valid_vertex_id(vcount)) then
+		return nil, "vertex_count_mismatch", tostring(vcount)
+	end
+	if type(flat) ~= "table" or #flat == 0 or #flat % 3 ~= 0 then
+		return nil, "edge_list_layout", type(flat) == "table" and tostring(#flat) or type(flat)
+	end
+	local new_cross, count = {}, 0
+	for i = 1, #flat, 3 do
+		local from, to, dist = flat[i], flat[i + 1], flat[i + 2]
+		if type(from) ~= "number" or type(to) ~= "number" or type(dist) ~= "number" or from == to
+			or not gg:valid_vertex_id(from) or not gg:valid_vertex_id(to)
+		then
+			return nil, "edge_invalid", tostring(from) .. "->" .. tostring(to)
+		end
+		local to_level = gg:vertex(to):level_id()
+		if gg:vertex(from):level_id() == to_level then
+			return nil, "edge_not_cross_level", tostring(from) .. "->" .. tostring(to)
+		end
+		local list = new_cross[from]
+		if not list then
+			list = {}
+			new_cross[from] = list
+		end
+		list[#list + 1] = { to = to, level = to_level, dist = dist }
+		count = count + 1
+	end
+	cross = new_cross
+	state.vertices, state.cross_edges, state.flat = vcount, count, flat
+	state.level_pairs = build_level_distances()
+	return true
+end
+
+----------------------------------------------------------------------------------------------------
+-- graph reader
+----------------------------------------------------------------------------------------------------
+local function release_file()
+	if loader and loader.file then
+		local file = loader.file
+		loader.file = nil
+		pcall(function()
+			file:close()
+		end)
+	end
+end
+
+local function fail(reason, detail)
+	state.phase = "failed"
+	state.reason = reason
+	release_file()
+	loader = nil
+	cross, level_dist = {}, {}
+	dbg("! ZHOPA2 level hop error | reason [%s] detail [%s]", tostring(reason), tostring(detail or "-"))
+	return false
+end
+
+local function find_graph_chunk(f)
+	local total = f:seek("end")
+	local pos = 0
+	while pos + 8 <= total do
+		f:seek("set", pos)
+		local head = f:read(8)
+		if not head or #head < 8 then
+			return nil, "graph_chunk_missing"
+		end
+		local id, size = u32_at(head, 1), u32_at(head, 5)
+		if id % COMPRESSED_FLAG == GRAPH_CHUNK_ID then
+			if id >= COMPRESSED_FLAG then
+				return nil, "graph_chunk_compressed"
+			end
+			if pos + 8 + size > total then
+				return nil, "graph_chunk_truncated"
+			end
+			return pos + 8, nil, size
+		end
+		pos = pos + 8 + size
+	end
+	return nil, "graph_chunk_missing"
+end
+
+local function begin_load()
+	if type(io) ~= "table" or type(io.open) ~= "function" then
+		return fail("io_unavailable")
+	end
+	local path = getFS():update_path(SPAWN_ALIAS, SPAWN_FILE)
+	local f = io.open(path, "rb")
+	if not f then
+		return fail("spawn_not_found", tostring(path))
+	end
+	loader = { file = f, step = "vertices", idx = 0, slices = 0, lvl = {}, node = {}, ecnt = {}, flat = {}, total_edges = 0, cross_edges = 0 }
+	local chunk_pos, err, chunk_size = find_graph_chunk(f)
+	if not chunk_pos then
+		return fail(err)
+	end
+	f:seek("set", chunk_pos)
+	local head = f:read(math.min(HEADER_BYTES, chunk_size))
+	if not head or #head < 28 then
+		return fail("graph_header_truncated")
+	end
+	local version = head:byte(1)
+	if version ~= GRAPH_VERSION then
+		return fail("graph_version", tostring(version) .. " expected " .. tostring(GRAPH_VERSION))
+	end
+	local vcount, ecount, nlevels = u16_at(head, 2), u32_at(head, 4), head:byte(28)
+	-- bytes 8-11: death point count, 12-27: GUID; then per level: name\0, offset (3 floats), id, section\0, GUID
+	level_name = {}
+	local p = 29
+	for _ = 1, nlevels do
+		local name_end = head:find("\0", p, true)
+		if not name_end then
+			return fail("graph_header_truncated", "level name")
+		end
+		local name = head:sub(p, name_end - 1)
+		p = name_end + 1 + 12
+		local id = head:byte(p)
+		p = p + 1
+		local section_end = head:find("\0", p, true)
+		if not (id and section_end) then
+			return fail("graph_header_truncated", "level section")
+		end
+		p = section_end + 1 + 16
+		level_name[id] = name
+	end
+	local base = chunk_pos + p - 1 -- file offset of the vertex array
+	if vcount == 0 or base + vcount * VERTEX_SIZE + ecount * EDGE_SIZE > chunk_pos + chunk_size then
+		return fail("graph_layout", "vertices " .. tostring(vcount) .. " edges " .. tostring(ecount))
+	end
+	local gg = game_graph()
+	if not (gg:valid_vertex_id(vcount - 1) and not gg:valid_vertex_id(vcount)) then
+		return fail("vertex_count_mismatch", "file " .. tostring(vcount))
+	end
+	loader.base, loader.vcount, loader.ecount, loader.levels = base, vcount, ecount, nlevels
+	loader.expected_eoff = vcount * VERTEX_SIZE -- edges follow the vertex array, in vertex order
+	state.phase = "loading"
+	return true
+end
+
+local function validate_samples()
+	local gg = game_graph()
+	local vcount = loader.vcount
+	for k = 0, SAMPLE_COUNT - 1 do
+		local i = math.floor(k * (vcount - 1) / (SAMPLE_COUNT - 1))
+		local v = gg:vertex(i)
+		if v:level_id() ~= loader.lvl[i] or v:level_vertex_id() ~= loader.node[i] then
+			return fail("graph_sample_mismatch", string.format("vertex %d file level %s node %s game level %s node %s", i, tostring(loader.lvl[i]), tostring(loader.node[i]), tostring(v:level_id()), tostring(v:level_vertex_id())))
+		end
+	end
+	return true
+end
+
+local function finish_load()
+	local flat, vcount, levels = loader.flat, loader.vcount, loader.levels
+	local slices, total_edges = loader.slices, loader.total_edges
+	release_file()
+	loader = nil
+	local ok, reason, detail = apply_edges(flat, vcount)
+	if not ok then
+		return fail(reason, detail)
+	end
+	state.phase, state.reason, state.source = "ready", nil, "file"
+	state.levels, state.total_edges = levels, total_edges
+	dbg("~ ZHOPA2 level hop | graph ready source [file] vertices [%s] levels [%s] edges [%s] cross_edges [%s] level_pairs [%s] slices [%s]",
+		tostring(vcount), tostring(levels), tostring(total_edges), tostring(state.cross_edges), tostring(state.level_pairs), tostring(slices))
+end
+
+-- First pass: levels and edge counts of the vertices. The vertex array is read in blocks of VERTICES_PER_SLICE.
+local function read_vertices()
+	local f, base, vcount = loader.file, loader.base, loader.vcount
+	local first = loader.idx
+	local n = math.min(VERTICES_PER_SLICE, vcount - first)
+	f:seek("set", base + first * VERTEX_SIZE)
+	local block = f:read(n * VERTEX_SIZE)
+	if not block or #block ~= n * VERTEX_SIZE then
+		return fail("vertex_block_truncated", "from vertex " .. tostring(first))
+	end
+	local expected = loader.expected_eoff
+	for j = 0, n - 1 do
+		local o, v = j * VERTEX_SIZE, first + j
+		local packed = u32_at(block, o + 25) -- level id (8 bits) | level vertex id (24 bits)
+		local eoff, ecnt = u32_at(block, o + 33), block:byte(o + 41)
+		if eoff ~= expected then
+			return fail("edge_layout_not_sequential", string.format("vertex %d offset %d expected %d", v, eoff, expected))
+		end
+		expected = expected + ecnt * EDGE_SIZE
+		loader.lvl[v], loader.node[v], loader.ecnt[v] = packed % 256, math.floor(packed / 256), ecnt
+	end
+	loader.expected_eoff = expected
+	loader.idx = first + n
+	if loader.idx >= vcount then
+		if expected ~= vcount * VERTEX_SIZE + loader.ecount * EDGE_SIZE then
+			return fail("edge_count_mismatch", tostring((expected - vcount * VERTEX_SIZE) / EDGE_SIZE) .. " counted, header " .. tostring(loader.ecount))
+		end
+		if not validate_samples() then
+			return false
+		end
+		loader.step, loader.idx, loader.edge_pos = "edges", 0, loader.base + vcount * VERTEX_SIZE
+	end
+	return true
+end
+
+-- Second pass: the edge array is contiguous and in vertex order (checked above), so it is streamed in blocks of
+-- about EDGES_PER_SLICE edges. Only edges between different levels are decoded fully.
+local function read_edges()
+	local f, vcount, lvl, ecnt = loader.file, loader.vcount, loader.lvl, loader.ecnt
+	local first, total, last = loader.idx, 0, loader.idx
+	while last < vcount do
+		local c = ecnt[last]
+		if total > 0 and total + c > EDGES_PER_SLICE then
+			break
+		end
+		total = total + c
+		last = last + 1
+	end
+	local block = ""
+	if total > 0 then
+		f:seek("set", loader.edge_pos)
+		block = f:read(total * EDGE_SIZE)
+		if not block or #block ~= total * EDGE_SIZE then
+			return fail("edge_block_truncated", "from vertex " .. tostring(first))
+		end
+		loader.edge_pos = loader.edge_pos + total * EDGE_SIZE
+	end
+	local flat, o = loader.flat, 1
+	for v = first, last - 1 do
+		for _ = 1, ecnt[v] do
+			local to = u16_at(block, o)
+			if to >= vcount then
+				return fail("edge_target_invalid", "vertex " .. tostring(v) .. " target " .. tostring(to))
+			end
+			if lvl[to] ~= lvl[v] then
+				flat[#flat + 1], flat[#flat + 2], flat[#flat + 3] = v, to, f32_at(block, o + 2)
+				loader.cross_edges = loader.cross_edges + 1
+			end
+			o = o + EDGE_SIZE
+		end
+	end
+	loader.total_edges = loader.total_edges + total
+	loader.idx = last
+	if last >= vcount then
+		loader.slices = loader.slices + 1
+		return finish_load()
+	end
+	return true
+end
+
+local function load_step()
+	local ok
+	if loader.step == "vertices" then
+		ok = read_vertices()
+	else
+		ok = read_edges()
+	end
+	if ok and loader then
+		loader.slices = loader.slices + 1
+	end
+	return ok
+end
+
+----------------------------------------------------------------------------------------------------
+-- save: the validated edge list survives in the save so that later loads skip all.spawn
+----------------------------------------------------------------------------------------------------
+-- Takes the blob found by load_state. Returns true when it was valid and the graph is ready.
+local function use_saved_graph()
+	local blob = cache_blob
+	cache_blob = nil
+	if type(blob) ~= "table" then
+		return false
+	end
+	local ok, reason, detail
+	if blob.version ~= STATE_VERSION then
+		reason, detail = "version", tostring(blob.version) .. " expected " .. tostring(STATE_VERSION)
+	else
+		ok, reason, detail = apply_edges(blob.edges, blob.vertices)
+	end
+	if ok then
+		state.phase, state.reason, state.source = "ready", nil, "save"
+		dbg("~ ZHOPA2 level hop | graph ready source [save] vertices [%s] cross_edges [%s] level_pairs [%s]",
+			tostring(state.vertices), tostring(state.cross_edges), tostring(state.level_pairs))
+		return true
+	end
+	state.cache_rejected = true
+	dbg("! ZHOPA2 level hop error | reason [saved_graph_%s] detail [%s], reading all.spawn instead", tostring(reason), tostring(detail or "-"))
+	return false
+end
+
+local function save_state(m_data)
+	if type(m_data) ~= "table" then
+		return
+	end
+	if state.phase == "ready" and state.flat then
+		m_data[STATE_KEY] = { version = STATE_VERSION, vertices = state.vertices, edges = state.flat }
+	elseif state.cache_rejected then
+		m_data[STATE_KEY] = nil
+	end
+end
+
+local function load_state(m_data)
+	local blob = type(m_data) == "table" and m_data[STATE_KEY] or nil
+	cache_blob = type(blob) == "table" and blob or nil
+end
+
+-- Advances the graph load by one slice, at most once per PUMP_INTERVAL_MS. Called from try_hop.
+local function pump()
+	local now = time_global()
+	if state.last_pump and now - state.last_pump < PUMP_INTERVAL_MS then
+		return
+	end
+	state.last_pump = now
+	local ok, err
+	if state.phase == "idle" then
+		if cache_blob ~= nil then
+			ok, err = pcall(use_saved_graph)
+			if ok and err == true then
+				return
+			end
+			if not ok then
+				state.cache_rejected = true
+				dbg("! ZHOPA2 level hop error | reason [saved_graph_exception] detail [%s], reading all.spawn instead", tostring(err))
+			end
+		end
+		ok, err = pcall(begin_load)
+	else
+		ok, err = pcall(load_step)
+	end
+	if not ok then
+		fail("exception", err)
+	end
+end
+
+----------------------------------------------------------------------------------------------------
+-- hop
+----------------------------------------------------------------------------------------------------
+local function skip(squad, reason, detail, target_id)
+	state.skips[reason] = (state.skips[reason] or 0) + 1
+	if QUIET_SKIPS[reason] or not debug_enabled() then
+		return false
+	end
+	local sig = tostring(reason) .. ":" .. tostring(squad.m_game_vertex_id) .. ":" .. tostring(target_id)
+	if squad.zhopa2_hop_sig ~= sig then
+		squad.zhopa2_hop_sig = sig
+		printf("~ ZHOPA2 level hop skip | squad [%s] task [%s] reason [%s] vertex [%s] level [%s] target [%s] detail [%s]",
+			squad_label(squad), tag(squad.zhopa2_task), tostring(reason), tostring(squad.m_game_vertex_id), lname(level_of(squad.m_game_vertex_id)), tag(target_id), tag(detail))
+	end
+	return false
+end
+
+local function is_mutant(squad)
+	return is_squad_monster ~= nil and is_squad_monster[squad.player_id] == true
+end
+
+-- The hop switch of the squad's own simulation page: Stalker simulation / Mutant simulation.
+local function hop_switch_on(squad)
+	if is_mutant(squad) then
+		return cfg_bool("mutant_instant_level_hop_enabled", true)
+	end
+	return cfg_bool("instant_level_hop_enabled", true)
+end
+
+-- The squad's kind must also be managed at all (stalker_movement_enabled / mutant_movement_enabled).
+local function squad_enabled(squad)
+	if is_mutant(squad) then
+		return cfg_bool("mutant_movement_enabled", true)
+	end
+	return cfg_bool("stalker_movement_enabled", true)
+end
+
+-- Debug HUD only: a hop whose level-change callback never arrived is reported with the squad's current state, so that the cause
+-- (unregistered squad, no level change seen by vanilla, a different vertex, ...) can be read from the log.
+local function sweep_pending()
+	local now = time_global()
+	if state.last_sweep and now - state.last_sweep < SWEEP_INTERVAL_MS then
+		return
+	end
+	state.last_sweep = now
+	for id, hop in pairs(pending) do
+		if now - hop.tg >= HOP_CONFIRM_TIMEOUT_MS then
+			pending[id] = nil
+			state.unconfirmed = (state.unconfirmed or 0) + 1
+			if debug_enabled() then
+				local se = alife_object(id)
+				printf("! ZHOPA2 level hop error | reason [hop_unconfirmed] squad [%s] task [%s] %s -> %s waited_s [%s] exists [%s] vertex [%s] level [%s] online [%s] managed [%s] last_gvid [%s] level_name [%s]",
+					hop.label, tag(hop.task), tostring(hop.from), tostring(hop.to), tostring(math.floor((now - hop.tg) / 1000)), tostring(se ~= nil),
+					tag(se and se.m_game_vertex_id), lname(se and level_of(se.m_game_vertex_id)), tostring(se ~= nil and se.online == true), tostring(se ~= nil and se.zhopa2_managed == true),
+					tag(se and se.last_gvid), tag(se and se.level_name))
+			end
+		end
+	end
+end
+
+-- Called from the patched sim_squad_scripted:specific_update, i.e. for squads that follow a scripted target.
+-- Returns true when the squad crossed a level border.
+function M.try_hop(squad, target_id)
+	if next(pending) ~= nil then
+		sweep_pending()
+	end
+	if state.phase ~= "ready" then
+		if state.phase == "idle" or state.phase == "loading" then
+			pump()
+		end
+		return false
+	end
+	local from = squad.m_game_vertex_id
+	local edges = cross[from]
+	if not edges then
+		return false -- not a border vertex: the common case costs one table lookup
+	end
+	if rawget(_G, "zhopa2_runtime_disabled") == true or squad.zhopa2_managed ~= true or not hop_switch_on(squad) then
+		return false
+	end
+	if not squad_enabled(squad) then
+		return skip(squad, "squad_kind_disabled", nil, target_id)
+	end
+	if (axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad.id]) or get_object_story_id(squad.id) then
+		return skip(squad, "protected_squad", nil, target_id)
+	end
+	-- ZHOPA2_HOP_ONLINE_TEST (see HOP_ONLINE_SQUADS): without the flag online squads are left alone.
+	if squad.online == true and not HOP_ONLINE_SQUADS then
+		return skip(squad, "squad_online", nil, target_id)
+	end
+	local se_target = target_id and alife_object(target_id) or nil
+	if not se_target then
+		return skip(squad, "target_missing", nil, target_id)
+	end
+	local to_vertex = se_target.m_game_vertex_id
+	local current_level, target_level = level_of(from), level_of(to_vertex)
+	if target_level == nil then
+		return skip(squad, "target_vertex_unknown", to_vertex, target_id)
+	end
+	if current_level == target_level then
+		return skip(squad, "same_level", lname(target_level), target_id)
+	end
+	local remaining = level_dist[current_level] and level_dist[current_level][target_level]
+	if remaining == nil then
+		return skip(squad, "no_level_route", lname(current_level) .. "->" .. lname(target_level), target_id)
+	end
+	local best
+	for i = 1, #edges do
+		local e = edges[i]
+		local after = level_dist[e.level] and level_dist[e.level][target_level]
+		if after ~= nil and after == remaining - 1 and (best == nil or e.dist < best.dist) then
+			best = e
+		end
+	end
+	if not best then
+		return skip(squad, "edge_not_toward_target", "borders left " .. tostring(remaining), target_id)
+	end
+	local v = game_graph():vertex(best.to)
+	local ok, err = pcall(TeleportSquad, squad, v:level_point(), v:level_vertex_id(), best.to)
+	if not ok then
+		state.mismatches = state.mismatches + 1
+		dbg("! ZHOPA2 level hop error | reason [teleport_failed] squad [%s] from [%s] to [%s] detail [%s]", squad_label(squad), tostring(from), tostring(best.to), tostring(err))
+		return false
+	end
+	if squad.m_game_vertex_id ~= best.to then
+		state.mismatches = state.mismatches + 1
+		dbg("! ZHOPA2 level hop error | reason [teleport_not_applied] squad [%s] expected vertex [%s] actual [%s]", squad_label(squad), tostring(best.to), tostring(squad.m_game_vertex_id))
+		return false
+	end
+	-- teleport_object() moves the squad; forced_online_status was computed from the old position, and the switch
+	-- manager may try to bring the squad online before the next update. Recompute it so the exclusion zone around the actor applies.
+	if type(squad.check_online_status) == "function" then
+		pcall(squad.check_online_status, squad)
+	end
+	state.hops = state.hops + 1
+	squad.zhopa2_hop_sig = nil
+	if debug_enabled() then
+		-- the callback below identifies this hop through these fields; the pending entry reports it if the callback never comes
+		squad.zhopa2_hop_to = best.to
+		squad.zhopa2_hop_from = from
+		pending[squad.id] = { tg = time_global(), label = squad_label(squad), task = squad.zhopa2_task, from = from, to = best.to }
+	end
+	dbg("~ ZHOPA2 level hop | squad [%s] task [%s] online [%s] %s [%s] -> %s [%s] target [%s] target_level [%s] borders_left [%s] edge_m [%s] hops_total [%s]",
+		squad_label(squad), tag(squad.zhopa2_task), tostring(squad.online == true), lname(current_level), tostring(from), lname(best.level), tostring(best.to),
+		tostring(target_id), lname(target_level), tostring(remaining - 1), tostring(math.floor(best.dist)), tostring(state.hops))
+	return true
+end
+
+----------------------------------------------------------------------------------------------------
+-- diagnostics: compare what the engine really does with the edge table
+----------------------------------------------------------------------------------------------------
+local function edge_known(from, to)
+	local list = cross[from]
+	if list then
+		for i = 1, #list do
+			if list[i].to == to then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Vanilla fires this from sim_squad_scripted:update after specific_update, so for a hop the "old" vertex is the one
+-- the previous update saw, not the border vertex; hops are therefore identified by zhopa2_hop_to instead of the edge check.
+-- A hop is always confirmed here, managed or not. Other crossings print only for ZHOPA-managed squads, but a crossing
+-- the edge table cannot explain is an error for any squad.
+local function squad_on_after_game_vertex_change(squad, old_vertex, new_vertex, level_changed)
+	local hop_to, hop_from = squad.zhopa2_hop_to, squad.zhopa2_hop_from
+	if hop_to ~= nil then
+		squad.zhopa2_hop_to, squad.zhopa2_hop_from = nil, nil
+		pending[squad.id] = nil
+	end
+	if not debug_enabled() then
+		return
+	end
+	new_vertex = tonumber(new_vertex)
+	if not new_vertex then
+		return
+	end
+	local hopped = hop_to ~= nil and hop_to == new_vertex
+	if hop_to ~= nil and not hopped then
+		-- the callback came only after the engine had moved the squad on from the hop target
+		printf("~ ZHOPA2 level hop crossing | squad [%s] task [%s] kind [hop_late] expected [%s] actual [%s] managed [%s]",
+			squad_label(squad), tag(squad.zhopa2_task), tostring(hop_to), tostring(new_vertex), tostring(squad.zhopa2_managed == true))
+		return
+	end
+	if hopped and level_changed ~= true then
+		state.mismatches = state.mismatches + 1
+		printf("! ZHOPA2 level hop error | reason [hop_level_not_changed] squad [%s] task [%s] vertex [%s] level [%s] level_name [%s] managed [%s]",
+			squad_label(squad), tag(squad.zhopa2_task), tostring(new_vertex), lname(level_of(new_vertex)), tag(squad.level_name), tostring(squad.zhopa2_managed == true))
+		return
+	end
+	if level_changed ~= true then
+		return
+	end
+	local from_vertex = hopped and hop_from or tonumber(old_vertex)
+	if not from_vertex then
+		return
+	end
+	state.crossings = state.crossings + 1
+	if state.phase ~= "ready" then
+		return
+	end
+	local from_level, new_level = level_of(from_vertex), level_of(new_vertex)
+	local kind, steps = "hop", nil
+	if not hopped then
+		-- A squad that walked the edge: the engine crossed it between two script updates, so "old" can be a vertex before the border
+		-- and several borders can lie between the two vertices the script saw.
+		steps = level_dist[from_level] and level_dist[from_level][new_level]
+		if edge_known(from_vertex, new_vertex) then
+			kind = "walked"
+		elseif steps ~= nil and steps >= 1 and steps <= MAX_GAP_BORDERS then
+			kind = "walked_update_gap"
+		else
+			state.mismatches = state.mismatches + 1
+			printf("! ZHOPA2 level hop error | reason [crossing_levels_not_adjacent] squad [%s] %s [%s] -> %s [%s] border_steps [%s]",
+				squad_label(squad), lname(from_level), tostring(from_vertex), lname(new_level), tostring(new_vertex), tag(steps))
+			return
+		end
+	end
+	if hopped or squad.zhopa2_managed == true then
+		printf("~ ZHOPA2 level hop crossing | squad [%s] task [%s] kind [%s] %s [%s] -> %s [%s] border_steps [%s] managed [%s]",
+			squad_label(squad), tag(squad.zhopa2_task), kind, lname(from_level), tostring(from_vertex), lname(new_level), tostring(new_vertex), tag(steps), tostring(squad.zhopa2_managed == true))
+	end
+end
+
+function M.is_ready()
+	return state.phase == "ready"
+end
+
+-- Manual audit: zhopa2_level_hop.audit()
+function M.audit()
+	dbg("~ ZHOPA2 level hop audit | phase [%s] source [%s] reason [%s] vertices [%s] levels [%s] edges [%s] cross_edges [%s] level_pairs [%s] hops [%s] crossings [%s] mismatches [%s] unconfirmed [%s]",
+		tostring(state.phase), tag(state.source), tag(state.reason), tag(state.vertices), tag(state.levels), tag(state.total_edges), tag(state.cross_edges), tag(state.level_pairs), tostring(state.hops), tostring(state.crossings), tostring(state.mismatches), tostring(state.unconfirmed or 0))
+	for reason, count in pairs(state.skips) do
+		dbg("~ ZHOPA2 level hop audit | skip reason [%s] count [%s]", tostring(reason), tostring(count))
+	end
+	return state.phase == "ready"
+end
+
+----------------------------------------------------------------------------------------------------
+-- lifecycle
+----------------------------------------------------------------------------------------------------
+local function unregister_callbacks()
+	if callbacks_registered and UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "squad_on_after_game_vertex_change", squad_on_after_game_vertex_change)
+		pcall(UnregisterScriptCallback, "save_state", save_state)
+		pcall(UnregisterScriptCallback, "load_state", load_state)
+	end
+	callbacks_registered = false
+end
+
+local function reset_state()
+	release_file()
+	loader = nil
+	cross, level_dist, level_name, pending = {}, {}, {}, {}
+	state = { phase = "idle", reason = nil, hops = 0, skips = {}, crossings = 0, mismatches = 0 }
+end
+
+function M.on_game_start()
+	unregister_callbacks()
+	reset_state()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
+	if not RegisterScriptCallback then
+		return true
+	end
+	RegisterScriptCallback("squad_on_after_game_vertex_change", squad_on_after_game_vertex_change)
+	RegisterScriptCallback("save_state", save_state)
+	RegisterScriptCallback("load_state", load_state)
+	callbacks_registered = true
+	return true -- the graph load starts from the first try_hop call, also after an MCM re-enable
+end
+
+function M.on_master_disable()
+	unregister_callbacks()
+	reset_state()
+	cache_blob = nil
+	-- a save made after the master switch is turned off must not contain ZHOPA state
+	if alife_storage_manager and type(alife_storage_manager.get_state) == "function" then
+		local ok, m_data = pcall(alife_storage_manager.get_state)
+		if ok and type(m_data) == "table" then
+			m_data[STATE_KEY] = nil
+		end
+	end
+	return true
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_level_hop = M
+return M

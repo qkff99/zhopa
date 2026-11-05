@@ -51,6 +51,8 @@ local OPTION_DEFS = {
 	mutant_patrol_duration_game_hours = { type = "track", val = 2, min = 0.25, max = 6, step = 0.25, def = 1 },
 	target_sync_enabled = { type = "check", val = 1, def = true },
 	online_intent_enforce_enabled = { type = "check", val = 1, def = true },
+	instant_level_hop_enabled = { type = "check", val = 1, def = true },
+	mutant_instant_level_hop_enabled = { type = "check", val = 1, def = true },
 	story_psy_watchdog_enabled = { type = "check", val = 1, def = true },
 	story_north_migration_enabled = { type = "check", val = 1, def = true },
 	story_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 50 },
@@ -162,7 +164,7 @@ local PANELS = {
 			{ id = "balance", text = "ui_mcm_zhopa2_group_balance", options = { "geographic_balance_enabled", "geographic_balance_mode", "faction_presence_balance_enabled", "faction_lore_preferences_enabled" } },
 			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "stalker_explore_weight", "stalker_populate_weight", "stalker_patrol_weight", "stalker_hunt_weight", "stalker_artefact_weight", "stalker_trade_weight", "stalker_quest_weight" } },
 			{ id = "timing", text = "ui_mcm_zhopa2_group_timing", options = { "rest_duration_game_hours", "patrol_duration_game_hours", "rest_fallback_stay_min_sec", "rest_fallback_stay_max_sec" } },
-			{ id = "targeting", text = "ui_mcm_zhopa2_group_targeting", options = { "target_sync_enabled", "online_intent_enforce_enabled", "revenge_enabled", "revenge_actor_enabled", "revenge_actor_chance", "hunt_offline_combat_enabled", "hunt_offline_combat_interval_sec", "hunt_offline_combat_distance" } },
+			{ id = "targeting", text = "ui_mcm_zhopa2_group_targeting", options = { "target_sync_enabled", "online_intent_enforce_enabled", "instant_level_hop_enabled", "revenge_enabled", "revenge_actor_enabled", "revenge_actor_chance", "hunt_offline_combat_enabled", "hunt_offline_combat_interval_sec", "hunt_offline_combat_distance" } },
 		},
 	},
 	{
@@ -170,6 +172,7 @@ local PANELS = {
 		text = "ui_mcm_zhopa2_panel_mutants",
 		["groups"] = {
 			{ id = "movement", text = "ui_mcm_zhopa2_group_mutants_movement", options = { "mutant_explore_enabled", "mutant_hunt_enabled", "mutant_patrol_enabled" } },
+			{ id = "travel", text = "ui_mcm_zhopa2_group_mutants_travel", options = { "mutant_instant_level_hop_enabled" } },
 			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "mutant_hunt_weight", "mutant_patrol_weight", "mutant_explore_weight" } },
 			{ id = "timing", text = "ui_mcm_zhopa2_group_mutants_timing", options = { "mutant_rest_duration_game_hours", "mutant_patrol_duration_game_hours" } },
 		},

@@ -15,6 +15,7 @@
 	<string id="ui_mcm_zhopa2_group_targeting"><text>Combat and target handling</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Available mutant tasks</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Mutant task timing</text></string>
+	<string id="ui_mcm_zhopa2_group_mutants_travel"><text>Mutant travel</text></string>
 	<string id="ui_mcm_zhopa2_general_update_notice"><text>After updating ZHOPA, use MCM's Reset to defaults before changing options so the latest recommended defaults take effect.</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled"><text>Run ZHOPA ALIFE 2</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Master runtime switch. Turning it off immediately cancels ZHOPA tasks, removes its generated service squads, clears its runtime and save data, and stops its callbacks and patches. Save the game after disabling before uninstalling the addon. Changes already made to the world cannot be reversed.</text></string>
@@ -105,6 +106,8 @@
 	<string id="ui_mcm_zhopa2_tasks_target_sync_enabled_desc"><text>Keeps the squad's current, assigned, and scripted target fields aligned so smart terrain logic, debug HUD, and task logic agree on the destination.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_online_intent_enforce_enabled"><text>Prevent online smart job stealing</text></string>
 	<string id="ui_mcm_zhopa2_tasks_online_intent_enforce_enabled_desc"><text>Stops online smart terrain jobs from pulling NPCs away from the squad's active ZHOPA task when vanilla logic tries to reassign them.</text></string>
+	<string id="ui_mcm_zhopa2_tasks_instant_level_hop_enabled"><text>Instant level crossing</text></string>
+	<string id="ui_mcm_zhopa2_tasks_instant_level_hop_enabled_desc"><text>A ZHOPA stalker squad that reaches a level border crosses it at once instead of walking the long A-Life edge between levels. Walking inside levels, tasks and timers are unchanged. Mutant squads have their own switch on the Mutant simulation page.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_revenge_enabled"><text>Enable squad revenge</text></string>
 	<string id="ui_mcm_zhopa2_tasks_revenge_enabled_desc"><text>Allows squads to remember recent attackers and create revenge tasks against the squad that attacked them.</text></string>
 	<string id="ui_mcm_zhopa2_tasks_revenge_actor_enabled"><text>Allow revenge against the actor</text></string>
@@ -133,6 +136,8 @@
 	<string id="ui_mcm_zhopa2_mutants_mutant_rest_duration_game_hours_desc"><text>How many in-game hours a mutant squad spends resting before it can select another task.</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours"><text>Mutant patrol duration</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours_desc"><text>How many in-game hours a mutant squad keeps patrolling before it can roll a new task.</text></string>
+	<string id="ui_mcm_zhopa2_mutants_mutant_instant_level_hop_enabled"><text>Instant level crossing</text></string>
+	<string id="ui_mcm_zhopa2_mutants_mutant_instant_level_hop_enabled_desc"><text>A ZHOPA mutant squad that reaches a level border crosses it at once instead of walking the long A-Life edge between levels. Walking inside levels, tasks and timers are unchanged. Requires Manage mutant squads.</text></string>
 
 	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled"><text>Travel with ZHOPA squads</text></string>
 	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled_desc"><text>Adds activity dialogue to managed squad commanders and lets the actor travel with a moving squad to its current destination.</text></string>
