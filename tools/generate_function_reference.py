@@ -63,6 +63,7 @@ SCRIPT_ROLES = {
     "zhopa2_tasks.script": "task constants, task FSM, assignment, completion, fallback rules, and server-side revenge relations",
     "zhopa2_topology.script": "level-changer topology rebuilt through ALife iteration, neighbor levels, and route helpers",
     "zhopa2_level_hop.script": "instant level-border crossing: cross-level edges read from the all.spawn game graph, border hop through TeleportSquad, and Debug HUD diagnostics of every hop and crossing",
+    "zhopa2_lair_quota.script": "mutant lair respawn quota release: holders registered on squad_on_first_update, squads on another level or empty released from the vanilla on_try_respawn callback, and Debug HUD diagnostics of every release",
 }
 
 

@@ -64,6 +64,7 @@ Runtime modules:
 - `zhopa2_index`
 - `zhopa2_topology`
 - `zhopa2_level_hop`
+- `zhopa2_lair_quota`
 - `zhopa2_task_scoring`
 - `zhopa2_loot`
 - `zhopa2_native_loot`
@@ -289,6 +290,19 @@ Skips only the level-border edge of a squad's route. Vanilla walks an offline sq
 - Stalker and mutant squads follow `stalker_movement_enabled` and `mutant_movement_enabled`. Companions and story squads are excluded. `instant_level_hop_enabled` (Stalker simulation page) and `mutant_instant_level_hop_enabled` (Mutant simulation page), both on by default, switch the feature per squad kind; a switched-off option is silent, while a disabled simulation is reported as `squad_kind_disabled`.
 
 Diagnostics follow Debug HUD: the graph summary, every hop, the skip reasons that need attention (`same_level` and `edge_not_toward_target` are normal at a border vertex and are only counted for `audit()`), and every observed level crossing of a managed squad, labelled `hop`, `hop_late`, `walked` or `walked_update_gap` with the number of borders crossed between two script updates (up to 3 is normal). Every hop is accounted for: it gets its crossing line from the vanilla level-change callback whether or not the squad is still managed; `hop_level_not_changed` means vanilla saw the vertex change but no level change; `hop_unconfirmed` is printed after 2 minutes without the callback, with the squad's current state (existence, vertex, level, online, managed, `last_gvid`, `level_name`). `crossing_levels_not_adjacent`, `vertex_count_mismatch`, `graph_sample_mismatch`, `edge_layout_not_sequential` and the other error reasons mean the table or the file disagrees with the game and must be investigated. `zhopa2_level_hop.audit()` prints the totals, including unconfirmed hops.
+
+### 4.5.2 `zhopa2_lair_quota`
+
+Keeps a lair from staying empty because its mutant squad roams on another level. Vanilla `smart_terrain:try_respawn` refills a lair only while `already_spawned[prop].num` is below the allowed count, and that counter goes down only when the squad spawned there is unregistered (`sim_squad_scripted:on_unregister`), wherever it is. ZHOPA sends mutants to other levels, so the counter can stay full while the lair is empty.
+
+- Squads that hold a lair quota carry `respawn_point_id` and `respawn_point_prop_section`, set by `try_respawn` right after the squad is created and saved by vanilla. The start population and night mutants carry neither and are never touched.
+- The holders of a lair are not found by scanning the board. Each mutant squad with `respawn_point_id` registers itself once, on the vanilla `squad_on_first_update` callback, in a runtime table `holders[lair][squad]`. The table is not saved: after a load a squad becomes releasable at its first update. After an MCM re-enable in a running game the table is seeded once from the board.
+- The decision is made in the vanilla `on_try_respawn` callback, which fires on every update of every smart with respawn parameters. For a lair without holders this is one table lookup; a lair that holds squads is looked at at most once per 10 s.
+- A holder is released when it has no members left or stands on another level than the lair: the counter goes down by one (never below zero, it is saved as u8) and `respawn_point_id` / `respawn_point_prop_section` are cleared so `on_unregister` cannot subtract the quota a second time. The squad itself stays alive and unmanaged by this module. Vanilla (and SMR from the ZCP mod, when installed) then respawns a replacement by its own rules and pace; nothing is spawned or removed here.
+- There is no limit on how many released squads roam at once; growth is limited by the respawn pace and is visible in `audit()`.
+- `mutant_lair_quota_release_enabled` (Mutant simulation page, on by default) switches the feature; the code is marked `ZHOPA2_QUOTA_RELEASE` for a rollback.
+
+Diagnostics follow Debug HUD: one line per release (squad, task, lair, prop, reason `away` or `empty`, both levels, counter before and after, running total), `no_counter` when the lair has no counter for the squad's prop, and `callback_error` if the check failed. `zhopa2_lair_quota.audit()` prints the tracked lairs and squads, the release total, the skip counts and the error count.
 
 ### 4.6 `zhopa2_debug_hud`
 

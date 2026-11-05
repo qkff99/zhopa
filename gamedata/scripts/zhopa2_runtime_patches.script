@@ -16,6 +16,7 @@ local ZHOPA2_RUNTIME_MODULES = {
 	"zhopa2_index",
 	"zhopa2_topology",
 	"zhopa2_level_hop",
+	"zhopa2_lair_quota",
 	"zhopa2_task_scoring",
 	"zhopa2_loot",
 	"zhopa2_native_loot",

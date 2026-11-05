@@ -16,6 +16,7 @@
 	<string id="ui_mcm_zhopa2_group_mutants_movement"><text>Доступные задачи мутантов</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_timing"><text>Длительность задач мутантов</text></string>
 	<string id="ui_mcm_zhopa2_group_mutants_travel"><text>Перемещение мутантов</text></string>
+	<string id="ui_mcm_zhopa2_group_mutants_lairs"><text>Логова мутантов</text></string>
 	<string id="ui_mcm_zhopa2_general_update_notice"><text>После обновления ZHOPA перед изменением настроек используйте в MCM кнопку «Сбросить по умолчанию», чтобы применились новые рекомендуемые значения.</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled"><text>Работа ZHOPA ALIFE 2</text></string>
 	<string id="ui_mcm_zhopa2_general_enabled_desc"><text>Главный переключатель мода. При отключении ZHOPA немедленно отменяет свои задачи, удаляет созданные сервисные отряды, очищает данные рантайма и сохранения, снимает свои коллбэки и патчи. Перед удалением мода обязательно создайте новое сохранение после отключения. Уже произошедшие изменения мира не откатываются.</text></string>
@@ -138,6 +139,8 @@
 	<string id="ui_mcm_zhopa2_mutants_mutant_patrol_duration_game_hours_desc"><text>Сколько игровых часов отряд мутантов продолжает патруль, прежде чем снова выбрать задачу.</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_instant_level_hop_enabled"><text>Мгновенный переход между локациями</text></string>
 	<string id="ui_mcm_zhopa2_mutants_mutant_instant_level_hop_enabled_desc"><text>Отряды мутантов ZHOPA, дошедшие до границы уровня, переходят на другую сторону сразу, не проходя длинное межуровневое ребро A-Life. Ходьба внутри уровней, задачи и таймеры остаются прежними. Нужно включённое управление отрядами мутантов.</text></string>
+	<string id="ui_mcm_zhopa2_mutants_mutant_lair_quota_release_enabled"><text>Освобождать квоту логова</text></string>
+	<string id="ui_mcm_zhopa2_mutants_mutant_lair_quota_release_enabled_desc"><text>Отряд мутантов, рождённый логовом, но стоящий на другом уровне, больше не мешает логову респавниться: квота логова освобождается, а замену создаёт ваниль в обычном темпе. Ушедший отряд остаётся жить. Проверяется, когда логово собирается респавниться.</text></string>
 
 	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled"><text>Путешествия с отрядами ZHOPA</text></string>
 	<string id="ui_mcm_zhopa2_general_squad_dialogue_enabled_desc"><text>Добавляет командирам управляемых отрядов диалог об их занятиях и позволяет отправиться вместе с движущимся отрядом к его текущей цели.</text></string>

@@ -21,6 +21,7 @@ local MODULE_STOP_ORDER = {
 	"zhopa2_bases",
 	"zhopa2_topology",
 	"zhopa2_level_hop",
+	"zhopa2_lair_quota",
 	"zhopa2_debug_hud",
 	"zhopa2_runtime_patches",
 }

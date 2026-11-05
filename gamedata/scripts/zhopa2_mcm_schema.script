@@ -53,6 +53,7 @@ local OPTION_DEFS = {
 	online_intent_enforce_enabled = { type = "check", val = 1, def = true },
 	instant_level_hop_enabled = { type = "check", val = 1, def = true },
 	mutant_instant_level_hop_enabled = { type = "check", val = 1, def = true },
+	mutant_lair_quota_release_enabled = { type = "check", val = 1, def = true },
 	story_psy_watchdog_enabled = { type = "check", val = 1, def = true },
 	story_north_migration_enabled = { type = "check", val = 1, def = true },
 	story_north_migration_percent = { type = "track", val = 2, min = 0, max = 100, step = 1, def = 50 },
@@ -173,6 +174,7 @@ local PANELS = {
 		["groups"] = {
 			{ id = "movement", text = "ui_mcm_zhopa2_group_mutants_movement", options = { "mutant_explore_enabled", "mutant_hunt_enabled", "mutant_patrol_enabled" } },
 			{ id = "travel", text = "ui_mcm_zhopa2_group_mutants_travel", options = { "mutant_instant_level_hop_enabled" } },
+			{ id = "lairs", text = "ui_mcm_zhopa2_group_mutants_lairs", options = { "mutant_lair_quota_release_enabled" } },
 			{ id = "weights", text = "ui_mcm_zhopa2_group_weights", options = { "mutant_hunt_weight", "mutant_patrol_weight", "mutant_explore_weight" } },
 			{ id = "timing", text = "ui_mcm_zhopa2_group_mutants_timing", options = { "mutant_rest_duration_game_hours", "mutant_patrol_duration_game_hours" } },
 		},

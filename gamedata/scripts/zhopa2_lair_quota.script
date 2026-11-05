@@ -1,0 +1,274 @@
+-- Lair quota release for mutant squads that no longer live where their lair is.
+--
+-- Vanilla refills a lair (smart_terrain:try_respawn) only while smart.already_spawned[prop].num is below the allowed count.
+-- The counter goes down only when the squad that was spawned there is unregistered (sim_squad_scripted:on_unregister),
+-- wherever that squad is. ZHOPA sends mutants to other levels, so a lair can stay empty for good while its squad roams elsewhere.
+--
+-- When a lair is about to respawn (on_try_respawn), every squad that holds its quota is checked: if the squad is empty or stands on
+-- another level than the lair, its hold is released (counter down by one, respawn_point_* cleared so on_unregister cannot subtract again).
+-- Vanilla then spawns the replacement by its own rules and pace; nothing is spawned or removed here.
+--
+-- The holders of a lair are not found by scanning the board: each squad registers itself once, on squad_on_first_update
+-- (respawn_point_id is set right after try_respawn creates the squad, and loaded from the save before the first update).
+-- The table is runtime only; after a load a squad becomes releasable at its first update, never before.
+-- Only squads that carry respawn_point_id are touched: the start population and night mutants do not hold a quota.
+local M = {}
+
+local SWITCH_KEY = "mutant_lair_quota_release_enabled"
+local CHECK_INTERVAL_MS = 10000 -- a lair is re-checked at most this often; a squad that left less than this ago is seen at the next check
+
+local holders = {} -- holders[lair id][squad id] = true
+local next_check = {} -- next_check[lair id] = time_global() before which the lair is not looked at again
+local state = { released = 0, skips = {}, errors = 0 }
+local callbacks_registered = false
+
+local function safe_require(name)
+	local mod = rawget(_G, name)
+	if mod then
+		return mod
+	end
+	if require then
+		pcall(require, name)
+	end
+	return rawget(_G, name)
+end
+
+local function cfg_bool(key, default)
+	local cfg = safe_require("zhopa2_cfg")
+	if cfg and type(cfg.get_bool) == "function" then
+		local ok, value = pcall(cfg.get_bool, key, default)
+		if ok then
+			return value == true
+		end
+	end
+	return default == true
+end
+
+local function debug_enabled()
+	return cfg_bool("debug_hud_enabled", false) and type(printf) == "function"
+end
+
+local function dbg(fmt, ...)
+	if debug_enabled() then
+		printf(fmt, ...)
+	end
+end
+
+local function tag(value)
+	if value == nil then
+		return "-"
+	end
+	return tostring(value)
+end
+
+local function label(obj)
+	local ok, name = pcall(function()
+		return obj:name()
+	end)
+	return tostring(ok and name or "?") .. ":" .. tostring(obj and obj.id or "-")
+end
+
+local function skip(reason)
+	state.skips[reason] = (state.skips[reason] or 0) + 1
+end
+
+local function is_mutant(squad)
+	local p = safe_require("zhopa2_perception")
+	if p and type(p.is_monster_squad) == "function" then
+		local ok, result = pcall(p.is_monster_squad, squad)
+		if ok then
+			return result == true
+		end
+	end
+	return is_squad_monster ~= nil and is_squad_monster[squad.player_id] == true
+end
+
+-- Level of a game vertex straight from the loaded graph (nil for an invalid vertex).
+local function level_of(vertex)
+	if type(vertex) ~= "number" then
+		return nil
+	end
+	local gg = game_graph()
+	if not gg:valid_vertex_id(vertex) then
+		return nil
+	end
+	return gg:vertex(vertex):level_id()
+end
+
+local function level_name(level_id)
+	if level_id == nil then
+		return "?"
+	end
+	local ok, name = pcall(function()
+		return alife():level_name(level_id)
+	end)
+	return tostring(ok and name or level_id)
+end
+
+-- squad_on_first_update: remember who holds which lair's quota.
+local function squad_on_first_update(squad)
+	local lair = tonumber(squad.respawn_point_id)
+	if not lair or not is_mutant(squad) then
+		return
+	end
+	local list = holders[lair]
+	if not list then
+		list = {}
+		holders[lair] = list
+	end
+	list[squad.id] = true
+end
+
+-- ZHOPA2_QUOTA_RELEASE: edits vanilla respawn bookkeeping. To roll the feature back, switch it off in MCM
+-- (mutant_lair_quota_release_enabled) or remove the callback registrations in M.on_game_start.
+local function release(squad, smart, reason)
+	local prop = squad.respawn_point_prop_section
+	local counters = smart.already_spawned
+	local entry = type(counters) == "table" and type(prop) == "string" and counters[prop] or nil
+	local before = type(entry) == "table" and tonumber(entry.num) or nil
+	-- the squad stops holding the quota in every case, so on_unregister cannot subtract it a second time
+	squad.respawn_point_id, squad.respawn_point_prop_section = nil, nil
+	if before == nil then
+		skip("no_counter")
+		if debug_enabled() then
+			printf("! ZHOPA2 lair quota error | reason [no_counter] squad [%s] lair [%s] prop [%s]", label(squad), label(smart), tag(prop))
+		end
+		return
+	end
+	-- the counter is saved as u8: it must never go below zero
+	entry.num = math.max(0, before - 1)
+	state.released = state.released + 1
+	if debug_enabled() then
+		printf("~ ZHOPA2 lair quota | released squad [%s] task [%s] managed [%s] lair [%s] prop [%s] reason [%s] squad_level [%s] lair_level [%s] num [%s] -> [%s] released_total [%s]",
+			label(squad), tag(squad.zhopa2_task), tostring(squad.zhopa2_managed == true), label(smart), tag(prop), reason,
+			level_name(level_of(squad.m_game_vertex_id)), level_name(level_of(smart.m_game_vertex_id)), tostring(before), tostring(entry.num), tostring(state.released))
+	end
+end
+
+local function check_lair(smart, list)
+	local lair_level
+	for id in pairs(list) do
+		local squad = alife_object(id)
+		if squad == nil or tonumber(squad.respawn_point_id) ~= smart.id then
+			-- gone (vanilla settled the counter) or no longer holds this lair
+			list[id] = nil
+		else
+			local reason
+			if squad:npc_count() <= 0 then
+				reason = "empty"
+			else
+				lair_level = lair_level or level_of(smart.m_game_vertex_id)
+				local squad_level = level_of(squad.m_game_vertex_id)
+				if lair_level == nil or squad_level == nil then
+					skip("unknown_level")
+				elseif squad_level ~= lair_level then
+					reason = "away"
+				end
+			end
+			if reason and cfg_bool(SWITCH_KEY, true) then
+				release(squad, smart, reason)
+				list[id] = nil
+			end
+		end
+	end
+	if next(list) == nil then
+		holders[smart.id] = nil
+		next_check[smart.id] = nil
+	end
+end
+
+-- on_try_respawn fires on every update of every smart with respawn_params: the common cases cost a table lookup,
+-- and a lair that holds squads is looked at once per CHECK_INTERVAL_MS.
+local function on_try_respawn(smart, flags)
+	local list = holders[smart.id]
+	if list == nil or rawget(_G, "zhopa2_runtime_disabled") == true then
+		return
+	end
+	local now = time_global()
+	if now < (next_check[smart.id] or 0) then
+		return
+	end
+	next_check[smart.id] = now + CHECK_INTERVAL_MS
+	local ok, err = pcall(check_lair, smart, list)
+	if not ok then
+		state.errors = state.errors + 1
+		dbg("! ZHOPA2 lair quota error | reason [callback_error] lair [%s] detail [%s]", label(smart), tostring(err))
+	end
+end
+
+-- After an MCM re-enable the squads are past their first update: seed the table once from the board.
+local function seed_holders()
+	local board = rawget(_G, "SIMBOARD")
+	if not (board and type(board.squads) == "table") then
+		return
+	end
+	for id in pairs(board.squads) do
+		local squad = alife_object(id)
+		if squad then
+			squad_on_first_update(squad)
+		end
+	end
+end
+
+-- Manual audit: zhopa2_lair_quota.audit()
+function M.audit()
+	local lairs, squads = 0, 0
+	for _, list in pairs(holders) do
+		lairs = lairs + 1
+		for _ in pairs(list) do
+			squads = squads + 1
+		end
+	end
+	dbg("~ ZHOPA2 lair quota audit | lairs tracked [%s] squads tracked [%s] released [%s] errors [%s]", tostring(lairs), tostring(squads), tostring(state.released), tostring(state.errors))
+	for reason, count in pairs(state.skips) do
+		dbg("~ ZHOPA2 lair quota audit | skip reason [%s] count [%s]", tostring(reason), tostring(count))
+	end
+	return state.errors == 0
+end
+
+----------------------------------------------------------------------------------------------------
+-- lifecycle
+----------------------------------------------------------------------------------------------------
+local function unregister_callbacks()
+	if callbacks_registered and UnregisterScriptCallback then
+		pcall(UnregisterScriptCallback, "squad_on_first_update", squad_on_first_update)
+		pcall(UnregisterScriptCallback, "on_try_respawn", on_try_respawn)
+	end
+	callbacks_registered = false
+end
+
+local function reset_state()
+	holders, next_check = {}, {}
+	state = { released = 0, skips = {}, errors = 0 }
+end
+
+function M.on_game_start()
+	unregister_callbacks()
+	reset_state()
+	if rawget(_G, "zhopa2_runtime_disabled") == true then
+		return M.on_master_disable()
+	end
+	if not RegisterScriptCallback then
+		return true
+	end
+	RegisterScriptCallback("squad_on_first_update", squad_on_first_update)
+	RegisterScriptCallback("on_try_respawn", on_try_respawn)
+	callbacks_registered = true
+	if db and db.actor then
+		seed_holders()
+	end
+	return true
+end
+
+function M.on_master_disable()
+	unregister_callbacks()
+	reset_state()
+	return true
+end
+
+function on_game_start()
+	return M.on_game_start()
+end
+
+_G.zhopa2_lair_quota = M
+return M
