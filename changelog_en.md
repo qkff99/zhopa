@@ -8,6 +8,7 @@
 - Zombies and mutants can participate in invitations and one finite support wave; stalkers keep attempting to reclaim their bases. Added LTX/MCM controls, Russian and English localization, and invitation diagnostics.
 
 ### Fixes
+- Fixed crash in GAMMA 0.9.4 cos of Service refill, Guard refill and Itheon Taskboard.
 - Added compatibility with Anthology's `fix_sim_mechanic_trade`: ZHOPA keeps an independent snapshot of its trade wrapper, preventing a later foreign patch reinstall from making `trade_init` recursive. Service profiles, restocking and mechanic map markers are preserved; the Anthology file is unchanged. Fixed repeated checks of ZHOPA's own wrapper chain.
 - Fixed quest-document theft conflicting with autoloot and fast transfer: failing an NPC quest no longer destroys a live backpack in use. A passive queue removes only offline objects after their client objects disappear, surviving saves and ZHOPA disable. Documents held by the player, picked-up backpacks and unrelated stash contents are preserved. Online NPC pickup transfers the original document without deleting and recreating it.
 - Removed invitation access to destroyed squads that could cause a native `pure virtual function call`: the shared index no longer returns stale bucket references, its per-frame cache stores IDs, and candidates are checked against current ALife objects again. Missing squad entries and obsolete failure records are cleaned up.

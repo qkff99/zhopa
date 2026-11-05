@@ -14,6 +14,12 @@ local function service_squad(npc)
         or not (npc and db and db.actor and get_object_squad) then
         return nil
     end
+    -- The PDA taskboard passes every nearby NPC; a native squad lookup on one with a stale group_id crashes.
+    local recruitment = rawget(_G, "zhopa2_service_recruitment")
+    if not (recruitment and type(recruitment.is_service_npc) == "function"
+        and recruitment.is_service_npc(npc)) then
+        return nil
+    end
     local ok, squad = pcall(get_object_squad, npc)
     if not (ok and squad) then return nil end
     if squad.zhopa2_service_filler == true then return squad end

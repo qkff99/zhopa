@@ -259,6 +259,10 @@ function M.service_task_section(npc)
         or (r.role == "tech" and mechanic_profile(r) or nil)
 end
 
+function M.is_service_npc(npc)
+    return role_npc(npc)
+end
+
 function M.open_upgrade(a, b)
     if not (db and db.actor) then return false end
     if not M.is_role(a, b, "tech") then return false end
@@ -536,6 +540,21 @@ local function peaceful_factions(a, b)
     return not enemy_a and not enemy_b, "hostile_faction"
 end
 
+-- tasks_guide keeps its announced and accepted guide squad ids in file locals; moving that squad's NPC would leave them stale.
+local function is_guide_squad(id)
+    local guide = rawget(_G, "tasks_guide")
+    local prec = guide and guide.prec_1
+    if not (id and type(prec) == "function" and debug and debug.getupvalue) then return false end
+    for i = 1, 20 do
+        local name, value = debug.getupvalue(prec, i)
+        if not name then break end
+        if (name == "guid" or name == "curr_guid") and type(value) == "table" and value.squad_id == id then
+            return true
+        end
+    end
+    return false
+end
+
 local function donor_block_reason(group, owner, services)
     if not group then return "missing" end
     if type(group.npc_count) ~= "function" then return "not_squad" end
@@ -556,6 +575,7 @@ local function donor_block_reason(group, owner, services)
         or group.zhopa2_task == "HUNT" or group.zhopa2_task == "REVENGE" then return "active_special_task" end
     if axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[group.id] then return "companion_squad" end
     if get_object_story_id(group.id) then return "story_squad" end
+    if is_guide_squad(group.id) then return "guide_squad" end
     if zhopa2_perception.quest_protected_squad(group) then return "quest_or_story_protected" end
     if group.player_id == "actor" then return "actor_squad" end
     if group.random_targets or group.action_condlist then return "scripted_squad" end
